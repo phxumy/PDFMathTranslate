@@ -24,6 +24,7 @@ from pdf2zh.translator import (
     AzureTranslator,
     BaseTranslator,
     BingTranslator,
+    CodexTranslator,
     DeepLTranslator,
     DeepLXTranslator,
     DifyTranslator,
@@ -72,6 +73,7 @@ service_map: dict[str, BaseTranslator] = {
     "Groq": GroqTranslator,
     "DeepSeek": DeepseekTranslator,
     "OpenAI-liked": OpenAIlikedTranslator,
+    "Codex": CodexTranslator,
     "Ali Qwen-Translation": QwenMtTranslator,
 }
 
@@ -309,6 +311,12 @@ def translate_file(
         threads = int(threads)
     except ValueError:
         threads = 1
+    if translator.name == "codex" and threads != 1:
+        gr.Info(
+            "Codex currently runs with effective concurrency fixed to 1. "
+            "The requested thread count will be ignored."
+        )
+        threads = 1
 
     param = {
         "files": [str(file_raw)],
@@ -381,6 +389,7 @@ def babeldoc_translate_file(**kwargs):
         GroqTranslator,
         DeepseekTranslator,
         OpenAIlikedTranslator,
+        CodexTranslator,
         QwenMtTranslator,
     ]:
         if kwargs["service"] == translator.name:
@@ -414,7 +423,9 @@ def babeldoc_translate_file(**kwargs):
             no_mono=False,
             qps=kwargs["thread"],
             use_rich_pbar=False,
-            disable_rich_text_translate=not isinstance(translator, OpenAITranslator),
+            disable_rich_text_translate=not isinstance(
+                translator, (OpenAITranslator, CodexTranslator)
+            ),
             skip_clean=kwargs["skip_subset_fonts"],
             report_interval=0.5,
         )

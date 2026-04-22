@@ -364,6 +364,7 @@ def yadt_main(parsed_args) -> int:
         AzureOpenAITranslator,
         GoogleTranslator,
         BingTranslator,
+        CodexTranslator,
         DeepLTranslator,
         DeepLXTranslator,
         OllamaTranslator,
@@ -407,6 +408,7 @@ def yadt_main(parsed_args) -> int:
         GroqTranslator,
         DeepseekTranslator,
         OpenAIlikedTranslator,
+        CodexTranslator,
         QwenMtTranslator,
     ]:
         if service_name == translator.name:
