@@ -116,6 +116,9 @@ if ConfigManager.get("PDF2ZH_DEMO"):
     server_key = ConfigManager.get("PDF2ZH_SERVER_KEY")
 
 
+MAX_ENV_FIELDS = max(len(translator.envs) for translator in service_map.values())
+
+
 # Limit Enabled Services
 enabled_services: T.Optional[T.List[str]] = ConfigManager.get("ENABLED_SERVICES")
 if isinstance(enabled_services, list):
@@ -570,7 +573,7 @@ with gr.Blocks(
                 value=enabled_services[0],
             )
             envs = []
-            for i in range(3):
+            for _ in range(MAX_ENV_FIELDS):
                 envs.append(
                     gr.Textbox(
                         visible=False,
@@ -622,12 +625,11 @@ with gr.Blocks(
                 use_babeldoc = gr.Checkbox(
                     label="Use BabelDOC", interactive=True, value=False
                 )
-                envs.append(prompt)
 
             def on_select_service(service, evt: gr.EventData):
                 translator = service_map[service]
                 _envs = []
-                for i in range(4):
+                for _ in range(MAX_ENV_FIELDS):
                     _envs.append(gr.update(visible=False, value=""))
                 for i, env in enumerate(translator.envs.items()):
                     label = env[0]
@@ -638,6 +640,7 @@ with gr.Blocks(
                     if hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
+                            and "REASONING_EFFORT" not in str(label).upper()
                             and value
                             and hidden_gradio_details
                         ):
@@ -650,8 +653,10 @@ with gr.Blocks(
                         label=label,
                         value=value,
                     )
-                _envs[-1] = gr.update(visible=translator.CustomPrompt)
-                return _envs
+                return [
+                    *_envs,
+                    gr.update(visible=translator.CustomPrompt),
+                ]
 
             def on_select_filetype(file_type):
                 return (
@@ -690,7 +695,7 @@ with gr.Blocks(
             service.select(
                 on_select_service,
                 service,
-                envs,
+                [*envs, prompt],
             )
             vfont.change(on_vfont_change, inputs=vfont, outputs=None)
             file_type.select(

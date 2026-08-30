@@ -108,6 +108,11 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             elif k == "XObject":
                 for xobjid, xobjstrm in dict_value(v).items():
                     self.xobjmap[xobjid] = xobjstrm
+        # Figures are finalized while page contents are still being interpreted.
+        # Publish the current page's resource maps immediately so both immediate
+        # figure rendering and deferred page rendering use the correct fonts.
+        self.device.fontid = self.fontid
+        self.device.fontmap = self.fontmap
 
     def do_S(self) -> None:
         # 重载过滤非公式线条
@@ -269,11 +274,19 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         ops_base = self.render_contents(page.resources, page.contents, ctm=ctm)
         self.device.fontid = self.fontid
         self.device.fontmap = self.fontmap
-        ops_new = self.device.end_page(page)
+        ops_result = self.device.end_page(page)
+        deferred_ops = ops_result if isinstance(ops_result, dict) else {}
+        ops_new = "" if isinstance(ops_result, dict) else ops_result
         # 上面渲染的时候会根据 cropbox 减掉页面偏移得到真实坐标，这里输出的时候需要用 cm 把页面偏移加回来
         self.obj_patch[page.page_xref] = (
             f"q {ops_base}Q 1 0 0 1 {x0} {y0} cm {ops_new}"  # ops_base 里可能有图，需要让 ops_new 里的文字覆盖在上面，使用 q/Q 重置位置矩阵
         )
+        for page_xref, translated_ops in deferred_ops.items():
+            if page_xref not in self.obj_patch:
+                raise ValueError(
+                    f"deferred translation refers to unknown page xref {page_xref}"
+                )
+            self.obj_patch[page_xref] += translated_ops
         for obj in page.contents:
             self.obj_patch[obj.objid] = ""
 

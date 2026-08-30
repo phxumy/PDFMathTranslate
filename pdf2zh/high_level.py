@@ -67,6 +67,59 @@ def check_files(files: List[str]) -> List[str]:
     return missing_files
 
 
+def _paint_layout_region(
+    layout_box: np.ndarray,
+    confidence_map: np.ndarray,
+    bounds: tuple[int, int, int, int],
+    value: float,
+    confidence: float,
+    *,
+    force: bool = False,
+) -> None:
+    """Paint one detected region while retaining stronger overlapping labels."""
+    x0, y0, x1, y1 = bounds
+    box_region = layout_box[y0:y1, x0:x1]
+    confidence_region = confidence_map[y0:y1, x0:x1]
+    if not box_region.size:
+        return
+    if force:
+        box_region[...] = value
+        confidence_region[...] = confidence
+        return
+    stronger = confidence > confidence_region
+    box_region[stronger] = value
+    confidence_region[stronger] = confidence
+
+
+def _box_iou(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> float:
+    left_x0, left_y0, left_x1, left_y1 = left
+    right_x0, right_y0, right_x1, right_y1 = right
+    intersection_width = max(0, min(left_x1, right_x1) - max(left_x0, right_x0))
+    intersection_height = max(0, min(left_y1, right_y1) - max(left_y0, right_y0))
+    intersection = intersection_width * intersection_height
+    left_area = max(0, left_x1 - left_x0) * max(0, left_y1 - left_y0)
+    right_area = max(0, right_x1 - right_x0) * max(0, right_y1 - right_y0)
+    union = left_area + right_area - intersection
+    return intersection / union if union else 0.0
+
+
+def _abandon_matches_stronger_text_region(
+    bounds: tuple[int, int, int, int],
+    confidence: float,
+    text_regions: list[tuple[tuple[int, int, int, int], float]],
+    minimum_iou: float = 0.9,
+) -> bool:
+    """Return true only for a near-duplicate, stronger text detection."""
+    return any(
+        text_confidence > confidence
+        and _box_iou(bounds, text_bounds) >= minimum_iou
+        for text_bounds, text_confidence in text_regions
+    )
+
+
 def translate_patch(
     inf: BinaryIO,
     pages: Optional[list[int]] = None,
@@ -89,6 +142,7 @@ def translate_patch(
 ) -> None:
     rsrcmgr = PDFResourceManager()
     layout = {}
+    layout_region_types: dict[int, dict[int, str]] = {}
     device = TranslateConverter(
         rsrcmgr,
         vfont,
@@ -104,6 +158,7 @@ def translate_patch(
         prompt,
         ignore_cache,
     )
+    device.layout_region_types = layout_region_types
 
     assert device is not None
     obj_patch = {}
@@ -130,10 +185,20 @@ def translate_patch(
                 pix.height, pix.width, 3
             )[:, :, ::-1]
             page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
+            layout_region_types[page.pageno] = {
+                index + 2: page_layout.names[int(detection.cls)]
+                for index, detection in enumerate(page_layout.boxes)
+            }
             # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
             box = np.ones((pix.height, pix.width))
+            confidence_map = np.full(
+                box.shape, -np.inf, dtype=np.float32
+            )
             h, w = box.shape
             vcls = ["abandon", "figure", "table", "isolate_formula", "formula_caption"]
+            text_regions: list[
+                tuple[tuple[int, int, int, int], float]
+            ] = []
             for i, d in enumerate(page_layout.boxes):
                 if page_layout.names[int(d.cls)] not in vcls:
                     x0, y0, x1, y1 = d.xyxy.squeeze()
@@ -143,9 +208,19 @@ def translate_patch(
                         np.clip(int(x1 + 1), 0, w - 1),
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
-                    box[y0:y1, x0:x1] = i + 2
+                    bounds = (int(x0), int(y0), int(x1), int(y1))
+                    confidence = float(d.conf.squeeze())
+                    text_regions.append((bounds, confidence))
+                    _paint_layout_region(
+                        box,
+                        confidence_map,
+                        bounds,
+                        i + 2,
+                        confidence,
+                    )
             for i, d in enumerate(page_layout.boxes):
-                if page_layout.names[int(d.cls)] in vcls:
+                class_name = page_layout.names[int(d.cls)]
+                if class_name in vcls:
                     x0, y0, x1, y1 = d.xyxy.squeeze()
                     x0, y0, x1, y1 = (
                         np.clip(int(x0 - 1), 0, w - 1),
@@ -153,7 +228,24 @@ def translate_patch(
                         np.clip(int(x1 + 1), 0, w - 1),
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
-                    box[y0:y1, x0:x1] = 0
+                    bounds = (int(x0), int(y0), int(x1), int(y1))
+                    confidence = float(d.conf.squeeze())
+                    defer_abandon = (
+                        class_name == "abandon"
+                        and _abandon_matches_stronger_text_region(
+                            bounds,
+                            confidence,
+                            text_regions,
+                        )
+                    )
+                    _paint_layout_region(
+                        box,
+                        confidence_map,
+                        bounds,
+                        0,
+                        confidence,
+                        force=class_name != "abandon" or not defer_abandon,
+                    )
             layout[page.pageno] = box
             # 新建一个 xref 存放新指令流
             page.page_xref = doc_zh.get_new_xref()  # hack 插入页面的新 xref
@@ -162,6 +254,14 @@ def translate_patch(
             doc_zh[page.pageno].set_contents(page.page_xref)
             interpreter.process_page(page)
 
+    flush_deferred = getattr(device, "flush_deferred_pages", None)
+    if callable(flush_deferred):
+        for page_xref, translated_ops in flush_deferred().items():
+            if page_xref not in obj_patch:
+                raise ValueError(
+                    f"deferred translation refers to unknown page xref {page_xref}"
+                )
+            obj_patch[page_xref] += translated_ops
     device.close()
     return obj_patch
 
