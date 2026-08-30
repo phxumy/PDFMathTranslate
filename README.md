@@ -34,6 +34,13 @@ English | [简体中文](docs/README_zh-CN.md) | [繁體中文](docs/README_zh-T
 
 </div>
 
+> [!IMPORTANT]
+>
+> This repository contains an **unofficial Codex-enhanced v1.9.11 branch**.
+> It adds a local Codex CLI translation backend and scientific-PDF layout fixes;
+> it is not an official PDFMathTranslate release. See the
+> [Chinese usage and attribution guide](./docs/CODEX_ENHANCED_FORK_zh-CN.md).
+
 PDF scientific paper translation and bilingual comparison.
 
 - 📊 Preserve formulas, charts, table of contents, and annotations _([preview](#preview))_.
