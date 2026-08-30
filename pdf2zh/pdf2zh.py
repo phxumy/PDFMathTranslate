@@ -113,6 +113,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Interact with GUI.",
     )
     parse_params.add_argument(
+        "--desktop",
+        action="store_true",
+        help="Open the local WebUI in a native desktop window.",
+    )
+    parse_params.add_argument(
         "--share",
         action="store_true",
         help="Enable Gradio Share",
@@ -265,6 +270,15 @@ def main(args: Optional[List[str]] = None) -> int:
 
     if parsed_args.debug:
         log.setLevel(logging.DEBUG)
+
+    if parsed_args.desktop:
+        from pdf2zh.desktop import setup_desktop
+
+        return setup_desktop(
+            server_port=parsed_args.serverport,
+            onnx_path=parsed_args.onnx,
+            debug=parsed_args.debug,
+        )
 
     if parsed_args.onnx:
         ModelInstance.value = OnnxModel(parsed_args.onnx)

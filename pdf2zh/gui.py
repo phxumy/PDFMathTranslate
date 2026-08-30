@@ -472,6 +472,8 @@ def babeldoc_translate_file(**kwargs):
 
 
 # Global setup
+desktop_mode = os.environ.get("PDF2ZH_DESKTOP") == "1"
+
 custom_blue = gr.themes.Color(
     c50="#E8F3FF",
     c100="#BEDAFF",
@@ -484,6 +486,34 @@ custom_blue = gr.themes.Color(
     c800="#061D79",
     c900="#03114D",
     c950="#020B33",
+)
+
+desktop_teal = gr.themes.Color(
+    c50="#ECFDF9",
+    c100="#CFF9EF",
+    c200="#A3F0DF",
+    c300="#6CE2CD",
+    c400="#31C9B4",
+    c500="#18AA99",
+    c600="#108A7F",
+    c700="#106F68",
+    c800="#115954",
+    c900="#104A47",
+    c950="#052D2C",
+)
+
+desktop_neutral = gr.themes.Color(
+    c50="#F7FAFA",
+    c100="#EEF3F3",
+    c200="#DCE6E6",
+    c300="#BDCDCE",
+    c400="#91A8AA",
+    c500="#718B8E",
+    c600="#596F73",
+    c700="#485A5E",
+    c800="#3D4B4E",
+    c900="#354043",
+    c950="#1A2325",
 )
 
 custom_css = """
@@ -511,6 +541,231 @@ custom_css = """
     }
     """
 
+desktop_css = """
+    :root {
+        --desk-ink: #10242e;
+        --desk-muted: #637a81;
+        --desk-line: rgba(26, 75, 84, 0.13);
+        --desk-teal: #18aa99;
+        --desk-navy: #081927;
+        --desk-paper: rgba(255, 255, 255, 0.94);
+    }
+
+    body {
+        background: #eaf1f1 !important;
+    }
+
+    .gradio-container {
+        max-width: none !important;
+        min-height: 100vh !important;
+        padding: 22px 26px 34px !important;
+        color: var(--desk-ink) !important;
+        font-family: Inter, "Segoe UI Variable", "Microsoft YaHei UI", sans-serif !important;
+        background:
+            linear-gradient(rgba(18, 75, 82, 0.035) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(18, 75, 82, 0.035) 1px, transparent 1px),
+            radial-gradient(circle at 12% 0%, rgba(38, 198, 181, 0.10), transparent 31%),
+            #eaf1f1 !important;
+        background-size: 36px 36px, 36px 36px, auto, auto !important;
+    }
+
+    #desktop-header {
+        position: relative;
+        overflow: hidden;
+        margin: 0 0 18px !important;
+        padding: 22px 26px !important;
+        border: 1px solid rgba(126, 226, 208, 0.14) !important;
+        border-radius: 22px !important;
+        color: #ecfbf8 !important;
+        background:
+            radial-gradient(circle at 82% 10%, rgba(74, 127, 244, .28), transparent 30%),
+            radial-gradient(circle at 15% 120%, rgba(49, 215, 197, .24), transparent 34%),
+            linear-gradient(135deg, #071522, #0b2332 58%, #0a1b2a) !important;
+        box-shadow: 0 18px 48px rgba(8, 25, 39, 0.18) !important;
+    }
+
+    .desktop-brand {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+    }
+
+    .desktop-mark {
+        width: 56px;
+        height: 56px;
+        flex: none;
+        filter: drop-shadow(0 0 16px rgba(69, 227, 202, .22));
+    }
+
+    .desktop-kicker {
+        margin: 0 0 4px;
+        color: #65e1ce;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: .18em;
+        text-transform: uppercase;
+    }
+
+    .desktop-title-row {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 10px 16px;
+    }
+
+    .desktop-title {
+        margin: 0;
+        color: #f5fffd;
+        font-size: clamp(24px, 3vw, 34px);
+        font-weight: 680;
+        letter-spacing: -.035em;
+    }
+
+    .desktop-subtitle {
+        color: #9db8bd;
+        font-size: 13px;
+    }
+
+    .desktop-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-left: auto;
+    }
+
+    .desktop-badge {
+        padding: 6px 10px;
+        border: 1px solid rgba(128, 225, 210, .20);
+        border-radius: 999px;
+        color: #b9d8d8;
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: .08em;
+        background: rgba(255, 255, 255, .045);
+    }
+
+    #workspace-row {
+        align-items: stretch !important;
+        gap: 18px !important;
+    }
+
+    #control-panel,
+    #preview-panel {
+        padding: 20px !important;
+        border: 1px solid var(--desk-line) !important;
+        border-radius: 22px !important;
+        background: var(--desk-paper) !important;
+        box-shadow: 0 14px 38px rgba(21, 58, 65, 0.08) !important;
+        backdrop-filter: blur(18px);
+    }
+
+    #control-panel {
+        min-width: 340px !important;
+    }
+
+    #control-panel h2,
+    #preview-panel h2 {
+        margin-top: 2px !important;
+        color: var(--desk-ink) !important;
+        font-size: 15px !important;
+        font-weight: 760 !important;
+        letter-spacing: .06em !important;
+        text-transform: uppercase !important;
+    }
+
+    #control-panel .block,
+    #preview-panel .block {
+        border-color: rgba(30, 82, 90, .12) !important;
+        box-shadow: none !important;
+    }
+
+    #control-panel .input-file {
+        border: 1.5px dashed rgba(24, 170, 153, .62) !important;
+        border-radius: 15px !important;
+        background: linear-gradient(145deg, rgba(236, 253, 249, .92), rgba(247, 250, 250, .74)) !important;
+    }
+
+    #control-panel button.primary {
+        min-height: 44px !important;
+        border: 0 !important;
+        border-radius: 13px !important;
+        color: white !important;
+        font-weight: 720 !important;
+        background: linear-gradient(135deg, #16af9c, #197f88) !important;
+        box-shadow: 0 9px 22px rgba(24, 170, 153, .24) !important;
+    }
+
+    #control-panel button.primary:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 12px 26px rgba(24, 170, 153, .30) !important;
+    }
+
+    #control-panel button.secondary {
+        border-color: rgba(62, 91, 97, .15) !important;
+        border-radius: 13px !important;
+        color: #50686e !important;
+        background: #f1f5f5 !important;
+    }
+
+    #preview-panel .pdf-canvas {
+        border-radius: 15px !important;
+        background: #dce6e6 !important;
+    }
+
+    #preview-panel canvas {
+        border-radius: 8px !important;
+        box-shadow: 0 8px 26px rgba(8, 25, 39, .12) !important;
+    }
+
+    #control-panel .secondary-text {
+        color: #82979b !important;
+        font-size: 12px !important;
+    }
+
+    @media (max-width: 1080px) {
+        .gradio-container { padding: 14px !important; }
+        #desktop-header { padding: 18px !important; }
+        .desktop-badges { display: none; }
+        #workspace-row { flex-direction: column !important; }
+    }
+"""
+
+if desktop_mode:
+    custom_css += desktop_css
+
+app_theme = gr.themes.Default(
+    primary_hue=desktop_teal if desktop_mode else custom_blue,
+    neutral_hue=desktop_neutral if desktop_mode else gr.themes.colors.gray,
+    spacing_size="md",
+    radius_size="lg",
+    font=("Inter", "Segoe UI", "Microsoft YaHei UI", "sans-serif"),
+)
+
+desktop_header_html = f"""
+<div id="desktop-header">
+  <div class="desktop-brand">
+    <svg class="desktop-mark" viewBox="0 0 80 80" aria-hidden="true">
+      <defs><linearGradient id="desk-g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#79f2d4"/><stop offset="1" stop-color="#4b7df3"/></linearGradient></defs>
+      <path d="M15 24 40 10l25 14v31L40 70 15 55Z" fill="none" stroke="url(#desk-g)" stroke-width="3"/>
+      <path d="m15 24 25 15 25-15M40 39v31" fill="none" stroke="url(#desk-g)" stroke-width="2" opacity=".72"/>
+      <circle cx="15" cy="24" r="5" fill="#79f2d4"/><circle cx="65" cy="24" r="5" fill="#4b7df3"/>
+      <circle cx="40" cy="39" r="6" fill="url(#desk-g)"/><circle cx="40" cy="70" r="4" fill="#54b5e9"/>
+    </svg>
+    <div>
+      <p class="desktop-kicker">Unofficial Codex Edition</p>
+      <div class="desktop-title-row">
+        <h1 class="desktop-title">PDFMathTranslate</h1>
+        <span class="desktop-subtitle">科研 PDF 翻译工作台</span>
+      </div>
+    </div>
+    <div class="desktop-badges">
+      <span class="desktop-badge">LOCAL · PRIVATE</span>
+      <span class="desktop-badge">v{__version__}</span>
+    </div>
+  </div>
+</div>
+"""
+
 demo_recaptcha = """
     <script src="https://www.google.com/recaptcha/api.js?render=explicit" async defer></script>
     <script type="text/javascript">
@@ -536,18 +791,19 @@ cancellation_event_map = {}
 # The following code creates the GUI
 with gr.Blocks(
     title="PDFMathTranslate - PDF Translation with preserved formats",
-    theme=gr.themes.Default(
-        primary_hue=custom_blue, spacing_size="md", radius_size="lg"
-    ),
+    theme=app_theme,
     css=custom_css,
     head=demo_recaptcha if flag_demo else "",
 ) as demo:
-    gr.Markdown(
-        "# [PDFMathTranslate @ GitHub](https://github.com/Byaidu/PDFMathTranslate)"
-    )
+    if desktop_mode:
+        gr.HTML(desktop_header_html)
+    else:
+        gr.Markdown(
+            "# [PDFMathTranslate @ GitHub](https://github.com/Byaidu/PDFMathTranslate)"
+        )
 
-    with gr.Row():
-        with gr.Column(scale=1):
+    with gr.Row(elem_id="workspace-row" if desktop_mode else None):
+        with gr.Column(scale=1, elem_id="control-panel" if desktop_mode else None):
             gr.Markdown("## File | < 5 MB" if flag_demo else "## File")
             file_type = gr.Radio(
                 choices=["File", "Link"],
@@ -719,9 +975,13 @@ with gr.Blocks(
                 ),
             )
 
-        with gr.Column(scale=2):
+        with gr.Column(scale=2, elem_id="preview-panel" if desktop_mode else None):
             gr.Markdown("## Preview")
-            preview = PDF(label="Document Preview", visible=True, height=2000)
+            preview = PDF(
+                label="Document Preview",
+                visible=True,
+                height=1200 if desktop_mode else 2000,
+            )
 
     # Event handlers
     file_input.upload(

@@ -39,6 +39,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+desktop = [
+    "pywebview>=6.2,<7; sys_platform == 'win32'",
+]
 backend = [
     "flask",
     "celery",
@@ -70,6 +73,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 pdf2zh = "pdf2zh.pdf2zh:main"
+pdf2zh-desktop = "pdf2zh.desktop:main"
 
 [tool.flake8]
 ignore = ["E203", "E261", "E501", "W503", "E741"]
