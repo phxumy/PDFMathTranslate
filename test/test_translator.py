@@ -314,9 +314,9 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertIn("--ignore-user-config", cmd)
         self.assertIn("--ignore-rules", cmd)
-        self.assertIn("-c", cmd)
+        self.assertIn("--config", cmd)
         self.assertIn('model_reasoning_effort="none"', cmd)
-        self.assertIn("gpt-5.4-mini", cmd)
+        self.assertNotIn("--model", cmd)
 
     def test_do_translate_honors_profile_model_and_timeout(self):
         envs = {
