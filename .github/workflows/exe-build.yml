@@ -69,13 +69,14 @@ jobs:
           Invoke-WebRequest -Uri $pystandUrl -OutFile $pystandZip
           Expand-Archive -Path $pystandZip -DestinationPath "./dep_build/PyStand" -Force
 
-          Write-Host "==== 复制 PyStand.exe 到 build 并重命名 ===="
-          $pystandExe = "./dep_build/PyStand/PyStand-x64-CLI/PyStand.exe"
-          $destExe = "./build/pdf2zh.exe"
-          if (Test-Path $pystandExe) {
-              Copy-Item -Path $pystandExe -Destination $destExe -Force
+          Write-Host "==== 复制命令行与桌面 PyStand 启动器 ===="
+          $pystandCliExe = "./dep_build/PyStand/PyStand-x64-CLI/PyStand.exe"
+          $pystandGuiExe = "./dep_build/PyStand/PyStand-x64-GUI/PyStand.exe"
+          if ((Test-Path $pystandCliExe) -and (Test-Path $pystandGuiExe)) {
+              Copy-Item -Path $pystandCliExe -Destination "./build/pdf2zh.exe" -Force
+              Copy-Item -Path $pystandGuiExe -Destination "./build/PDFMathTranslate-Codex.exe" -Force
           } else {
-              Write-Host "错误: PyStand.exe 未找到！"
+              Write-Host "错误: PyStand CLI 或 GUI 启动器未找到！"
               exit 1
           }
           Write-Host "==== 创建 Python venv 在 dep_build ===="
@@ -84,7 +85,7 @@ jobs:
           ./dep_build/venv/Scripts/activate
 
           Write-Host "==== 在 venv 环境中安装项目依赖 ===="
-          uv pip install .
+          uv pip install ".[desktop]"
 
           Write-Host "==== 复制 venv/Lib/site-packages 到 build/ ===="
           Copy-Item -Path "./dep_build/venv/Lib/site-packages" -Destination "./build/site-packages" -Recurse -Force
@@ -127,6 +128,13 @@ jobs:
       - name: Test show version
         run: |
           ./build/pdf2zh.exe --version
+
+      - name: Test desktop parser entry
+        run: |
+          ./build/pdf2zh.exe --help | Select-String -- "--desktop"
+          if (-not (Test-Path "./build/PDFMathTranslate-Codex.exe")) {
+            throw "Desktop launcher was not produced."
+          }
       
       - name: Test - Translate a PDF file with plain text only
         run: |
@@ -167,5 +175,3 @@ jobs:
         with:
           name: test-results
           path: ./test/file/
-
-  

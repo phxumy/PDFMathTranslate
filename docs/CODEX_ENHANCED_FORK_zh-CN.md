@@ -2,6 +2,8 @@
 
 这是 PDFMathTranslate 经典版 v1.9.11 的非官方增强分支，主要用于通过本机已经登录的 Codex CLI 翻译科研论文。它不是 PDFMathTranslate 官方发布版本，也不是 2.x（PDFMathTranslate-next）的一部分。
 
+Windows 独立窗口的安装和打包方式请参阅[桌面工作台说明](./DESKTOP_APP_zh-CN.md)。
+
 ## 来源与署名
 
 - 上游项目：[PDFMathTranslate/PDFMathTranslate](https://github.com/PDFMathTranslate/PDFMathTranslate)
