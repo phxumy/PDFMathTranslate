@@ -8,6 +8,7 @@ import sys
 import tempfile
 import logging
 from asyncio import CancelledError
+from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 from typing import Any, BinaryIO, List, Optional, Dict
@@ -24,6 +25,7 @@ from pymupdf import Document, Font
 
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
+from pdf2zh.font_cmap import prepare_pdf_text_font
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 
 from pdf2zh.config import ConfigManager
@@ -32,6 +34,24 @@ from babeldoc.assets.assets import get_font_and_metadata
 NOTO_NAME = "noto"
 
 logger = logging.getLogger(__name__)
+
+_CAPTION_LAYOUT_CLASSES = frozenset(
+    {"figure_caption", "table_caption", "table_footnote"}
+)
+_PRESERVED_LAYOUT_CLASSES = frozenset({"figure", "table"})
+_FORMULA_LAYOUT_CLASSES = frozenset({"isolate_formula", "formula_caption"})
+_NON_TEXT_LAYOUT_CLASSES = frozenset(
+    {"abandon"}
+) | _PRESERVED_LAYOUT_CLASSES | _FORMULA_LAYOUT_CLASSES
+
+
+@dataclass(frozen=True)
+class _LayoutDetection:
+    value: int
+    class_name: str
+    bounds: tuple[int, int, int, int]
+    confidence: float
+
 
 noto_list = [
     "am",  # Amharic
@@ -120,6 +140,112 @@ def _abandon_matches_stronger_text_region(
     )
 
 
+def _layout_detection_bounds(
+    detection: Any,
+    height: int,
+    width: int,
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = detection.xyxy.squeeze()
+    return (
+        int(np.clip(int(x0 - 1), 0, width - 1)),
+        int(np.clip(int(height - y1 - 1), 0, height - 1)),
+        int(np.clip(int(x1 + 1), 0, width - 1)),
+        int(np.clip(int(height - y0 + 1), 0, height - 1)),
+    )
+
+
+def _layout_detections(
+    page_layout: Any,
+    height: int,
+    width: int,
+) -> list[_LayoutDetection]:
+    return [
+        _LayoutDetection(
+            value=index + 2,
+            class_name=page_layout.names[int(detection.cls)],
+            bounds=_layout_detection_bounds(detection, height, width),
+            confidence=float(detection.conf.squeeze()),
+        )
+        for index, detection in enumerate(page_layout.boxes)
+    ]
+
+
+def _build_layout_mask(
+    page_layout: Any,
+    height: int,
+    width: int,
+) -> tuple[np.ndarray, dict[int, str]]:
+    """Build a mask without letting figure/table boxes erase exact captions."""
+    layout_box = np.ones((height, width))
+    confidence_map = np.full(layout_box.shape, -np.inf, dtype=np.float32)
+    detections = _layout_detections(page_layout, height, width)
+    region_types = {
+        detection.value: detection.class_name for detection in detections
+    }
+    text_regions: list[tuple[tuple[int, int, int, int], float]] = []
+
+    for detection in detections:
+        if detection.class_name in _NON_TEXT_LAYOUT_CLASSES:
+            continue
+        text_regions.append((detection.bounds, detection.confidence))
+        _paint_layout_region(
+            layout_box,
+            confidence_map,
+            detection.bounds,
+            detection.value,
+            detection.confidence,
+        )
+
+    for detection in detections:
+        if detection.class_name not in {"abandon"} | _PRESERVED_LAYOUT_CLASSES:
+            continue
+        defer_abandon = (
+            detection.class_name == "abandon"
+            and _abandon_matches_stronger_text_region(
+                detection.bounds,
+                detection.confidence,
+                text_regions,
+            )
+        )
+        _paint_layout_region(
+            layout_box,
+            confidence_map,
+            detection.bounds,
+            0,
+            detection.confidence,
+            force=detection.class_name != "abandon" or not defer_abandon,
+        )
+
+    # Captions are semantically translatable even when their detector box overlaps
+    # the surrounding figure/table.  Repaint only the exact detected caption box;
+    # ordinary text inside figures remains protected.
+    for detection in detections:
+        if detection.class_name in _CAPTION_LAYOUT_CLASSES:
+            _paint_layout_region(
+                layout_box,
+                confidence_map,
+                detection.bounds,
+                detection.value,
+                detection.confidence,
+                force=True,
+            )
+
+    # Formula boxes take final precedence inside a caption so their original PDF
+    # glyphs and equation numbers are never sent through translation.
+    for detection in detections:
+        if detection.class_name in _FORMULA_LAYOUT_CLASSES:
+            _paint_layout_region(
+                layout_box,
+                confidence_map,
+                detection.bounds,
+                0,
+                detection.confidence,
+                force=True,
+            )
+
+    return layout_box, region_types
+
+
 def translate_patch(
     inf: BinaryIO,
     pages: Optional[list[int]] = None,
@@ -185,67 +311,13 @@ def translate_patch(
                 pix.height, pix.width, 3
             )[:, :, ::-1]
             page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
-            layout_region_types[page.pageno] = {
-                index + 2: page_layout.names[int(detection.cls)]
-                for index, detection in enumerate(page_layout.boxes)
-            }
             # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
-            box = np.ones((pix.height, pix.width))
-            confidence_map = np.full(
-                box.shape, -np.inf, dtype=np.float32
+            box, page_region_types = _build_layout_mask(
+                page_layout,
+                pix.height,
+                pix.width,
             )
-            h, w = box.shape
-            vcls = ["abandon", "figure", "table", "isolate_formula", "formula_caption"]
-            text_regions: list[
-                tuple[tuple[int, int, int, int], float]
-            ] = []
-            for i, d in enumerate(page_layout.boxes):
-                if page_layout.names[int(d.cls)] not in vcls:
-                    x0, y0, x1, y1 = d.xyxy.squeeze()
-                    x0, y0, x1, y1 = (
-                        np.clip(int(x0 - 1), 0, w - 1),
-                        np.clip(int(h - y1 - 1), 0, h - 1),
-                        np.clip(int(x1 + 1), 0, w - 1),
-                        np.clip(int(h - y0 + 1), 0, h - 1),
-                    )
-                    bounds = (int(x0), int(y0), int(x1), int(y1))
-                    confidence = float(d.conf.squeeze())
-                    text_regions.append((bounds, confidence))
-                    _paint_layout_region(
-                        box,
-                        confidence_map,
-                        bounds,
-                        i + 2,
-                        confidence,
-                    )
-            for i, d in enumerate(page_layout.boxes):
-                class_name = page_layout.names[int(d.cls)]
-                if class_name in vcls:
-                    x0, y0, x1, y1 = d.xyxy.squeeze()
-                    x0, y0, x1, y1 = (
-                        np.clip(int(x0 - 1), 0, w - 1),
-                        np.clip(int(h - y1 - 1), 0, h - 1),
-                        np.clip(int(x1 + 1), 0, w - 1),
-                        np.clip(int(h - y0 + 1), 0, h - 1),
-                    )
-                    bounds = (int(x0), int(y0), int(x1), int(y1))
-                    confidence = float(d.conf.squeeze())
-                    defer_abandon = (
-                        class_name == "abandon"
-                        and _abandon_matches_stronger_text_region(
-                            bounds,
-                            confidence,
-                            text_regions,
-                        )
-                    )
-                    _paint_layout_region(
-                        box,
-                        confidence_map,
-                        bounds,
-                        0,
-                        confidence,
-                        force=class_name != "abandon" or not defer_abandon,
-                    )
+            layout_region_types[page.pageno] = page_region_types
             layout[page.pageno] = box
             # 新建一个 xref 存放新指令流
             page.page_xref = doc_zh.get_new_xref()  # hack 插入页面的新 xref
@@ -286,7 +358,7 @@ def translate_stream(
 ):
     font_list = [("tiro", None)]
 
-    font_path = download_remote_fonts(lang_out.lower())
+    font_path = prepare_pdf_text_font(download_remote_fonts(lang_out.lower()))
     noto_name = NOTO_NAME
     noto = Font(noto_name, font_path)
     font_list.append((noto_name, font_path))
@@ -430,6 +502,8 @@ def translate(
             print(f"  {file}", file=sys.stderr)
         raise PDFValueError("Some files do not exist.")
 
+    output_dir = Path(output or ".")
+    output_dir.mkdir(parents=True, exist_ok=True)
     result_files = []
 
     for file in files:
@@ -484,8 +558,8 @@ def translate(
             s_raw,
             **locals(),
         )
-        file_mono = Path(output) / f"{filename}-mono.pdf"
-        file_dual = Path(output) / f"{filename}-dual.pdf"
+        file_mono = output_dir / f"{filename}-mono.pdf"
+        file_dual = output_dir / f"{filename}-dual.pdf"
         doc_mono = open(file_mono, "wb")
         doc_dual = open(file_dual, "wb")
         doc_mono.write(s_mono)

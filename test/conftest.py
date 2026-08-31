@@ -183,17 +183,53 @@ def _stub_gradio_pdf():
 
 def _stub_babeldoc():
     module = _ensure_module("babeldoc")
+    module.__path__ = []
     module.__version__ = "0.0-test"
+    assets = _ensure_module("babeldoc.assets")
+    assets.__path__ = []
+    assets_module = _ensure_module("babeldoc.assets.assets")
     docvision = _ensure_module("babeldoc.docvision")
+    docvision.__path__ = []
     doclayout_module = _ensure_module("babeldoc.docvision.doclayout")
+    translation_config = _ensure_module("babeldoc.translation_config")
+    high_level = _ensure_module("babeldoc.high_level")
+    main = _ensure_module("babeldoc.main")
 
     class OnnxModel:
         @staticmethod
         def load_available():
             return types.SimpleNamespace()
 
+    class TranslationConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def get_doclayout_onnx_model_path():
+        return ""
+
+    def get_font_and_metadata(_font_name):
+        return "", {}
+
+    async def async_translate(*_args, **_kwargs):
+        if False:
+            yield None
+
+    def init():
+        return None
+
+    def create_progress_handler(*_args, **_kwargs):
+        return None
+
     doclayout_module.OnnxModel = OnnxModel
+    doclayout_module.DocLayoutModel = OnnxModel
     docvision.doclayout = doclayout_module
+    assets.assets = assets_module
+    assets_module.get_doclayout_onnx_model_path = get_doclayout_onnx_model_path
+    assets_module.get_font_and_metadata = get_font_and_metadata
+    translation_config.TranslationConfig = TranslationConfig
+    high_level.async_translate = async_translate
+    high_level.init = init
+    main.create_progress_handler = create_progress_handler
 
 
 def _stub_pdf2zh_doclayout():

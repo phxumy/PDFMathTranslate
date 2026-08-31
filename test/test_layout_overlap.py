@@ -6,8 +6,35 @@ import numpy as np
 
 from pdf2zh.high_level import (
     _abandon_matches_stronger_text_region,
+    _build_layout_mask,
     _paint_layout_region,
 )
+
+
+class _FakeScalar:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def squeeze(self) -> float:
+        return self.value
+
+
+class _FakeBox:
+    def __init__(
+        self,
+        class_id: int,
+        bounds: tuple[int, int, int, int],
+        confidence: float = 0.8,
+    ) -> None:
+        self.cls = class_id
+        self.xyxy = np.array([bounds], dtype=np.float32)
+        self.conf = _FakeScalar(confidence)
+
+
+class _FakeLayout:
+    def __init__(self, boxes: list[_FakeBox], names: dict[int, str]) -> None:
+        self.boxes = boxes
+        self.names = names
 
 
 class LayoutOverlapTests(unittest.TestCase):
@@ -75,6 +102,56 @@ class LayoutOverlapTests(unittest.TestCase):
                 [((10, 20, 110, 220), 0.4)],
             )
         )
+
+    def test_table_caption_is_repainted_over_table(self) -> None:
+        layout, region_types = _build_layout_mask(
+            _FakeLayout(
+                [
+                    _FakeBox(0, (1, 1, 9, 9)),
+                    _FakeBox(1, (2, 2, 8, 4)),
+                ],
+                {0: "table", 1: "table_caption"},
+            ),
+            10,
+            10,
+        )
+
+        self.assertEqual(region_types, {2: "table", 3: "table_caption"})
+        self.assertEqual(layout[7, 3], 3)
+        self.assertEqual(layout[3, 3], 0)
+
+    def test_figure_without_caption_remains_fully_preserved(self) -> None:
+        layout, _ = _build_layout_mask(
+            _FakeLayout(
+                [_FakeBox(0, (1, 1, 9, 9))],
+                {0: "figure"},
+            ),
+            10,
+            10,
+        )
+
+        self.assertTrue(np.all(layout[0:9, 0:9] == 0))
+
+    def test_formula_inside_caption_takes_final_precedence(self) -> None:
+        layout, _ = _build_layout_mask(
+            _FakeLayout(
+                [
+                    _FakeBox(0, (1, 1, 9, 9)),
+                    _FakeBox(1, (2, 2, 8, 5)),
+                    _FakeBox(2, (4, 3, 6, 4)),
+                ],
+                {
+                    0: "figure",
+                    1: "figure_caption",
+                    2: "isolate_formula",
+                },
+            ),
+            10,
+            10,
+        )
+
+        self.assertEqual(layout[4, 2], 3)
+        self.assertEqual(layout[6, 4], 0)
 
 
 if __name__ == "__main__":

@@ -543,6 +543,120 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertEqual("甲", translator.cache.get("a"))
         self.assertEqual("乙", translator.cache.get("b"))
 
+    def test_translate_batch_ignores_unchanged_english_cache(self):
+        source = "Quantum circuits"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+        translator.cache.set(source, source)
+
+        with mock.patch.object(
+            translator,
+            "_run_batch_translation",
+            return_value=["量子电路"],
+        ):
+            translated = translator.translate_batch([source])
+
+        self.assertEqual(translated, ["量子电路"])
+        self.assertEqual(translator.cache.get(source), translated[0])
+
+    def test_translate_batch_never_caches_untranslated_fallback(self):
+        source = "Quantum circuits"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        with mock.patch.object(
+            translator,
+            "_run_batch_translation",
+            side_effect=[[source], [source]],
+        ):
+            translated = translator.translate_batch([source])
+
+        self.assertEqual(translated, [source])
+        self.assertIsNone(translator.cache.get(source))
+
+    def test_translate_batch_retries_short_english_grammar_residue(self):
+        source = "The total dispersive shift is the so-called cross-Kerr term."
+        invalid = "总色散频移是so-called交叉克尔项。"
+        valid = "总色散频移就是所谓的交叉克尔项。"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        with mock.patch.object(
+            translator,
+            "_run_batch_translation",
+            side_effect=[[invalid], [valid]],
+        ) as translate:
+            translated = translator.translate_batch([source])
+
+        self.assertEqual(translated, [valid])
+        self.assertEqual(translator.cache.get(source), valid)
+        self.assertEqual(translate.call_count, 2)
+
+    def test_translate_batch_repairs_clear_figure_number_misplacement(self):
+        source = "The results of Fig. 4 prove the scaling law."
+        invalid = "图的结果。4证明了标度律。"
+        expected = "图4的结果证明了标度律。"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        with mock.patch.object(
+            translator,
+            "_run_batch_translation",
+            return_value=[invalid],
+        ) as translate:
+            translated = translator.translate_batch([source])
+
+        self.assertEqual(translated, [expected])
+        self.assertEqual(translator.cache.get(source), expected)
+        self.assertEqual(translate.call_count, 1)
+
+    def test_translate_batch_retries_ambiguous_equation_number_misplacement(self):
+        source = "Replace D with B in Eq. 34. Thus the ratio follows."
+        invalid = "将标签D替换为B。34.于是可得该比值。"
+        valid = "在式34中将标签D替换为B。于是可得该比值。"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        with mock.patch.object(
+            translator,
+            "_run_batch_translation",
+            side_effect=[[invalid], [valid]],
+        ) as translate:
+            translated = translator.translate_batch([source])
+
+        self.assertEqual(translated, [valid])
+        self.assertEqual(translator.cache.get(source), valid)
+        self.assertEqual(translate.call_count, 2)
+
+    def test_translate_ignores_short_source_copy_cache_and_retries(self):
+        source = "Results and discussion"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+        translator.cache.set(source, source)
+
+        with mock.patch.object(
+            translator,
+            "_run_single_translation",
+            side_effect=[source, "结果与讨论"],
+        ) as translate:
+            result = translator.translate(source)
+
+        self.assertEqual(result, "结果与讨论")
+        self.assertEqual(translator.cache.get(source), result)
+        self.assertEqual(
+            [
+                call.kwargs["require_complete_translation"]
+                for call in translate.call_args_list
+            ],
+            [False, True],
+        )
+
     def test_translate_batch_can_run_precomputed_batches_concurrently(self):
         with mock.patch("pdf2zh.translator.subprocess.run") as run:
             run.side_effect = self._probe_side_effect()
@@ -711,6 +825,29 @@ class TestCodexTranslator(unittest.TestCase):
             "代价 函数 {v1} 最小 化 ， 约束 {v2} 满足 。"
         )
         self.assertEqual("代价函数{v1}最小化，约束{v2}满足。", normalized)
+
+    def test_normalize_translation_output_repairs_compatibility_ideographs(self):
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        normalized = translator._normalize_translation_output("变量、电路和器件")
+
+        self.assertEqual("变量、电路和器件", normalized)
+
+    def test_normalize_translation_output_repairs_structural_repetition(self):
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        normalized = translator._normalize_translation_output(
+            "在量子情形下，式式 (5) 将 p{v31}与系统的的状态联系起来。"
+        )
+
+        self.assertEqual(
+            "在量子情形下，式 (5) 将 p{v31}与系统的状态联系起来。",
+            normalized,
+        )
 
     def test_capability_probe_caches_fast_path_support(self):
         with mock.patch("pdf2zh.translator.subprocess.run") as run:

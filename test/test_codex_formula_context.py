@@ -6,6 +6,7 @@ import unittest
 from pdf2zh.converter import (
     Paragraph,
     TranslateConverter,
+    _collect_readonly_formula_contexts,
     _formula_context_for_text,
     _serialize_safe_inline_formula,
 )
@@ -160,6 +161,87 @@ class SafeFormulaSerializationTests(unittest.TestCase):
         )
         self.assertEqual(selected, {"{v2}": "κ", "{v0}": "ω_{c}"})
 
+    def test_latin_fragment_joined_to_identifier_is_not_formula_context(self) -> None:
+        font = FakeFormulaFont({1: "P", 2: "Y"})
+        chars = [
+            FakeFormulaChar("P", 1, font, 0.0, 5.0),
+            FakeFormulaChar("Y", 2, font, 5.0, 10.0),
+        ]
+
+        contexts = _collect_readonly_formula_contexts(
+            [chars],
+            [[]],
+            [0],
+            [paragraph()],
+            ["The PYEPR method appears as {v0}EPR in this paragraph."],
+        )
+
+        self.assertEqual(contexts, {})
+
+    def test_independent_uppercase_product_identifier_is_not_formula_context(
+        self,
+    ) -> None:
+        text = "PYEPR"
+        font = FakeFormulaFont(
+            {index: character for index, character in enumerate(text, start=1)}
+        )
+        chars = [
+            FakeFormulaChar(character, index, font, offset, offset + 5.0)
+            for offset, (index, character) in enumerate(
+                enumerate(text, start=1),
+                start=0,
+            )
+        ]
+
+        contexts = _collect_readonly_formula_contexts(
+            [chars],
+            [[]],
+            [0],
+            [paragraph()],
+            ["The early versions of {v0} were used by several groups."],
+        )
+
+        self.assertEqual(contexts, {})
+
+    def test_latin_formula_without_joined_identifier_keeps_context(self) -> None:
+        font = FakeFormulaFont({1: "P", 2: "Y"})
+        chars = [
+            FakeFormulaChar("P", 1, font, 0.0, 5.0),
+            FakeFormulaChar("Y", 2, font, 5.0, 10.0),
+        ]
+
+        spaced = _collect_readonly_formula_contexts(
+            [chars],
+            [[]],
+            [0],
+            [paragraph()],
+            ["The variable {v0} EPR controls the measured response."],
+        )
+        isolated = _collect_readonly_formula_contexts(
+            [chars],
+            [[]],
+            [0],
+            [paragraph()],
+            ["The variable {v0} controls the measured response."],
+        )
+
+        self.assertEqual(spaced, {0: "PY"})
+        self.assertEqual(isolated, {0: "PY"})
+
+    def test_non_ascii_formula_joined_to_identifier_keeps_context(self) -> None:
+        font = FakeFormulaFont({1: "ω"})
+        chars = [FakeFormulaChar("ω", 1, font, 0.0, 5.0)]
+
+        contexts = _collect_readonly_formula_contexts(
+            [chars],
+            [[]],
+            [0],
+            [paragraph()],
+            ["The transition {v0}EPR controls the measured response."],
+        )
+
+        self.assertEqual(contexts, {0: "ω"})
+
 
 class CodexFormulaContextTests(unittest.TestCase):
     def test_prompt_uses_structured_ascii_safe_json(self) -> None:
@@ -223,10 +305,11 @@ class CodexFormulaContextTests(unittest.TestCase):
         self.assertTrue(
             CodexTranslator._validate_formula_translation(
                 source,
-                "先看{{v1}}，再比较{v0}与{v0}",
+                "先看{v0}，再比较{{v1}}与{v0}",
             )
         )
         invalid = [
+            "先看{{v1}}，再比较{v0}与{v0}",
             "A {v0}, then {{v1}}",
             "A {v0}, then {{v1}}, repeat {v0} {v0}",
             "A {v2}, then {{v1}}, repeat {v0}",
@@ -238,18 +321,66 @@ class CodexFormulaContextTests(unittest.TestCase):
                     CodexTranslator._validate_formula_translation(source, target)
                 )
 
+    def test_compact_formula_atoms_must_keep_textual_affixes_adjacent(self) -> None:
+        source = "The parameter p{v0} was introduced in {v1}EPR."
+        self.assertTrue(
+            CodexTranslator._validate_formula_translation(
+                source,
+                "参数p{v0}是在{v1}EPR中引入的。",
+            )
+        )
+        for target in (
+            "参数p发生变化后{v0}是在{v1}EPR中引入的。",
+            "参数p{v0}是在{v1}版本EPR中引入的。",
+        ):
+            with self.subTest(target=target):
+                self.assertFalse(
+                    CodexTranslator._validate_formula_translation(source, target)
+                )
+
+    def test_contextual_retry_reuses_strictly_validated_ordinary_cache(
+        self,
+    ) -> None:
+        translator = translator_stub()
+        source = "The frequency {v0} controls the measured gate response."
+        cached = "频率{v0}控制测得的门响应。"
+        context = [{"placeholder": "{v0}", "unicode_formula": "ω_c"}]
+        translator.cache.set(source, cached)
+
+        def fail_formula_request(*args, **kwargs):
+            self.fail("a valid ordinary cache entry should avoid a model retry")
+
+        translator._run_formula_context_batch_request = fail_formula_request
+        translator._run_batch_translation = fail_formula_request
+
+        self.assertEqual(
+            translator._retry_contextual_item(source, context),
+            cached,
+        )
+
+    def test_contextual_retry_rejects_ordinary_cache_that_expands_formula(
+        self,
+    ) -> None:
+        translator = translator_stub()
+        source = "The frequency {v0} controls the measured gate response."
+        context = [{"placeholder": "{v0}", "unicode_formula": "ω_c"}]
+        translator.cache.set(source, "频率ω_c{v0}控制测得的门响应。")
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: ["频率{v0}控制测得的门响应。"]
+        )
+
+        self.assertEqual(
+            translator._retry_contextual_item(source, context),
+            "频率{v0}控制测得的门响应。",
+        )
+
     def test_invalid_contextual_output_fails_closed_and_is_not_cached(self) -> None:
         translator = translator_stub()
-        responses = iter(
-            [
-                ["频率由{v1}决定"],
-                ["频率由ω_{c}决定"],
-            ]
-        )
         translator._run_formula_context_batch_request = (
-            lambda texts, contexts: next(responses)
+            lambda texts, contexts, **kwargs: ["频率由{v1}决定"]
         )
         source = "The frequency {v0} controls the gate."
+        translator._run_batch_translation = lambda texts, **kwargs: [source]
 
         result = translator.translate_batch_with_formula_contexts(
             [source],
@@ -259,16 +390,299 @@ class CodexFormulaContextTests(unittest.TestCase):
         self.assertEqual(result, [source])
         self.assertEqual(translator.cache.values, {})
 
+    def test_failed_context_chunk_retries_as_ordinary_placeholder_text(self) -> None:
+        translator = translator_stub()
+        source = "The frequency {v0} controls the measured gate response."
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: [None]
+        )
+        ordinary_calls: list[tuple[list[str], bool]] = []
+
+        def translate_ordinary(texts, *, require_complete_translation=False):
+            ordinary_calls.append((list(texts), require_complete_translation))
+            return ["频率{v0}控制测得的门响应。"]
+
+        translator._run_batch_translation = translate_ordinary
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [{"{v0}": "ω_{c}"}],
+        )
+
+        self.assertEqual(result, ["频率{v0}控制测得的门响应。"])
+        self.assertIn(([source], True), ordinary_calls)
+        key = translator._formula_context_cache_key(
+            source,
+            {"{v0}": "ω_{c}"},
+        )
+        self.assertEqual(translator.cache.get(key), result[0])
+
+    def test_formula_reordering_falls_back_to_ordered_flow_guards(self) -> None:
+        translator = translator_stub()
+        source = "The {v0} response is controlled by {v1} in the circuit."
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: [
+                "电路中的{v1}控制{v0}响应。"
+            ]
+        )
+
+        def translate_ordinary(texts, *, require_complete_translation=False):
+            text = texts[0]
+            if "[[PDF2ZH_FLOW_900000000]]" in text:
+                return [
+                    "电路中的[[PDF2ZH_FLOW_900000000]]响应由"
+                    "[[PDF2ZH_FLOW_900000001]]控制。"
+                ]
+            return ["电路中的{v1}控制{v0}响应。"]
+
+        translator._run_batch_translation = translate_ordinary
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [{"{v0}": "ω_c", "{v1}": "g"}],
+        )
+
+        self.assertEqual(result, ["电路中的{v0}响应由{v1}控制。"])
+
+    def test_flow_guards_mask_complete_compact_formula_atoms(self) -> None:
+        translator = translator_stub()
+        source = "The parameter p{v0} was introduced in {v1}EPR."
+        masked_sources: list[str] = []
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: ["参数p被引入{v0}，并用于{v1}版本EPR。"]
+        )
+
+        def translate_ordinary(texts, *, require_complete_translation=False):
+            text = texts[0]
+            if "[[PDF2ZH_FLOW_900000000]]" in text:
+                masked_sources.append(text)
+                return [
+                    "参数[[PDF2ZH_FLOW_900000000]]是在"
+                    "[[PDF2ZH_FLOW_900000001]]中引入的。"
+                ]
+            return ["参数p被引入{v0}，并用于{v1}版本EPR。"]
+
+        translator._run_batch_translation = translate_ordinary
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [{"{v0}": "_m", "{v1}": "PY"}],
+        )
+
+        self.assertEqual(result, ["参数p{v0}是在{v1}EPR中引入的。"])
+        self.assertEqual(len(masked_sources), 1)
+        self.assertNotIn("p{v0}", masked_sources[0])
+        self.assertNotIn("{v1}EPR", masked_sources[0])
+
+    def test_reordered_flow_guards_fall_back_to_formula_free_prose_spans(
+        self,
+    ) -> None:
+        translator = translator_stub()
+        source = (
+            "The frequency {v0} controls the resonator, while the rate {v1} "
+            "sets the linewidth and the coupling {v2} remains fixed."
+        )
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: [
+                "速率{v1}设置线宽，频率{v0}控制谐振器，耦合{v2}保持不变。"
+            ]
+        )
+
+        def translate_ordinary(texts, *, require_complete_translation=False):
+            if any("[[PDF2ZH_FLOW_" in text for text in texts):
+                return [
+                    "[[PDF2ZH_FLOW_900000001]]设置线宽，"
+                    "[[PDF2ZH_FLOW_900000000]]控制谐振器，"
+                    "[[PDF2ZH_FLOW_900000002]]保持不变。"
+                ]
+            if texts == [source]:
+                return [
+                    "速率{v1}设置线宽，频率{v0}控制谐振器，"
+                    "耦合{v2}保持不变。"
+                ]
+            translations = {
+                "The frequency ": "频率",
+                " controls the resonator, while the rate ": "控制谐振器，而速率",
+                " sets the linewidth and the coupling ": "设置线宽，耦合",
+                " remains fixed.": "保持不变。",
+            }
+            return [translations[text] for text in texts]
+
+        translator._run_batch_translation = translate_ordinary
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [{"{v0}": "ω", "{v1}": "κ", "{v2}": "g"}],
+        )
+
+        self.assertEqual(
+            result,
+            ["频率{v0}控制谐振器，而速率{v1}设置线宽，耦合{v2}保持不变。"],
+        )
+
+    def test_unchanged_english_context_cache_is_ignored(self) -> None:
+        translator = translator_stub()
+        source = "Quantum {v0} circuits"
+        context = {"{v0}": "ω_{c}"}
+        key = translator._formula_context_cache_key(source, context)
+        translator.cache.set(key, source)
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: ["量子{v0}电路"]
+        )
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [context],
+        )
+
+        self.assertEqual(result, ["量子{v0}电路"])
+        self.assertEqual(translator.cache.get(key), result[0])
+
+    def test_short_unchanged_formula_context_fallback_is_not_cached(self) -> None:
+        translator = translator_stub()
+        source = "Quantum {v0} circuits"
+        context = {"{v0}": "ω_{c}"}
+        contextual_calls: list[bool] = []
+
+        def contextual(texts, contexts, **kwargs):
+            contextual_calls.append(
+                kwargs.get("require_complete_translation", False)
+            )
+            return list(texts)
+
+        translator._run_formula_context_batch_request = contextual
+        translator._run_batch_translation = lambda texts, **kwargs: list(texts)
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [context],
+        )
+
+        self.assertEqual(result, [source])
+        self.assertIn(True, contextual_calls)
+        self.assertEqual(translator.cache.values, {})
+
+    def test_short_unchanged_styled_cache_is_ignored_and_replaced(self) -> None:
+        translator = translator_stub()
+        begin = "[[PDF2ZH_ITALIC_0_BEGIN]]"
+        end = "[[PDF2ZH_ITALIC_0_END]]"
+        source = f"{begin}Quantum{end} circuits"
+        target = f"{begin}量子{end}电路"
+        key = translator._styled_cache_key(source, {})
+        translator.cache.set(key, source)
+        translator._run_styled_batch_request = (
+            lambda texts, contexts, **kwargs: [target]
+        )
+
+        result = translator.translate_styled_batch([source], [{}])
+
+        self.assertEqual(result, [target])
+        self.assertEqual(translator.cache.get(key), target)
+
+    def test_short_unchanged_styled_fallback_is_not_cached(self) -> None:
+        translator = translator_stub()
+        begin = "[[PDF2ZH_ITALIC_0_BEGIN]]"
+        end = "[[PDF2ZH_ITALIC_0_END]]"
+        source = f"{begin}Quantum{end} circuits"
+        translator._run_styled_batch_request = (
+            lambda texts, contexts, **kwargs: list(texts)
+        )
+
+        result = translator.translate_styled_batch([source], [{}])
+
+        self.assertEqual(result, [None])
+        self.assertEqual(translator.cache.values, {})
+
+    def test_short_grammar_residue_is_shared_by_context_and_styled_paths(
+        self,
+    ) -> None:
+        translator = translator_stub()
+        contextual_source = (
+            "The cavity field {v0} is evaluated at the transmon junction."
+        )
+        contextual_target = "腔体电场{v0} is transmon结处的电场。"
+        context = translator._normalize_formula_context(
+            contextual_source,
+            {"{v0}": r"\vec{E}"},
+        )
+
+        self.assertIsNone(
+            translator._accepted_contextual_translation(
+                contextual_source,
+                contextual_target,
+                context,
+            )
+        )
+
+        begin = "[[PDF2ZH_ITALIC_0_BEGIN]]"
+        end = "[[PDF2ZH_ITALIC_0_END]]"
+        styled_source = f"The {begin}so-called{end} cross-Kerr term."
+        styled_target = f"{begin}so-called{end}交叉克尔项。"
+
+        self.assertIsNone(
+            translator._accepted_styled_translation(
+                styled_source,
+                styled_target,
+                [],
+            )
+        )
+
+    def test_formula_context_path_repairs_reference_placeholder_placement(
+        self,
+    ) -> None:
+        translator = translator_stub()
+        source = "The design was reported in ref. {v20}. The values agree."
+        target = "该设计已在参考文献中报道。{v20}。这些数值一致。"
+        context = translator._normalize_formula_context(
+            source,
+            {"{v20}": "28"},
+        )
+
+        self.assertEqual(
+            translator._accepted_contextual_translation(
+                source,
+                target,
+                context,
+            ),
+            "该设计已在参考文献{v20}中报道。这些数值一致。",
+        )
+
+    def test_context_cache_repairs_duplicate_equation_designator(self) -> None:
+        translator = translator_stub()
+        source = "In the quantum setting, Eq. (5) links p{v0} to the circuit state."
+        context = {"{v0}": "_m"}
+        key = translator._formula_context_cache_key(source, context)
+        translator.cache.set(
+            key,
+            "在量子情形下，式式 (5) 将 p{v0}与电路状态联系起来。",
+        )
+        translator._run_formula_context_batch_request = (
+            lambda *args, **kwargs: self.fail(
+                "a repairable context cache entry should be reused"
+            )
+        )
+
+        result = translator.translate_batch_with_formula_contexts(
+            [source],
+            [context],
+        )
+
+        self.assertEqual(
+            result,
+            ["在量子情形下，式 (5) 将 p{v0}与电路状态联系起来。"],
+        )
+
     def test_long_text_is_split_with_only_each_chunks_live_context(self) -> None:
         translator = translator_stub()
         calls: list[tuple[list[str], list[list[dict[str, str]]]]] = []
 
-        def translate_chunks(texts, contexts):
+        def translate_chunks(texts, contexts, **kwargs):
             calls.append((list(texts), list(contexts)))
             return [
-                text.replace("The frequency", "频率").replace(
-                    "The coupling",
-                    "耦合",
+                (
+                    "频率{v0}控制谐振器响应。"
+                    if "{v0}" in text
+                    else "耦合{v1}决定双量子比特门响应。"
                 )
                 for text in texts
             ]
@@ -310,7 +724,7 @@ class CodexFormulaContextTests(unittest.TestCase):
         translator._run_batch_translation = lambda texts: [
             text.replace("Circuit diagram", "电路图") for text in texts
         ]
-        translator._run_formula_context_batch_request = lambda texts, contexts: [
+        translator._run_formula_context_batch_request = lambda texts, contexts, **kwargs: [
             text.replace("The rate", "速率") for text in texts
         ]
         source = "Circuit diagram of the device. The rate {v0} changes smoothly."

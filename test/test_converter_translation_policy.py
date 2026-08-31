@@ -12,6 +12,7 @@ class FakeCodexTranslator:
 
     def __init__(self) -> None:
         self.reference_contexts: list[str] = []
+        self.reference_entries: list[str] = []
 
     def translate_batch(self, texts: list[str]) -> list[str]:
         return [
@@ -27,6 +28,7 @@ class FakeCodexTranslator:
         cache_contexts: list[str] | None = None,
     ) -> list[str]:
         self.reference_contexts.extend(cache_contexts or [])
+        self.reference_entries.extend(entries)
         return [
             entry.replace("First work title", "第一项作品题名").replace(
                 "Second work title", "第二项作品题名"
@@ -110,6 +112,40 @@ class ConverterPolicyIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(translator.reference_contexts, ["{v0}=57"])
+
+    def test_reference_url_is_canonicalized_and_hidden_from_model(self) -> None:
+        translator = FakeCodexTranslator()
+        converter = converter_with(translator)
+        source = (
+            "20. A. Author, First work title. Preprint at https:// "
+            "www.nature.com/articles/s41586- 020-2603-3 (2020)."
+        )
+
+        result = converter._translate_reference_segments([source], [""])[0]
+
+        self.assertIn("第一项作品题名", result)
+        self.assertIn(
+            "https://www.nature.com/articles/s41586-020-2603-3",
+            result,
+        )
+        self.assertEqual(1, len(translator.reference_entries))
+        self.assertNotIn("nature.com", translator.reference_entries[0])
+        self.assertIn("[[PDF2ZH_FLOW_", translator.reference_entries[0])
+
+    def test_non_codex_preserved_reference_still_normalizes_url(self) -> None:
+        converter = converter_with(FakeOtherTranslator())
+        source = (
+            "20. A. Author. Preprint at http://creativecommons. "
+            "org/licenses/by/4.0/."
+        )
+
+        result = converter._translate_reference_segments([source], [""])[0]
+
+        self.assertEqual(
+            "20. A. Author. Preprint at "
+            "http://creativecommons.org/licenses/by/4.0/.",
+            result,
+        )
 
 
 if __name__ == "__main__":

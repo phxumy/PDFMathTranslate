@@ -1,21 +1,48 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Mapping, Sequence
+from typing import Literal
 
 from pdf2zh.translation_policy import (
+    find_reference_markers,
     looks_like_affiliation,
     looks_like_author_list,
     reference_entry_score,
+    split_numbered_reference_region,
 )
-
 
 _ENGLISH_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _FIRST_ALPHA_RE = re.compile(r"[A-Za-z]")
 _SENTENCE_END_RE = re.compile(r"[.!?](?=(?:[\"'\u2019\u201d)\]]|\s|$))")
 _TERMINAL_RE = re.compile(
     r"[.!?](?:[\"'\u2019\u201d)\]]|\s|\{\s*v\d+\s*\})*$",
+    re.IGNORECASE,
+)
+_DANGLING_CONTINUATION_CUE_RE = re.compile(
+    r"(?:"
+    r"\b(?:a|an|the|and|or|of|to|from|for|with|without|via|into|"
+    r"through|using|including)"
+    r"|\b(?:according|due|owing|referred)\s+to"
+    r"|\b(?:based|dependent)\s+on"
+    r"|\b(?:defined|determined|given|obtained|calculated|computed)\s+by"
+    r"|\b(?:known|defined|denoted|referred)\s+as"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_REFERENCE_INTERNAL_TOKEN_RE = re.compile(
+    r"\{\s*v[\d\s]+\s*\}|"
+    r"\[\[PDF2ZH_(?:FLOW|ITALIC|REF)(?:_[^\]]*)?\]\]",
+    re.IGNORECASE,
+)
+_REFERENCE_YEAR_END_RE = re.compile(
+    r"(?:\((?:19|20)\d{2}[a-z]?\)|(?:19|20)\d{2}[a-z]?)[.,;:]?\s*$",
+    re.IGNORECASE,
+)
+_REFERENCE_VOLUME_PAGE_END_RE = re.compile(
+    r"\b\d{1,4}\s*[,;:]\s*"
+    r"(?:[A-Za-z]?\d{2,}(?:\s*[-\u2013\u2014]\s*\d+)?|e\d+)\.?\s*$",
     re.IGNORECASE,
 )
 
@@ -71,6 +98,41 @@ class ContinuationGroup:
     fragments: tuple[FragmentSpan, FragmentSpan]
 
 
+@dataclass(frozen=True)
+class ReferenceContinuationGroup:
+    """One bibliography entry split across a physical page boundary.
+
+    ``fragments[0]`` includes the source reference marker so the structured
+    reference translator can see the complete entry.  ``left_marker_end`` lets
+    the converter preserve that marker outside a later layout override, keeping
+    the document-level reference-number state intact.  The right fragment stops
+    immediately before the following entry marker.
+    """
+
+    reference_number: int
+    reference_prefix: str
+    fragments: tuple[FragmentSpan, FragmentSpan]
+    left_marker_end: int
+    next_marker_start: int
+
+
+@dataclass(frozen=True)
+class _ReferenceTail:
+    segment: FlowSegment
+    span: FragmentSpan
+    marker_end: int
+    number: int
+    prefix: str
+
+
+@dataclass(frozen=True)
+class _ReferenceHead:
+    segment: FlowSegment
+    span: FragmentSpan
+    number: int
+    prefix: str
+
+
 def _looks_like_body_prose(segment: FlowSegment) -> bool:
     text = segment.text.strip()
     if segment.region_kind != "plain text" or len(text) < 8:
@@ -90,9 +152,153 @@ def _column_index(segment: FlowSegment) -> int | None:
     return 0 if segment.center_x < segment.page_width / 2 else 1
 
 
+def _has_reference_terminal(text: str) -> bool:
+    compact = text.rstrip()
+    return bool(
+        _REFERENCE_YEAR_END_RE.search(compact)
+        or _REFERENCE_VOLUME_PAGE_END_RE.search(compact)
+    )
+
+
+def _has_unsafe_reference_token(text: str) -> bool:
+    return _REFERENCE_INTERNAL_TOKEN_RE.search(text) is not None
+
+
+def _reference_tail(segment: FlowSegment) -> _ReferenceTail | None:
+    if segment.region_kind != "plain text":
+        return None
+    region = split_numbered_reference_region(segment.text)
+    if region is None or segment.text[region.end :].strip():
+        return None
+    marker = region.markers[-1]
+    if marker.number is None:
+        return None
+    span = FragmentSpan(segment.ref, marker.start, region.end)
+    candidate = segment.text[span.start : span.end]
+    if _has_unsafe_reference_token(candidate) or _has_reference_terminal(candidate):
+        return None
+    return _ReferenceTail(
+        segment=segment,
+        span=span,
+        marker_end=marker.end,
+        number=marker.number,
+        prefix=marker.prefix,
+    )
+
+
+def _reference_head(segment: FlowSegment) -> _ReferenceHead | None:
+    if segment.region_kind != "plain text":
+        return None
+    markers = find_reference_markers(segment.text)
+    if not markers:
+        return None
+    marker = markers[0]
+    if marker.number is None or marker.start <= 0:
+        return None
+    span = FragmentSpan(segment.ref, 0, marker.start)
+    candidate = segment.text[span.start : span.end]
+    if (
+        not candidate.strip()
+        or _has_unsafe_reference_token(candidate)
+        or not _has_reference_terminal(candidate)
+    ):
+        return None
+    return _ReferenceHead(
+        segment=segment,
+        span=span,
+        number=marker.number,
+        prefix=marker.prefix,
+    )
+
+
+def _reference_geometry_is_compatible(
+    left: FlowSegment,
+    right: FlowSegment,
+) -> bool:
+    left_column = _column_index(left)
+    right_column = _column_index(right)
+    if left_column not in {1, None} or right_column not in {0, None}:
+        return False
+    largest_size = max(abs(left.size), abs(right.size), 0.01)
+    if abs(left.size - right.size) / largest_size > 0.15:
+        return False
+    largest_width = max(left.width, right.width, 0.01)
+    if min(left.width, right.width) / largest_width < 0.72:
+        return False
+    if left.y0 > left.page_height * 0.28:
+        return False
+    return right.y1 >= right.page_height * 0.72
+
+
+def _span_overlaps(
+    candidate: FragmentSpan,
+    occupied: Sequence[FragmentSpan],
+) -> bool:
+    return any(
+        candidate.ref == existing.ref
+        and candidate.start < existing.end
+        and existing.start < candidate.end
+        for existing in occupied
+    )
+
+
 def _first_alpha_is_lower(text: str) -> bool:
     match = _FIRST_ALPHA_RE.search(text)
     return bool(match and match.group(0).islower())
+
+
+def _after_leading_balanced_parenthetical(text: str) -> str | None:
+    """Return prose following one complete leading parenthetical.
+
+    A physical page may begin with a parenthetical qualifier whose first word is
+    a proper name or model identifier, while the sentence itself resumes with a
+    lower-case word after the closing delimiter.  Treat only a balanced leading
+    ``(...)``/``[...]`` group as skippable; an unmatched delimiter must keep the
+    conservative cross-boundary rejection behaviour.
+    """
+
+    compact = text.lstrip()
+    pairs = {"(": ")", "[": "]", "（": "）", "［": "］"}
+    expected = pairs.get(compact[:1])
+    if expected is None:
+        return None
+    stack = [expected]
+    for index, character in enumerate(compact[1:], start=1):
+        nested = pairs.get(character)
+        if nested is not None:
+            stack.append(nested)
+            continue
+        if character != stack[-1]:
+            continue
+        stack.pop()
+        if not stack:
+            return compact[index + 1 :]
+    return None
+
+
+def _continuation_start_reason(text: str) -> str | None:
+    remainder = _after_leading_balanced_parenthetical(text)
+    if remainder is not None:
+        if _first_alpha_is_lower(remainder):
+            return "lowercase-after-leading-parenthetical"
+        return None
+    if _first_alpha_is_lower(text):
+        return "lowercase-right"
+    return None
+
+
+def _left_has_dangling_continuation_cue(text: str) -> bool:
+    """Return whether a page-end fragment grammatically requires a complement.
+
+    Lower-case continuation is normally the safest cross-page signal.  It is
+    insufficient when the next fragment starts with an eponym or other proper
+    name (for example, ``from the`` + ``Ambegaokar--Baratoff relation``).  A
+    narrowly scoped dangling determiner/preposition/verb phrase is independent
+    evidence that the following capitalized phrase belongs to the same sentence.
+    """
+
+    compact = text.rstrip()
+    return bool(compact and _DANGLING_CONTINUATION_CUE_RE.search(compact))
 
 
 def _ends_sentence(text: str) -> bool:
@@ -106,7 +312,12 @@ def _compatible_boundary(
 ) -> tuple[bool, tuple[str, ...]]:
     if not (_looks_like_body_prose(left) and _looks_like_body_prose(right)):
         return False, ()
-    if _ends_sentence(left.text) or not _first_alpha_is_lower(right.text):
+    continuation_start = _continuation_start_reason(right.text)
+    if continuation_start is None and _left_has_dangling_continuation_cue(
+        left.text
+    ):
+        continuation_start = "capitalized-after-dangling-cue"
+    if _ends_sentence(left.text) or continuation_start is None:
         return False, ()
     largest_size = max(abs(left.size), abs(right.size), 0.01)
     if abs(left.size - right.size) / largest_size > 0.15:
@@ -116,7 +327,7 @@ def _compatible_boundary(
         return False, ()
     if left.y0 > left.page_height * 0.28:
         return False, ()
-    reasons = ["unfinished-left", "lowercase-right", "matching-body-style"]
+    reasons = ["unfinished-left", continuation_start, "matching-body-style"]
     if kind == "column":
         if _column_index(left) != 0 or _column_index(right) != 1:
             return False, ()
@@ -137,7 +348,9 @@ def _ordered_column_segments(
         for segment in segments
         if _looks_like_body_prose(segment) and _column_index(segment) == column
     ]
-    return sorted(selected, key=lambda item: (-item.y1, item.x0, item.ref.segment_index))
+    return sorted(
+        selected, key=lambda item: (-item.y1, item.x0, item.ref.segment_index)
+    )
 
 
 def _ordered_spanning_segments(
@@ -243,6 +456,80 @@ def detect_cross_page_edge(
         0.97 if hyphenated else 0.94,
         reasons,
     )
+
+
+def detect_reference_continuation(
+    previous: Sequence[FlowSegment],
+    following: Sequence[FlowSegment],
+    *,
+    occupied: Sequence[FragmentSpan] = (),
+) -> ReferenceContinuationGroup | None:
+    """Detect a high-confidence bibliography entry split across two pages.
+
+    This detector is intentionally separate from body-prose continuation.  It
+    requires both a consecutive-number signal and bibliography evidence from
+    the recombined entry, and fails closed for page-local formula placeholders
+    or internal layout tokens.
+    """
+
+    if not previous or not following:
+        return None
+    previous_pages = {segment.ref.page_id for segment in previous}
+    following_pages = {segment.ref.page_id for segment in following}
+    if len(previous_pages) != 1 or len(following_pages) != 1:
+        return None
+    previous_page = next(iter(previous_pages))
+    following_page = next(iter(following_pages))
+    if following_page != previous_page + 1:
+        return None
+
+    tails = [
+        candidate for segment in previous if (candidate := _reference_tail(segment))
+    ]
+    heads = [
+        candidate for segment in following if (candidate := _reference_head(segment))
+    ]
+    tails.sort(
+        key=lambda item: (
+            item.segment.y0,
+            0 if _column_index(item.segment) == 1 else 1,
+            item.segment.ref.segment_index,
+        )
+    )
+    heads.sort(
+        key=lambda item: (
+            -item.segment.y1,
+            0 if _column_index(item.segment) == 0 else 1,
+            item.segment.ref.segment_index,
+        )
+    )
+
+    for tail in tails:
+        left_text = tail.segment.text[tail.span.start : tail.span.end]
+        left_score = reference_entry_score(left_text)
+        for head in heads:
+            if head.prefix != tail.prefix or head.number != tail.number + 1:
+                continue
+            if not _reference_geometry_is_compatible(tail.segment, head.segment):
+                continue
+            if _span_overlaps(tail.span, occupied) or _span_overlaps(
+                head.span, occupied
+            ):
+                continue
+            right_text = head.segment.text[head.span.start : head.span.end]
+            combined_score = reference_entry_score(
+                f"{left_text.rstrip()} {right_text.lstrip()}"
+            )
+            if combined_score < 5 or combined_score <= left_score:
+                continue
+            return ReferenceContinuationGroup(
+                reference_number=tail.number,
+                reference_prefix=tail.prefix,
+                fragments=(tail.span, head.span),
+                left_marker_end=tail.marker_end,
+                next_marker_start=head.span.end,
+            )
+    return None
 
 
 def _tail_span(text: str, maximum_chars: int) -> tuple[int, int] | None:

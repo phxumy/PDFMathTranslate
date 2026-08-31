@@ -22,6 +22,80 @@ def segment(text: str, index: int = 0) -> SourceSegment:
     return SourceSegment(index=index, text=text, page_width=612.0)
 
 
+class TitleBadgeTests(unittest.TestCase):
+    def test_publication_badges_are_preserved_separately_from_title(self) -> None:
+        source = "ARTICLE OPEN Energy-participation quantization of circuits"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                page_width=612.0,
+                break_offsets=(12,),
+                region_kind="title",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text, part.break_before) for part in plan.parts],
+            [
+                (ROLE_PRESERVE, "ARTICLE OPEN ", False),
+                (
+                    ROLE_TRANSLATE,
+                    "Energy-participation quantization of circuits",
+                    True,
+                ),
+            ],
+        )
+
+    def test_title_starting_with_open_is_not_treated_as_a_badge(self) -> None:
+        source = "Open quantum systems in a microwave cavity"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                page_width=612.0,
+                region_kind="title",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_TRANSLATE, source)],
+        )
+
+    def test_title_phrase_matching_badge_words_needs_a_source_break(self) -> None:
+        source = "Review article design for scientific publishing"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                page_width=612.0,
+                region_kind="title",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_TRANSLATE, source)],
+        )
+
+
+class NamedProseSectionTests(unittest.TestCase):
+    def test_acknowledgement_name_list_is_translated_as_prose(self) -> None:
+        policy = DocumentTranslationPolicy()
+        heading = policy.plan_segment(segment("Acknowledgements"))
+        source = (
+            "We thank S. M. Girvin, R. J. Schoelkopf, and A. Blais for "
+            "valuable discussions and support from the research office."
+        )
+        paragraph = policy.plan_segment(segment(source, index=1))
+
+        self.assertEqual([part.role for part in heading.parts], [ROLE_TRANSLATE])
+        self.assertEqual(
+            [(part.role, part.text) for part in paragraph.parts],
+            [(ROLE_TRANSLATE, source)],
+        )
+
 class ReferenceMarkerTests(unittest.TestCase):
     def test_square_bracket_formula_and_supplement_markers(self) -> None:
         source = (
@@ -317,6 +391,50 @@ class ExactReplacementTests(unittest.TestCase):
 
 
 class AuthorAffiliationTests(unittest.TestCase):
+    def test_detected_caption_bypasses_author_name_heuristics(self) -> None:
+        source = (
+            "Fig. 1 Additional FE results from The Hamiltonian Group, "
+            "Supplementary Section Center, and Quantum Research Institute."
+        )
+
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                page_width=612.0,
+                region_kind="figure_caption",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_TRANSLATE, source)],
+        )
+
+    def test_capitalized_scientific_prose_is_not_mistaken_for_authors(self) -> None:
+        sources = (
+            (
+                "Fig. 1 Conceptual overview. Additional FE simulations are "
+                "unnecessary. The Hamiltonian is computed directly from the EPRs."
+            ),
+            (
+                "mode by quantum fluctuations of the fields. The Hamiltonian "
+                "parameters are calculated in Supplementary Section B2."
+            ),
+            (
+                "Experimental values are found in Supplementary Section D. "
+                "Equation (29) provides a dissipation budget."
+            ),
+        )
+
+        for source in sources:
+            with self.subTest(source=source):
+                plan = DocumentTranslationPolicy().plan_segment(segment(source))
+                self.assertEqual(
+                    [(part.role, part.text) for part in plan.parts],
+                    [(ROLE_TRANSLATE, source)],
+                )
+
     def test_combined_author_and_affiliation_are_split_exactly(self) -> None:
         source = (
             "Zijun Chen, A. Megrant, J. Kelly {v0}"

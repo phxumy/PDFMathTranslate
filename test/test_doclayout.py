@@ -5,7 +5,97 @@ from pdf2zh.doclayout import (
     OnnxModel,
     YoloResult,
     YoloBox,
+    select_layout_predictions,
 )
+
+
+class TestLayoutPredictionSelection(unittest.TestCase):
+    def test_supported_low_confidence_table_footnote_is_retained(self):
+        predictions = np.array(
+            [
+                [0, 0, 100, 100, 0.9, 0],
+                # A tighter table-body detection ends immediately before the
+                # multi-line note, while the outer table container includes both.
+                [0, 0, 100, 60, 0.8, 0],
+                [2, 61, 98, 82, 0.031, 1],
+            ],
+            dtype=np.float32,
+        )
+
+        selected = select_layout_predictions(
+            predictions,
+            {0: "table", 1: "table_footnote"},
+        )
+
+        self.assertEqual(selected.shape[0], 3)
+
+    def test_low_confidence_bottom_table_row_is_not_retained_as_footnote(self):
+        predictions = np.array(
+            [
+                [0, 0, 100, 100, 0.9, 0],
+                # This has the old bottom-of-table geometry, but it overlaps the
+                # table rather than sitting below a separately detected body.
+                [2, 70, 98, 90, 0.031, 1],
+            ],
+            dtype=np.float32,
+        )
+
+        selected = select_layout_predictions(
+            predictions,
+            {0: "table", 1: "table_footnote"},
+        )
+
+        self.assertEqual(selected.shape[0], 1)
+
+    def test_low_confidence_candidate_must_be_a_horizontal_text_band(self):
+        predictions = np.array(
+            [
+                [0, 0, 100, 60, 0.9, 0],
+                [30, 61, 70, 81, 0.04, 1],
+            ],
+            dtype=np.float32,
+        )
+
+        selected = select_layout_predictions(
+            predictions,
+            {0: "table", 1: "table_footnote"},
+        )
+
+        self.assertEqual(selected.shape[0], 1)
+
+    def test_unsupported_low_confidence_candidates_are_rejected(self):
+        predictions = np.array(
+            [
+                [0, 0, 100, 100, 0.9, 0],
+                [5, 10, 95, 30, 0.04, 1],
+                [120, 70, 190, 95, 0.04, 1],
+                [5, 70, 95, 96, 0.04, 2],
+            ],
+            dtype=np.float32,
+        )
+
+        selected = select_layout_predictions(
+            predictions,
+            {0: "table", 1: "table_footnote", 2: "plain text"},
+        )
+
+        self.assertEqual(selected.shape[0], 1)
+
+    def test_low_confidence_table_footnote_must_touch_table_bottom(self):
+        predictions = np.array(
+            [
+                [0, 0, 100, 60, 0.9, 0],
+                [2, 75, 98, 95, 0.04, 1],
+            ],
+            dtype=np.float32,
+        )
+
+        selected = select_layout_predictions(
+            predictions,
+            {0: "table", 1: "table_footnote"},
+        )
+
+        self.assertEqual(selected.shape[0], 1)
 
 
 class TestOnnxModel(unittest.TestCase):

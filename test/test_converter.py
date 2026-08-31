@@ -160,6 +160,38 @@ class TestTranslateConverter(unittest.TestCase):
         self.assertEqual(["甲", "乙"], result)
         self.assertEqual(2, converter.translator.translate_batch.call_count)
 
+    @patch.object(CodexTranslator, "_probe_cli", return_value=None)
+    def test_codex_translate_segments_hides_and_restores_broken_url(self, _mock_probe):
+        converter = TranslateConverter(
+            self.rsrcmgr,
+            layout=self.layout,
+            lang_in="en",
+            lang_out="zh",
+            service="codex",
+        )
+        seen: list[str] = []
+
+        def translate_batch(texts: list[str]) -> list[str]:
+            seen.extend(texts)
+            return [text.replace("Source at", "源码位于") for text in texts]
+
+        converter.translator = SimpleNamespace(
+            name="codex",
+            translate_batch=translate_batch,
+        )
+
+        result = converter._translate_text_segments(
+            ["Source at http:// github.com/zlatko-minev/pyEPR."]
+        )
+
+        self.assertEqual(
+            ["源码位于 http://github.com/zlatko-minev/pyEPR."],
+            result,
+        )
+        self.assertEqual(1, len(seen))
+        self.assertNotIn("github.com", seen[0])
+        self.assertRegex(seen[0], r"\[\[PDF2ZH_FLOW_\d+\]\]")
+
 
 if __name__ == "__main__":
     unittest.main()

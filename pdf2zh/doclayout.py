@@ -22,6 +22,109 @@ from huggingface_hub import hf_hub_download
 from pdf2zh.config import ConfigManager
 
 
+_LAYOUT_CONFIDENCE_THRESHOLD = 0.25
+_SUPPLEMENTAL_TABLE_FOOTNOTE_THRESHOLD = 0.025
+
+
+def _horizontal_intersection_over_candidate(
+    candidate: np.ndarray,
+    table: np.ndarray,
+) -> float:
+    candidate_width = max(0.0, float(candidate[2] - candidate[0]))
+    if candidate_width <= 0:
+        return 0.0
+    intersection = max(
+        0.0,
+        min(float(candidate[2]), float(table[2]))
+        - max(float(candidate[0]), float(table[0])),
+    )
+    return intersection / candidate_width
+
+
+def _is_supported_table_footnote(
+    candidate: np.ndarray,
+    tables: np.ndarray,
+) -> bool:
+    """Accept only a thin text band immediately below a detected table body.
+
+    Table detectors commonly emit both an outer table container and a tighter
+    box around the tabular rows.  A genuine note can be inside the outer box but
+    must still lie almost entirely below the tighter body box.  Merely occupying
+    the bottom of a table is not sufficient: an ordinary final row has substantial
+    vertical overlap with every supporting table box and therefore fails closed.
+    """
+
+    candidate_width = max(0.0, float(candidate[2] - candidate[0]))
+    candidate_height = max(0.0, float(candidate[3] - candidate[1]))
+    if candidate_width <= 0 or candidate_height <= 0:
+        return False
+    # A table note is a horizontal prose band, not a compact cell or a tall block.
+    if candidate_width / candidate_height < 4.0:
+        return False
+
+    for table in tables:
+        table_width = max(0.0, float(table[2] - table[0]))
+        table_height = max(0.0, float(table[3] - table[1]))
+        if table_width <= 0 or table_height <= 0:
+            continue
+        vertical_overlap = max(
+            0.0,
+            min(float(candidate[3]), float(table[3]))
+            - max(float(candidate[1]), float(table[1])),
+        )
+        vertical_gap = float(candidate[1]) - float(table[3])
+        if (
+            _horizontal_intersection_over_candidate(candidate, table) >= 0.92
+            and candidate_width / table_width >= 0.60
+            and candidate_width / table_width <= 1.12
+            and vertical_overlap <= 0.20 * candidate_height
+            and vertical_gap >= -0.20 * candidate_height
+            and vertical_gap <= max(0.08 * table_height, 0.15 * candidate_height)
+        ):
+            return True
+    return False
+
+
+def select_layout_predictions(
+    predictions: np.ndarray,
+    names: dict[int, str] | list[str],
+) -> np.ndarray:
+    """Retain strong detections plus strictly supported table-footnote candidates."""
+    if predictions.size == 0:
+        return predictions
+    strong_mask = predictions[..., 4] > _LAYOUT_CONFIDENCE_THRESHOLD
+    strong = predictions[strong_mask]
+    table_class_ids = {
+        int(class_id)
+        for class_id, name in (
+            names.items() if isinstance(names, dict) else enumerate(names)
+        )
+        if name == "table"
+    }
+    footnote_class_ids = {
+        int(class_id)
+        for class_id, name in (
+            names.items() if isinstance(names, dict) else enumerate(names)
+        )
+        if name == "table_footnote"
+    }
+    if not table_class_ids or not footnote_class_ids:
+        return strong
+    tables = np.asarray([row[:4] for row in strong if int(row[-1]) in table_class_ids])
+    if tables.size == 0:
+        return strong
+    supplemental = [
+        row
+        for row in predictions[~strong_mask]
+        if float(row[4]) > _SUPPLEMENTAL_TABLE_FOOTNOTE_THRESHOLD
+        and int(row[-1]) in footnote_class_ids
+        and _is_supported_table_footnote(row[:4], tables)
+    ]
+    if not supplemental:
+        return strong
+    return np.concatenate((strong, np.asarray(supplemental)), axis=0)
+
+
 class DocLayoutModel(abc.ABC):
     @staticmethod
     def load_onnx():
@@ -168,7 +271,7 @@ class OnnxModel(DocLayoutModel):
         preds = self.model.run(None, {"images": pix})[0]
 
         # Postprocess predictions
-        preds = preds[preds[..., 4] > 0.25]
+        preds = select_layout_predictions(preds, self._names)
         preds[..., :4] = self.scale_boxes(
             (new_h, new_w), preds[..., :4], (orig_h, orig_w)
         )

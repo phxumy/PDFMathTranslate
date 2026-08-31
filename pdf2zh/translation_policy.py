@@ -10,6 +10,10 @@ ROLE_PRESERVE = "preserve"
 ROLE_REFERENCE = "reference"
 ROLE_AFFILIATION = "affiliation"
 
+_TRANSLATABLE_CAPTION_REGION_KINDS = frozenset(
+    {"figure_caption", "table_caption", "table_footnote"}
+)
+
 
 @dataclass(frozen=True)
 class SourceSegment:
@@ -22,6 +26,7 @@ class SourceSegment:
     size: float = 0.0
     page_width: float = 0.0
     break_offsets: tuple[int, ...] = ()
+    region_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,12 @@ _PLACEHOLDER_RE = re.compile(r"\{\s*v[\d\s]+\s*\}", re.IGNORECASE)
 _REFERENCE_HEADING_RE = re.compile(
     r"\s*(?:references(?:\s+and\s+notes)?|methods\s+references|"
     r"bibliography|literature\s+cited)\s*[:.]?\s*",
+    re.IGNORECASE,
+)
+_PUBLICATION_BADGE_PREFIX_RE = re.compile(
+    r"^(\s*(?:(?:ARTICLE\s+OPEN(?:\s+ACCESS)?|OPEN\s+ACCESS|"
+    r"RESEARCH\s+ARTICLE|ORIGINAL\s+ARTICLE|REVIEW\s+ARTICLE|"
+    r"BRIEF\s+COMMUNICATION|PERSPECTIVE|EDITORIAL)\s+))(?=\S)",
     re.IGNORECASE,
 )
 _SECTION_STOP_RE = re.compile(
@@ -435,6 +446,32 @@ def _count_author_names(text: str) -> int:
     return len(spans)
 
 
+def _author_name_coverage(text: str) -> float:
+    """Return the fraction of alphabetic text covered by author-name patterns.
+
+    Capitalized prose pairs such as ``The Hamiltonian`` or ``Supplementary
+    Section`` also resemble names.  Requiring names to occupy most of a candidate
+    byline keeps long captions and continued body paragraphs out of the front-
+    matter preservation path without imposing an arbitrary maximum author count.
+    """
+
+    spans = [
+        (match.start(), match.end())
+        for pattern in _AUTHOR_NAME_PATTERNS
+        for match in pattern.finditer(text)
+    ]
+    alphabetic = {index for index, char in enumerate(text) if char.isalpha()}
+    if not alphabetic or not spans:
+        return 0.0
+    covered = {
+        index
+        for start, end in spans
+        for index in range(start, end)
+        if index in alphabetic
+    }
+    return len(covered) / len(alphabetic)
+
+
 def looks_like_author_list(text: str) -> bool:
     compact = re.sub(r"\{\s*v[\d\s]+\s*\}", "", text, flags=re.IGNORECASE)
     compact = re.sub(r"\s+", " ", compact).strip()
@@ -442,7 +479,11 @@ def looks_like_author_list(text: str) -> bool:
         return False
     if re.search(r"(?:19|20)\d{2}|https?://|\bdoi\b", compact, re.IGNORECASE):
         return False
-    return _count_author_names(compact) >= 2 and bool(re.search(r",|\band\b|&", compact))
+    return (
+        _count_author_names(compact) >= 2
+        and _author_name_coverage(compact) >= 0.55
+        and bool(re.search(r",|\band\b|&", compact))
+    )
 
 
 def _affiliation_boundary(text: str, keyword_start: int) -> int:
@@ -577,6 +618,7 @@ class DocumentTranslationPolicy:
         self.last_reference_number: int | None = None
         self.last_reference_prefix = ""
         self.pending_reference_heading = 0
+        self.pending_named_prose_segments = 0
 
     @property
     def expected_reference_number(self) -> int | None:
@@ -595,6 +637,38 @@ class DocumentTranslationPolicy:
         if not stripped:
             return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
 
+        # A detector-confirmed caption or table note is semantic prose, not a
+        # byline or bibliography block.  Route it directly to translation so
+        # incidental Title Case phrases cannot trigger author-name heuristics.
+        if segment.region_kind in _TRANSLATABLE_CAPTION_REGION_KINDS:
+            return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))
+
+        if segment.region_kind == "title":
+            badge = _PUBLICATION_BADGE_PREFIX_RE.match(text)
+            badge_text_end = (
+                len(badge.group(0).rstrip()) if badge is not None else -1
+            )
+            badge_has_source_break = badge_text_end in segment.break_offsets or (
+                0 <= badge_text_end < len(text)
+                and text[badge_text_end] in "\r\n"
+            )
+            if (
+                badge is not None
+                and badge.end() < len(text)
+                and badge_has_source_break
+            ):
+                return SegmentPlan(
+                    segment,
+                    (
+                        SegmentPart(ROLE_PRESERVE, badge.group(0)),
+                        SegmentPart(
+                            ROLE_TRANSLATE,
+                            text[badge.end() :],
+                            break_before=True,
+                        ),
+                    ),
+                )
+
         heading = _REFERENCE_HEADING_RE.fullmatch(stripped)
         if heading:
             self.pending_reference_heading = 3
@@ -603,8 +677,13 @@ class DocumentTranslationPolicy:
         heading_prefix = _REFERENCE_HEADING_RE.match(text)
         heading_hint = self.pending_reference_heading > 0 or heading_prefix is not None
 
+        in_named_prose_section = self.pending_named_prose_segments > 0
         if _SECTION_STOP_RE.match(stripped):
             self.pending_reference_heading = 0
+            self.pending_named_prose_segments = 4
+            in_named_prose_section = True
+        elif self.pending_named_prose_segments:
+            self.pending_named_prose_segments -= 1
 
         region = split_numbered_reference_region(
             text,
@@ -662,7 +741,7 @@ class DocumentTranslationPolicy:
         if self.pending_reference_heading:
             self.pending_reference_heading -= 1
 
-        if protect_authors:
+        if protect_authors and not in_named_prose_section:
             combined = split_author_affiliation(text)
             if combined:
                 author_text, affiliation_text = combined

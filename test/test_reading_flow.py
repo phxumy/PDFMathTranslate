@@ -175,6 +175,164 @@ class ReadingFlowDetectionTests(unittest.TestCase):
         self.assertEqual(edge.left, SegmentRef(7, 0))
         self.assertEqual(edge.right, SegmentRef(8, 0))
 
+    def test_leading_parenthetical_qualifier_can_resume_a_cross_page_sentence(
+        self,
+    ) -> None:
+        previous = [
+            segment(
+                4,
+                8,
+                "Fine features were defined by a high-voltage pattern generator",
+                column=1,
+                y0=74.0,
+                y1=120.0,
+            )
+        ]
+        following = [
+            segment(
+                5,
+                0,
+                "(Model EBPG 5000+) in one step on a resist bilayer.",
+                column=0,
+                y0=650.0,
+                y1=742.0,
+            )
+        ]
+
+        edge = detect_cross_page_edge(previous, following)
+
+        self.assertIsNotNone(edge)
+        self.assertIn("lowercase-after-leading-parenthetical", edge.reasons)
+        groups = build_continuation_groups(
+            [edge],
+            {item.ref: item.text for item in previous + following},
+        )
+        self.assertEqual(len(groups), 1)
+        left, right = groups[0].fragments
+        self.assertEqual(
+            previous[0].text[left.start : left.end],
+            previous[0].text,
+        )
+        self.assertEqual(
+            following[0].text[right.start : right.end],
+            following[0].text,
+        )
+
+    def test_leading_parenthetical_does_not_hide_a_new_uppercase_sentence(
+        self,
+    ) -> None:
+        previous = [
+            segment(
+                4,
+                8,
+                "The preceding page ends with an unfinished prose fragment",
+                column=1,
+                y0=74.0,
+                y1=120.0,
+            )
+        ]
+        following = [
+            segment(
+                5,
+                0,
+                "(a) Measurements begin with a separate procedure.",
+                column=0,
+                y0=650.0,
+                y1=742.0,
+            )
+        ]
+
+        self.assertIsNone(detect_cross_page_edge(previous, following))
+
+    def test_capitalized_eponym_can_follow_a_dangling_page_end_cue(self) -> None:
+        previous = [
+            segment(
+                0,
+                8,
+                "The Josephson energy E{v36} can be computed from the",
+                column=1,
+                y0=74.0,
+                y1=142.0,
+            ),
+            segment(
+                0,
+                9,
+                "Z. K. Minev et al. 1",
+                column=1,
+                y0=32.0,
+                y1=41.0,
+                kind="footer",
+            ),
+        ]
+        following = [
+            segment(
+                1,
+                0,
+                "Fig. 1 Conceptual overview of the device.",
+                column=0,
+                y0=520.0,
+                y1=700.0,
+                kind="figure_caption",
+            ),
+            segment(
+                1,
+                1,
+                "Ambegaokar–Baratoff formula adapted to the measured "
+                "room-temperature resistance of the junction{v0}.",
+                column=0,
+                y0=205.0,
+                y1=335.0,
+            ),
+        ]
+
+        edge = detect_cross_page_edge(previous, following)
+
+        self.assertIsNotNone(edge)
+        self.assertEqual(edge.left, SegmentRef(0, 8))
+        self.assertEqual(edge.right, SegmentRef(1, 1))
+        self.assertIn("capitalized-after-dangling-cue", edge.reasons)
+        groups = build_continuation_groups(
+            [edge],
+            {item.ref: item.text for item in previous + following},
+        )
+        self.assertEqual(len(groups), 1)
+        left, right = groups[0].fragments
+        self.assertEqual(
+            previous[0].text[left.start : left.end],
+            "The Josephson energy E{v36} can be computed from the",
+        )
+        self.assertEqual(
+            following[1].text[right.start : right.end],
+            "Ambegaokar–Baratoff formula adapted to the measured "
+            "room-temperature resistance of the junction{v0}.",
+        )
+
+    def test_capitalized_new_paragraph_is_not_joined_without_dangling_cue(
+        self,
+    ) -> None:
+        previous = [
+            segment(
+                6,
+                4,
+                "The measured response remains stable over time",
+                column=1,
+                y0=74.0,
+                y1=121.0,
+            )
+        ]
+        following = [
+            segment(
+                7,
+                0,
+                "Methods describe a separate calibration procedure.",
+                column=0,
+                y0=610.0,
+                y1=742.0,
+            )
+        ]
+
+        self.assertIsNone(detect_cross_page_edge(previous, following))
+
     def test_finished_sentence_and_heading_do_not_join(self) -> None:
         left = segment(
             0,

@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from collections import Counter
 from copy import copy
 from string import Template
 from typing import Callable, TypeVar, cast
@@ -30,6 +29,16 @@ from tencentcloud.tmt.v20180321.tmt_client import TmtClient
 
 from pdf2zh.cache import TranslationCache
 from pdf2zh.config import ConfigManager
+from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START
+from pdf2zh.translation_quality import (
+    has_suspicious_english_residue,
+    has_suspicious_reference_title_residue,
+    has_unchanged_reference_title_fragment,
+    has_unchanged_translatable_english,
+    normalize_cjk_compatibility_ideographs,
+    normalize_cjk_structural_repetitions,
+    normalize_scientific_cross_reference_placement,
+)
 from pdf2zh.translation_policy import ExactReplacement, apply_exact_replacements
 
 
@@ -1092,15 +1101,20 @@ class CodexTranslator(BaseTranslator):
     MAX_ITEM_CHARS = 300
     SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
     SCIENTIFIC_TRANSLATION_POLICY = (
-        "preserve-personal-names-v1;reference-work-titles-only-v1;"
+        "preserve-personal-names-v1;reference-work-titles-only-v2;"
         "translate-prose-italic-and-preserve-style-v1;"
         "readonly-safe-inline-formula-context-v1;"
-        "cross-column-page-continuation-v1"
+        "cross-column-page-continuation-v1;"
+        "english-residue-gate-v5;cjk-compat-ideographs-v1"
     )
-    REFERENCE_CACHE_PREFIX = "pdf2zh:reference-work-title-only:v1\n"
-    FORMULA_CONTEXT_CACHE_PREFIX = "pdf2zh:readonly-inline-formula:v1\n"
-    STYLED_CACHE_PREFIX = "pdf2zh:styled-italic:v2\n"
-    CONTINUATION_CACHE_PREFIX = "pdf2zh:continuation-fragments:v1\n"
+    REFERENCE_CACHE_PREFIX = "pdf2zh:reference-work-title-only:v3\n"
+    FORMULA_CONTEXT_CACHE_PREFIX = "pdf2zh:readonly-inline-formula:v2\n"
+    STYLED_CACHE_PREFIX = "pdf2zh:styled-italic:v3\n"
+    CONTINUATION_CACHE_PREFIX = "pdf2zh:continuation-fragments:v3\n"
+    REFERENCE_CONTINUATION_CACHE_PREFIX = (
+        "pdf2zh:reference-continuation-title:v2\n"
+    )
+    REFERENCE_BOUNDARY_TOKEN = "[[PDF2ZH_REF_BOUNDARY_0]]"
     MAX_FORMULA_CONTEXT_CODEPOINTS = 48
     ITALIC_TAG_PREFIX = "[[PDF2ZH_ITALIC_"
     ITALIC_TAG_RE = re.compile(
@@ -1115,6 +1129,39 @@ class CodexTranslator(BaseTranslator):
     HSPACE_RE = r"[ \t\u00A0]+"
     CJK_CHAR_RE = r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
     CJK_PUNCT_RE = r"[\u3001-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]"
+    REFERENCE_INCOMPLETE_CJK_MODIFIER_SUFFIXES = (
+        "中低",
+        "中高",
+        "超低",
+        "超高",
+        "极低",
+        "极高",
+        "较低",
+        "较高",
+        "低",
+        "高",
+        "强",
+        "弱",
+        "非",
+        "准",
+        "亚",
+        "超",
+        "反",
+        "多",
+        "少",
+        "单",
+        "双",
+    )
+    # A few superconducting-qubit device families are conventionally written as
+    # lower-case coined names (for example ``transmon`` and ``fluxonium``) even
+    # inside Chinese prose.  The shape check below is deliberately much narrower
+    # than a general technical-term exception: the source term must immediately
+    # modify ``qubit``/``qubits`` and have a characteristic coined-family suffix.
+    # This keeps ordinary untranslated words such as ``quantum`` and ``method``
+    # subject to the complete-or-preserve reference-title gate.
+    REFERENCE_LOWERCASE_QUBIT_FAMILY_RE = re.compile(
+        r"^[a-z][a-z'-]{3,}(?:mon|onium)$"
+    )
     PLACEHOLDER_RE = (
         r"(?:\[\[PDF2ZH_ITALIC_\d+_(?:BEGIN|END)\]\]|"
         r"\[\[PDF2ZH_FLOW_\d+\]\]|"
@@ -1239,15 +1286,28 @@ class CodexTranslator(BaseTranslator):
         ) as executor:
             return list(executor.map(worker, batches))
 
-    def _build_codex_prompt(self, text: str) -> str:
+    def _build_codex_prompt(
+        self,
+        text: str,
+        *,
+        require_complete_translation: bool = False,
+    ) -> str:
         base_prompt = self.prompt(text, self.prompttext)[0]["content"]
+        completeness_requirement = (
+            "- A previous result appeared untranslated. Translate every natural-"
+            "language prose span completely; do not return the English source text "
+            "as the translation.\n"
+            if require_complete_translation
+            else ""
+        )
         return (
             f"{base_prompt}\n\n"
             "Additional requirements:\n"
             '- Return valid JSON with exactly one field: {"translation": "..."}.\n'
             '- The "translation" field must contain only the translated text.\n'
             "- Preserve markdown structure and formulas.\n"
-            "- Preserve placeholder tokens like {v0} and {{v0}} exactly.\n"
+            "- Preserve placeholder tokens like {v0} and {{v0}} exactly and in "
+            "source order. Formula fragments must never be reordered.\n"
             "- Preserve every [[PDF2ZH_FLOW_N]] token character-for-character, "
             "exactly once, and in source order. It is an opaque layout slot.\n"
             "- Tokens such as [[PDF2ZH_ITALIC_0_BEGIN]] and "
@@ -1264,20 +1324,34 @@ class CodexTranslator(BaseTranslator):
             "Preserve authors, journal and conference names, publishers, institutions, "
             "years, volume and issue numbers, pages, DOI, URL, ISBN, and reference labels "
             "exactly.\n"
+            f"{completeness_requirement}"
             "- Do not add explanations, comments, or code fences.\n"
         )
 
-    def _build_batch_prompt(self, texts: list[str]) -> str:
+    def _build_batch_prompt(
+        self,
+        texts: list[str],
+        *,
+        require_complete_translation: bool = False,
+    ) -> str:
         indexed_texts = [
             {"index": idx, "text": text} for idx, text in enumerate(texts, start=1)
         ]
         serialized_texts = json.dumps(indexed_texts, ensure_ascii=False)
+        completeness_requirement = (
+            "A previous result appeared untranslated. Translate every natural-"
+            "language prose span in every item completely; never return an English "
+            "source item unchanged as its translation. "
+            if require_complete_translation
+            else ""
+        )
         return (
             "You are a professional, authentic machine translation engine. "
             "Only output valid JSON that matches the provided schema.\n\n"
             f"Translate the `text` field of each object in the following JSON array "
             f"from {self.lang_in} to {self.lang_out}. Preserve markdown structure, "
-            "formulas, and placeholder tokens like {v0} and {{v0}} exactly. "
+            "formulas, and placeholder tokens like {v0} and {{v0}} exactly and in "
+            "source order. Formula fragments must never be reordered. "
             "Preserve every [[PDF2ZH_ITALIC_N_BEGIN]] and "
             "[[PDF2ZH_ITALIC_N_END]] token character-for-character and exactly once. "
             "Translate natural-language prose between a matching pair normally and "
@@ -1289,7 +1363,7 @@ class CodexTranslator(BaseTranslator):
             "only the cited work title and preserve all authors, venues, publishers, "
             "institutions, dates, volume/issue/page fields, DOI, URL, ISBN, and labels "
             "exactly. Preserve every [[PDF2ZH_FLOW_N]] layout token exactly once and "
-            "in source order. "
+            f"in source order. {completeness_requirement}"
             f"There are exactly {len(texts)} items. Return exactly {len(texts)} "
             "translated strings in ascending `index` order. Do not merge, drop, "
             "or reorder items.\n\n"
@@ -1300,6 +1374,89 @@ class CodexTranslator(BaseTranslator):
     @classmethod
     def _formula_token_sequence(cls, text: str) -> tuple[str, ...]:
         return tuple(match.group(0) for match in cls.FORMULA_TOKEN_RE.finditer(text))
+
+    @staticmethod
+    def _is_ascii_identifier_character(character: str) -> bool:
+        return len(character) == 1 and character.isascii() and character.isalnum()
+
+    @classmethod
+    def _formula_atom_spans(
+        cls,
+        text: str,
+    ) -> tuple[tuple[int, int, bool], ...]:
+        """Return formula guard spans and whether each is a compact atom.
+
+        PDF font boundaries can split one mathematical identifier into ordinary
+        text plus a formula placeholder (for example ``p{v0}``).  A short
+        all-capitals suffix can likewise be the rest of one identifier, as in
+        ``{v0}EPR``.  Only these conservative shapes, or directly adjacent
+        placeholders, are joined; ordinary words next to a placeholder remain
+        translatable prose.
+        """
+
+        spans: list[list[int | bool]] = []
+        for match in cls.FORMULA_TOKEN_RE.finditer(text):
+            token_start, token_end = match.span()
+            start, end = token_start, token_end
+
+            prefix_start = token_start
+            while prefix_start > 0 and cls._is_ascii_identifier_character(
+                text[prefix_start - 1]
+            ):
+                prefix_start -= 1
+            prefix = text[prefix_start:token_start]
+            if len(prefix) == 1:
+                start = prefix_start
+
+            suffix_end = token_end
+            while suffix_end < len(text) and cls._is_ascii_identifier_character(
+                text[suffix_end]
+            ):
+                suffix_end += 1
+            suffix = text[token_end:suffix_end]
+            short_identifier_suffix = len(suffix) == 1 or (
+                2 <= len(suffix) <= 8
+                and any(character.isalpha() for character in suffix)
+                and suffix.upper() == suffix
+            )
+            if short_identifier_suffix:
+                end = suffix_end
+
+            spans.append([start, end, start != token_start or end != token_end])
+
+        merged: list[list[int | bool]] = []
+        for start, end, compact in spans:
+            if merged and int(start) <= int(merged[-1][1]):
+                merged[-1][1] = max(int(merged[-1][1]), int(end))
+                # Touching/overlapping placeholder spans form one mathematical
+                # atom even when neither placeholder has a textual affix.
+                merged[-1][2] = True
+                continue
+            merged.append([int(start), int(end), bool(compact)])
+        return tuple(
+            (int(start), int(end), bool(compact)) for start, end, compact in merged
+        )
+
+    @classmethod
+    def _compact_formula_atoms(cls, text: str) -> tuple[str, ...]:
+        return tuple(
+            text[start:end]
+            for start, end, compact in cls._formula_atom_spans(text)
+            if compact
+        )
+
+    @classmethod
+    def _validate_compact_formula_adjacency(
+        cls,
+        source: str,
+        target: str,
+    ) -> bool:
+        """Require split-font mathematical atoms to remain byte-adjacent."""
+
+        for atom in set(cls._compact_formula_atoms(source)):
+            if target.count(atom) != source.count(atom):
+                return False
+        return True
 
     @classmethod
     def _normalize_formula_context(
@@ -1400,6 +1557,8 @@ class CodexTranslator(BaseTranslator):
         self,
         texts: list[str],
         formula_contexts: list[list[dict[str, str]]],
+        *,
+        require_complete_translation: bool = False,
     ) -> str:
         if len(texts) != len(formula_contexts):
             raise ValueError("formula contexts must have the same length as texts")
@@ -1420,6 +1579,12 @@ class CodexTranslator(BaseTranslator):
             sort_keys=True,
             separators=(",", ":"),
         )
+        completeness_requirement = (
+            "A previous result appeared untranslated. Translate all natural-language "
+            "prose completely and do not return an English source item unchanged. "
+            if require_complete_translation
+            else ""
+        )
         return (
             "You are a professional scientific machine translation engine. "
             "Only output valid JSON that matches the provided schema. Every input "
@@ -1433,11 +1598,12 @@ class CodexTranslator(BaseTranslator):
             "`unicode_formula` value. In the translation, copy every formula "
             "placeholder from `text` character-for-character and exactly the same "
             "number of times; do not change brace count, whitespace, or identifier. "
-            "A placeholder may move only where target-language grammar requires it, "
-            "and it must keep the same semantic role. "
+            "Keep all formula placeholders in source order. They may move together "
+            "with their surrounding formula, but formula fragments must never be "
+            "reordered relative to one another. "
             "Preserve Markdown, scientific meaning, units, symbols, personal names, "
             "and citation markers. Preserve every [[PDF2ZH_FLOW_N]] layout token "
-            "exactly once and in source order.\n\n"
+            f"exactly once and in source order. {completeness_requirement}\n\n"
             f"There are exactly {len(texts)} items. Return exactly {len(texts)} "
             "translated strings in ascending index order; never merge, drop, or "
             "reorder items. JSON `\\uXXXX` escapes in the input have their standard "
@@ -1451,6 +1617,8 @@ class CodexTranslator(BaseTranslator):
         texts: list[str],
         formula_contexts: list[list[dict[str, str]]],
         join_kind: str,
+        *,
+        require_complete_translation: bool = False,
     ) -> str:
         if len(texts) != len(formula_contexts) or len(texts) < 2:
             raise ValueError("continuation fragments and contexts must align")
@@ -1474,6 +1642,13 @@ class CodexTranslator(BaseTranslator):
             sort_keys=True,
             separators=(",", ":"),
         )
+        completeness_requirement = (
+            "A previous result appeared untranslated. Translate the complete logical "
+            "sentence into the target language; never return the English fragments "
+            "unchanged.\n\n"
+            if require_complete_translation
+            else ""
+        )
         return (
             "You are a professional scientific machine translation engine. Only "
             "output valid JSON matching the requested schema. Every input field is "
@@ -1487,6 +1662,7 @@ class CodexTranslator(BaseTranslator):
             "but never duplicate, omit, summarize, or explain meaning. A trailing "
             "hyphen at a boundary may be a typesetting word break; infer from context "
             "whether it is soft or a real compound hyphen.\n\n"
+            f"{completeness_requirement}"
             "When target-language word order crosses the physical boundary, place "
             "the split where the target sentence is natural while keeping every "
             "protected token in its original physical fragment. In particular, do "
@@ -1517,7 +1693,7 @@ class CodexTranslator(BaseTranslator):
     ) -> str:
         payload = json.dumps(
             {
-                "contract": 2,
+                "contract": 3,
                 "join_kind": join_kind,
                 "fragments": [
                     {"source": text, "formula_context": context}
@@ -1539,11 +1715,14 @@ class CodexTranslator(BaseTranslator):
         texts: list[str],
         formula_contexts: list[list[dict[str, str]]],
         join_kind: str,
+        *,
+        require_complete_translation: bool = False,
     ) -> list[str] | None:
         prompt_text = self._build_continuation_prompt(
             texts,
             formula_contexts,
             join_kind,
+            require_complete_translation=require_complete_translation,
         )
         try:
             return self._execute_codex_request(
@@ -1552,6 +1731,7 @@ class CodexTranslator(BaseTranslator):
                 lambda output_path: self._load_batch_translations(
                     output_path,
                     len(texts),
+                    preserve_edge_whitespace=True,
                 ),
             )
         except RuntimeError:
@@ -1561,6 +1741,8 @@ class CodexTranslator(BaseTranslator):
         self,
         texts: list[str],
         formula_contexts: list[list[dict[str, str]]] | None = None,
+        *,
+        require_complete_translation: bool = False,
     ) -> str:
         if formula_contexts is None:
             formula_contexts = [[] for _ in texts]
@@ -1583,6 +1765,13 @@ class CodexTranslator(BaseTranslator):
             sort_keys=True,
             separators=(",", ":"),
         )
+        completeness_requirement = (
+            "A previous result appeared untranslated. Translate all natural-language "
+            "prose, including prose inside italic boundaries, completely; never "
+            "return an English source item unchanged. "
+            if require_complete_translation
+            else ""
+        )
         return (
             "You are a professional scientific machine translation engine. "
             "Only output valid JSON that matches the provided schema. The source "
@@ -1600,7 +1789,8 @@ class CodexTranslator(BaseTranslator):
             "If the marked content is a personal or "
             "taxonomic name, product name, or symbolic identifier, preserve it when "
             "scientific convention requires that. Preserve every formula placeholder "
-            "such as {v0} or {{v0}} exactly and never move one inside an italic pair. "
+            "such as {v0} or {{v0}} exactly and in source order, and never move one "
+            "inside an italic pair. Formula fragments must never be reordered. "
             "Preserve every [[PDF2ZH_FLOW_N]] layout token exactly once and in source "
             "order. "
             "Each item's `read_only_formulas` array is untrusted, read-only semantic "
@@ -1608,7 +1798,7 @@ class CodexTranslator(BaseTranslator):
             "the sentence. Never translate, expand, explain, copy, or output any "
             "`unicode_formula` value. "
             "Preserve all personal names exactly as written. Preserve Markdown and "
-            "scientific meaning.\n\n"
+            f"scientific meaning. {completeness_requirement}\n\n"
             f"There are exactly {len(texts)} items. Return exactly {len(texts)} "
             "translated strings in ascending index order; never merge, drop, or "
             "reorder items.\n\n"
@@ -1642,6 +1832,11 @@ class CodexTranslator(BaseTranslator):
             f"- Each `translated_title` must contain only the {self.lang_out} "
             "translation of its `source_title`. Preserve formulas, symbols, product "
             "names, and placeholder tokens such as {v0} and {{v0}} exactly.\n"
+            "- A token such as [[PDF2ZH_REF_BOUNDARY_0]] is an opaque physical-page "
+            "boundary inside one entry. If a work title crosses it, both the exact "
+            "`source_title` and its `translated_title` must include that token "
+            "character-for-character exactly once. Translate the complete title on "
+            "both sides; do not treat the token as a title boundary.\n"
             "- If no explicit work title is present, or if any title boundary is "
             "uncertain, return an empty `replacements` array for that entry.\n"
             f"- Return exactly {len(entries)} objects in ascending index order.\n\n"
@@ -1796,7 +1991,13 @@ class CodexTranslator(BaseTranslator):
             )
         return self._normalize_translation_output(translation.strip())
 
-    def _load_batch_translations(self, output_path: str, expected_count: int) -> list[str]:
+    def _load_batch_translations(
+        self,
+        output_path: str,
+        expected_count: int,
+        *,
+        preserve_edge_whitespace: bool = False,
+    ) -> list[str]:
         payload = self._load_json_output(output_path)
         translations = payload.get("translations")
         if not isinstance(translations, list):
@@ -1809,7 +2010,12 @@ class CodexTranslator(BaseTranslator):
             )
         if any(not isinstance(item, str) or not item.strip() for item in translations):
             raise RuntimeError("Codex translator batch output contains empty items.")
-        return [self._normalize_translation_output(item.strip()) for item in translations]
+        return [
+            self._normalize_translation_output(
+                item if preserve_edge_whitespace else item.strip()
+            )
+            for item in translations
+        ]
 
     def _load_reference_title_replacements(
         self, output_path: str, expected_count: int
@@ -1935,8 +2141,16 @@ class CodexTranslator(BaseTranslator):
 
             raise last_error
 
-    def _run_single_translation(self, text: str) -> str:
-        prompt_text = self._build_codex_prompt(text)
+    def _run_single_translation(
+        self,
+        text: str,
+        *,
+        require_complete_translation: bool = False,
+    ) -> str:
+        prompt_text = self._build_codex_prompt(
+            text,
+            require_complete_translation=require_complete_translation,
+        )
         return self._execute_codex_request(
             prompt_text, self.single_output_schema, self._load_translation
         )
@@ -2024,8 +2238,16 @@ class CodexTranslator(BaseTranslator):
             chunks.extend(self._split_long_text(sentence))
         return chunks
 
-    def _run_batch_translation(self, texts: list[str]) -> list[str]:
-        prompt_text = self._build_batch_prompt(texts)
+    def _run_batch_translation(
+        self,
+        texts: list[str],
+        *,
+        require_complete_translation: bool = False,
+    ) -> list[str]:
+        prompt_text = self._build_batch_prompt(
+            texts,
+            require_complete_translation=require_complete_translation,
+        )
         try:
             return self._execute_codex_request(
                 prompt_text,
@@ -2036,7 +2258,12 @@ class CodexTranslator(BaseTranslator):
             )
         except RuntimeError as exc:
             if len(texts) == 1:
-                return [self._run_single_translation(texts[0])]
+                return [
+                    self._run_single_translation(
+                        texts[0],
+                        require_complete_translation=require_complete_translation,
+                    )
+                ]
             detail = str(exc)
             if (
                 "translations" not in detail
@@ -2046,8 +2273,12 @@ class CodexTranslator(BaseTranslator):
             ):
                 raise
             midpoint = len(texts) // 2
-            return self._run_batch_translation(texts[:midpoint]) + self._run_batch_translation(
-                texts[midpoint:]
+            return self._run_batch_translation(
+                texts[:midpoint],
+                require_complete_translation=require_complete_translation,
+            ) + self._run_batch_translation(
+                texts[midpoint:],
+                require_complete_translation=require_complete_translation,
             )
 
     def _chunk_context_batch(
@@ -2077,10 +2308,13 @@ class CodexTranslator(BaseTranslator):
         self,
         texts: list[str],
         formula_contexts: list[list[dict[str, str]]],
+        *,
+        require_complete_translation: bool = False,
     ) -> list[str | None]:
         prompt_text = self._build_formula_context_batch_prompt(
             texts,
             formula_contexts,
+            require_complete_translation=require_complete_translation,
         )
         try:
             return self._execute_codex_request(
@@ -2102,9 +2336,11 @@ class CodexTranslator(BaseTranslator):
             return self._run_formula_context_batch_request(
                 texts[:midpoint],
                 formula_contexts[:midpoint],
+                require_complete_translation=require_complete_translation,
             ) + self._run_formula_context_batch_request(
                 texts[midpoint:],
                 formula_contexts[midpoint:],
+                require_complete_translation=require_complete_translation,
             )
 
     @classmethod
@@ -2123,6 +2359,167 @@ class CodexTranslator(BaseTranslator):
             if target.count(value) > source.count(value):
                 return False
         return True
+
+    def _retry_contextual_item(
+        self,
+        source: str,
+        context: list[dict[str, str]],
+        *,
+        ignore_cache: bool = False,
+    ) -> str | None:
+        """Retry one failed chunk without discarding other valid chunk results."""
+
+        if not (self.ignore_cache or ignore_cache):
+            cached = self.cache.get(source)
+            accepted = self._accepted_contextual_translation(
+                source,
+                cached,
+                context,
+            )
+            if accepted is not None:
+                return accepted
+
+        if context:
+            contextual = self._run_formula_context_batch_request(
+                [source],
+                [context],
+                require_complete_translation=True,
+            )[0]
+            accepted = self._accepted_contextual_translation(
+                source,
+                contextual,
+                context,
+            )
+            if accepted is not None:
+                return accepted
+        try:
+            ordinary = self._run_batch_translation(
+                [source],
+                require_complete_translation=True,
+            )[0]
+        except RuntimeError:
+            ordinary = None
+        accepted = self._accepted_contextual_translation(
+            source,
+            ordinary,
+            context,
+        )
+        if accepted is not None:
+            return accepted
+        accepted = self._retry_contextual_item_with_flow_guards(source, context)
+        if accepted is not None:
+            return accepted
+        return self._retry_contextual_item_by_prose_spans(source, context)
+
+    def _retry_contextual_item_by_prose_spans(
+        self,
+        source: str,
+        context: list[dict[str, str]],
+    ) -> str | None:
+        """Translate only prose gaps as a last, order-preserving fallback.
+
+        A formula-dense caption may contain enough independent placeholders that a
+        fluent target-language sentence naturally moves one of them.  Repeatedly
+        asking the model to copy all placeholders in order can then fail closed and
+        leave a whole caption untranslated.  Translating the formula-free gaps and
+        reassembling them locally makes placeholder order a deterministic property
+        while keeping the original PDF formula glyphs untouched.
+        """
+
+        parts: list[str] = []
+        prose_indices: list[int] = []
+        prose_spans: list[str] = []
+        cursor = 0
+        for match in self.FORMULA_TOKEN_RE.finditer(source):
+            gap = source[cursor : match.start()]
+            parts.append(gap)
+            if re.search(r"[A-Za-z]{2,}", gap):
+                prose_indices.append(len(parts) - 1)
+                prose_spans.append(gap)
+            parts.append(match.group(0))
+            cursor = match.end()
+        tail = source[cursor:]
+        parts.append(tail)
+        if re.search(r"[A-Za-z]{2,}", tail):
+            prose_indices.append(len(parts) - 1)
+            prose_spans.append(tail)
+
+        if not prose_spans:
+            return None
+        try:
+            translated_spans = self._run_batch_translation(
+                prose_spans,
+                require_complete_translation=True,
+            )
+        except RuntimeError:
+            return None
+        if len(translated_spans) != len(prose_spans):
+            return None
+
+        for part_index, prose_source, prose_target in zip(
+            prose_indices,
+            prose_spans,
+            translated_spans,
+            strict=True,
+        ):
+            accepted_span = self._accepted_translation(
+                prose_source,
+                prose_target,
+            )
+            if accepted_span is None:
+                return None
+            parts[part_index] = accepted_span
+
+        return self._accepted_contextual_translation(
+            source,
+            "".join(parts),
+            context,
+        )
+
+    def _retry_contextual_item_with_flow_guards(
+        self,
+        source: str,
+        context: list[dict[str, str]],
+    ) -> str | None:
+        """Use ordered flow guards when a model keeps moving formula tokens."""
+
+        cursor = 0
+        masked_parts: list[str] = []
+        guards: list[tuple[str, str]] = []
+        guard_number = 900_000_000
+        for start, end, _ in self._formula_atom_spans(source):
+            masked_parts.append(source[cursor:start])
+            guard = f"[[PDF2ZH_FLOW_{guard_number}]]"
+            while guard in source:
+                guard_number += 1
+                guard = f"[[PDF2ZH_FLOW_{guard_number}]]"
+            masked_parts.append(guard)
+            guards.append((guard, source[start:end]))
+            guard_number += 1
+            cursor = end
+        if not guards:
+            return None
+        masked_parts.append(source[cursor:])
+        masked_source = "".join(masked_parts)
+        try:
+            masked_target = self._run_batch_translation(
+                [masked_source],
+                require_complete_translation=True,
+            )[0]
+        except RuntimeError:
+            return None
+        accepted_masked = self._accepted_translation(
+            masked_source,
+            masked_target,
+        )
+        if accepted_masked is None:
+            return None
+        restored = accepted_masked
+        for guard, formula_token in guards:
+            if restored.count(guard) != 1:
+                return None
+            restored = restored.replace(guard, formula_token, 1)
+        return self._accepted_contextual_translation(source, restored, context)
 
     def translate_batch_with_formula_contexts(
         self,
@@ -2160,12 +2557,13 @@ class CodexTranslator(BaseTranslator):
             cache_key = self._formula_context_cache_key(source, context)
             if not (self.ignore_cache or ignore_cache):
                 cached = self.cache.get(cache_key)
-                if cached is not None and self._validate_contextual_translation(
+                accepted_cache = self._accepted_contextual_translation(
                     source,
                     cached,
                     context,
-                ):
-                    results[index] = cached
+                )
+                if accepted_cache is not None:
+                    results[index] = accepted_cache
                     continue
             pending.append((index, source, context))
 
@@ -2205,8 +2603,7 @@ class CodexTranslator(BaseTranslator):
                     recombine_map[original_index].append(expanded_index)
                     expanded_index += 1
 
-            expanded_results: dict[int, str] = {}
-            expanded_is_valid: dict[int, bool] = {}
+            expanded_results: dict[int, str | None] = {}
             contextual_items = [item for item in expanded_items if item[2]]
             ordinary_items = [
                 (index, source)
@@ -2232,28 +2629,11 @@ class CodexTranslator(BaseTranslator):
                     batch_results,
                     strict=True,
                 ):
-                    is_valid = target is not None and (
-                        self._validate_contextual_translation(
-                            source,
-                            target,
-                            context,
+                    expanded_results[index] = (
+                        self._accepted_contextual_translation(
+                            source, target, context
                         )
                     )
-                    if not is_valid:
-                        retry = self._run_formula_context_batch_request(
-                            [source],
-                            [context],
-                        )[0]
-                        is_valid = retry is not None and (
-                            self._validate_contextual_translation(
-                                source,
-                                retry,
-                                context,
-                            )
-                        )
-                        target = retry if is_valid else source
-                    expanded_results[index] = target
-                    expanded_is_valid[index] = is_valid
 
             ordinary_batches = self._chunk_batch(ordinary_items)
             ordinary_batch_results = self._map_batches(
@@ -2272,37 +2652,59 @@ class CodexTranslator(BaseTranslator):
                     batch_results,
                     strict=True,
                 ):
-                    is_valid = self._validate_formula_translation(source, target)
-                    if not is_valid:
-                        retry = self._run_batch_translation([source])[0]
-                        is_valid = self._validate_formula_translation(source, retry)
-                        target = retry if is_valid else source
-                    expanded_results[index] = target
-                    expanded_is_valid[index] = is_valid
+                    expanded_results[index] = self._accepted_translation(
+                        source,
+                        target,
+                    )
+
+            for index, source, context in expanded_items:
+                if expanded_results.get(index) is None:
+                    expanded_results[index] = self._retry_contextual_item(
+                        source,
+                        context,
+                        ignore_cache=ignore_cache,
+                    )
 
             for original_index, source, context in pending:
                 segment_indices = recombine_map[original_index]
                 translated_segments = [
                     expanded_results[index] for index in segment_indices
                 ]
-                combined = self._recombine_translated_segments(
-                    segment_sources[original_index],
-                    translated_segments,
-                )
-                combined = self._normalize_translation_output(combined)
-                if not self._validate_contextual_translation(
-                    source,
-                    combined,
-                    context,
-                ):
-                    results[original_index] = source
-                    continue
-                results[original_index] = combined
-                if all(expanded_is_valid[index] for index in segment_indices):
-                    self.cache.set(
-                        self._formula_context_cache_key(source, context),
-                        combined,
+                accepted: str | None = None
+                if all(segment is not None for segment in translated_segments):
+                    combined = self._recombine_translated_segments(
+                        segment_sources[original_index],
+                        [
+                            segment
+                            for segment in translated_segments
+                            if segment is not None
+                        ],
                     )
+                    accepted = self._accepted_contextual_translation(
+                        source,
+                        combined,
+                        context,
+                    )
+
+                if accepted is None:
+                    accepted = self._retry_contextual_item(
+                        source,
+                        context,
+                        ignore_cache=ignore_cache,
+                    )
+
+                if accepted is None:
+                    results[original_index] = source
+                    logger.warning(
+                        "Codex returned an incomplete formula-context translation; "
+                        "the source text was preserved without caching."
+                    )
+                    continue
+                results[original_index] = accepted
+                self.cache.set(
+                    self._formula_context_cache_key(source, context),
+                    accepted,
+                )
 
         return [
             source if target is None else target
@@ -2339,6 +2741,27 @@ class CodexTranslator(BaseTranslator):
             join_kind,
         )
 
+        def fragments_are_valid(targets: list[str]) -> bool:
+            for source, target, context in zip(
+                texts,
+                targets,
+                normalized_contexts,
+                strict=True,
+            ):
+                if not self._validate_formula_translation(source, target):
+                    return False
+                source_styles = self._styled_token_sequence(source)
+                target_styles = self._styled_token_sequence(target)
+                if source_styles is None or target_styles != source_styles:
+                    return False
+                if not self._validate_contextual_translation(
+                    source,
+                    target,
+                    context,
+                ):
+                    return False
+            return True
+
         def validate(values: object) -> list[str] | None:
             if isinstance(values, (str, bytes)):
                 return None
@@ -2350,25 +2773,66 @@ class CodexTranslator(BaseTranslator):
                 isinstance(target, str) for target in targets
             ):
                 return None
-            for source, target, context in zip(
-                texts,
-                targets,
-                normalized_contexts,
-                strict=True,
-            ):
-                if not self._validate_formula_translation(source, target):
+            normalized_targets = self._normalize_continuation_whitespace(
+                [self._normalize_translation_output(target) for target in targets]
+            )
+            if self._checks_english_residue():
+                repaired_targets: list[str] = []
+                for source, target in zip(texts, normalized_targets, strict=True):
+                    repaired = normalize_scientific_cross_reference_placement(
+                        source,
+                        target,
+                    )
+                    if repaired is None:
+                        return None
+                    repaired_targets.append(repaired)
+                normalized_targets = repaired_targets
+            if not fragments_are_valid(normalized_targets):
+                return None
+            rebalanced_targets = self._rebalance_continuation_punctuation(
+                normalized_targets
+            )
+            if fragments_are_valid(rebalanced_targets):
+                normalized_targets = rebalanced_targets
+            if self._checks_english_residue():
+                joined_source = "".join(texts)
+                joined_target = "".join(normalized_targets)
+                joined_reference_check = (
+                    normalize_scientific_cross_reference_placement(
+                        joined_source,
+                        joined_target,
+                    )
+                )
+                if (
+                    joined_reference_check is None
+                    or joined_reference_check != joined_target
+                ):
+                    # A repair spanning physical fragments cannot be redistributed
+                    # without risking page-local formula/style ownership. Retry the
+                    # complete logical sentence instead.
                     return None
-                source_styles = self._styled_token_sequence(source)
-                target_styles = self._styled_token_sequence(target)
-                if source_styles is None or target_styles != source_styles:
-                    return None
-                if not self._validate_contextual_translation(
-                    source,
-                    target,
-                    context,
+                # CJK boundary normalization deliberately removes a physical
+                # fragment's surrounding whitespace.  Compare a second joined
+                # form with only those boundary spaces removed so an old cached
+                # source copy cannot evade the identity gate as
+                # ``Quantum`` + ``circuits``.
+                boundary_whitespace = " \t\r\n\u00a0"
+                identity_source = "".join(
+                    text.strip(boundary_whitespace) for text in texts
+                )
+                identity_target = "".join(
+                    text.strip(boundary_whitespace)
+                    for text in normalized_targets
+                )
+                if has_unchanged_translatable_english(
+                    identity_source,
+                    identity_target,
+                ) or has_suspicious_english_residue(
+                    joined_source,
+                    joined_target,
                 ):
                     return None
-            return targets
+            return normalized_targets
 
         if not (self.ignore_cache or ignore_cache):
             cached = self.cache.get(cache_key)
@@ -2382,11 +2846,12 @@ class CodexTranslator(BaseTranslator):
                     if validated is not None:
                         return validated
 
-        for _ in range(2):
+        for attempt in range(2):
             translated = self._run_continuation_request(
                 texts,
                 normalized_contexts,
                 join_kind,
+                require_complete_translation=attempt == 1,
             )
             validated = validate(translated) if translated is not None else None
             if validated is None:
@@ -2402,13 +2867,83 @@ class CodexTranslator(BaseTranslator):
             return validated
         return None
 
+    def _normalize_continuation_whitespace(
+        self,
+        targets: list[str],
+    ) -> list[str]:
+        """Preserve one meaningful non-CJK space at each physical boundary."""
+
+        if not targets:
+            return []
+        whitespace = " \t\r\n\u00a0"
+        normalized = list(targets)
+        normalized[0] = normalized[0].lstrip(whitespace)
+        normalized[-1] = normalized[-1].rstrip(whitespace)
+        cjk_target = self.lang_out.lower() in {
+            "zh",
+            "zh-cn",
+            "zh-tw",
+            "zh-hans",
+            "zh-hant",
+        }
+        for index in range(1, len(normalized)):
+            left = normalized[index - 1]
+            right = normalized[index]
+            left_without_space = left.rstrip(whitespace)
+            right_without_space = right.lstrip(whitespace)
+            had_boundary_space = (
+                left_without_space != left or right_without_space != right
+            )
+            separator = "" if cjk_target or not had_boundary_space else " "
+            normalized[index - 1] = left_without_space + separator
+            normalized[index] = right_without_space
+        return normalized
+
+    def _rebalance_continuation_punctuation(
+        self,
+        targets: list[str],
+    ) -> list[str]:
+        """Move target-leading Chinese closing punctuation across a boundary.
+
+        Only a contiguous punctuation prefix moves. Protected formula, flow, and
+        italic tokens start with opening delimiters and therefore remain in their
+        original physical fragment. The caller revalidates every protected-token
+        sequence before accepting the result.
+        """
+
+        if self.lang_out.lower() not in {
+            "zh",
+            "zh-cn",
+            "zh-tw",
+            "zh-hans",
+            "zh-hant",
+        }:
+            return list(targets)
+
+        rebalanced = list(targets)
+        for index in range(1, len(rebalanced)):
+            right = rebalanced[index]
+            punctuation_end = 0
+            while (
+                punctuation_end < len(right)
+                and right[punctuation_end] in CJK_PROHIBITED_LINE_START
+                and unicodedata.category(right[punctuation_end]).startswith("P")
+            ):
+                punctuation_end += 1
+            if punctuation_end == 0 or not right[punctuation_end:].strip():
+                continue
+            punctuation = right[:punctuation_end]
+            rebalanced[index - 1] += punctuation
+            rebalanced[index] = right[punctuation_end:]
+        return rebalanced
+
     @classmethod
     def _validate_formula_translation(cls, source: str, target: str) -> bool:
         if not isinstance(target, str) or not target.strip():
             return False
-        if Counter(cls._formula_token_sequence(source)) != Counter(
-            cls._formula_token_sequence(target)
-        ):
+        if cls._formula_token_sequence(source) != cls._formula_token_sequence(target):
+            return False
+        if not cls._validate_compact_formula_adjacency(source, target):
             return False
         source_flow = tuple(cls.FLOW_TOKEN_RE.findall(source))
         target_flow = tuple(cls.FLOW_TOKEN_RE.findall(target))
@@ -2470,8 +3005,14 @@ class CodexTranslator(BaseTranslator):
         self,
         texts: list[str],
         formula_contexts: list[list[dict[str, str]]],
+        *,
+        require_complete_translation: bool = False,
     ) -> list[str | None]:
-        prompt_text = self._build_styled_batch_prompt(texts, formula_contexts)
+        prompt_text = self._build_styled_batch_prompt(
+            texts,
+            formula_contexts,
+            require_complete_translation=require_complete_translation,
+        )
         try:
             return self._execute_codex_request(
                 prompt_text,
@@ -2492,9 +3033,11 @@ class CodexTranslator(BaseTranslator):
             return self._run_styled_batch_request(
                 texts[:midpoint],
                 formula_contexts[:midpoint],
+                require_complete_translation=require_complete_translation,
             ) + self._run_styled_batch_request(
                 texts[midpoint:],
                 formula_contexts[midpoint:],
+                require_complete_translation=require_complete_translation,
             )
 
     def translate_styled_batch(
@@ -2521,15 +3064,13 @@ class CodexTranslator(BaseTranslator):
             cache_key = self._styled_cache_key(source, context)
             if not self.ignore_cache:
                 cached = self.cache.get(cache_key)
-                if cached is not None and self._validate_styled_translation(
-                    source,
-                    cached,
-                ) and self._validate_contextual_translation(
+                accepted_cache = self._accepted_styled_translation(
                     source,
                     cached,
                     context,
-                ):
-                    results[index] = cached
+                )
+                if accepted_cache is not None:
+                    results[index] = accepted_cache
                     continue
             pending.append((index, source, context))
 
@@ -2547,32 +3088,28 @@ class CodexTranslator(BaseTranslator):
                 batch_results,
                 strict=True,
             ):
-                if translated is None or not self._validate_styled_translation(
-                    source,
-                    translated,
-                ) or not self._validate_contextual_translation(
+                accepted = self._accepted_styled_translation(
                     source,
                     translated,
                     context,
-                ):
+                )
+                if accepted is None:
                     retry_result = self._run_styled_batch_request(
                         [source],
                         [context],
+                        require_complete_translation=True,
                     )[0]
-                    if retry_result is None or not self._validate_styled_translation(
-                        source,
-                        retry_result,
-                    ) or not self._validate_contextual_translation(
+                    accepted = self._accepted_styled_translation(
                         source,
                         retry_result,
                         context,
-                    ):
+                    )
+                    if accepted is None:
                         continue
-                    translated = retry_result
-                results[index] = translated
+                results[index] = accepted
                 self.cache.set(
                     self._styled_cache_key(source, context),
-                    translated,
+                    accepted,
                 )
         return results
 
@@ -2634,7 +3171,9 @@ class CodexTranslator(BaseTranslator):
             (self.CJK_PUNCT_RE, self.PLACEHOLDER_RE),
             (self.PLACEHOLDER_RE, self.CJK_PUNCT_RE),
         ]
-        normalized = text
+        normalized = normalize_cjk_structural_repetitions(
+            normalize_cjk_compatibility_ideographs(text)
+        )
         changed = True
         while changed:
             previous = normalized
@@ -2645,45 +3184,135 @@ class CodexTranslator(BaseTranslator):
             changed = normalized != previous
         return normalized
 
+    def _checks_english_residue(self) -> bool:
+        lang_in = str(getattr(self, "lang_in", "en")).lower()
+        lang_out = str(getattr(self, "lang_out", "zh-cn")).lower()
+        return lang_in.startswith("en") and lang_out in {
+            "zh",
+            "zh-cn",
+            "zh-tw",
+            "zh-hans",
+            "zh-hant",
+        }
+
+    def _accepted_translation(
+        self,
+        source: str,
+        target: object,
+    ) -> str | None:
+        if not isinstance(target, str):
+            return None
+        normalized = self._normalize_translation_output(target.strip())
+        if self._checks_english_residue():
+            normalized_cross_references = (
+                normalize_scientific_cross_reference_placement(
+                    source,
+                    normalized,
+                )
+            )
+            if normalized_cross_references is None:
+                return None
+            normalized = normalized_cross_references
+        if not self._validate_formula_translation(source, normalized):
+            return None
+        if self._checks_english_residue() and (
+            has_unchanged_translatable_english(source, normalized)
+            or has_suspicious_english_residue(source, normalized)
+        ):
+            return None
+        return normalized
+
+    def _accepted_contextual_translation(
+        self,
+        source: str,
+        target: object,
+        formula_context: list[dict[str, str]],
+    ) -> str | None:
+        accepted = self._accepted_translation(source, target)
+        if accepted is None or not self._validate_contextual_translation(
+            source,
+            accepted,
+            formula_context,
+        ):
+            return None
+        return accepted
+
+    def _accepted_styled_translation(
+        self,
+        source: str,
+        target: object,
+        formula_context: list[dict[str, str]],
+    ) -> str | None:
+        accepted = self._accepted_contextual_translation(
+            source,
+            target,
+            formula_context,
+        )
+        if accepted is None or not self._validate_styled_translation(
+            source,
+            accepted,
+        ):
+            return None
+        return accepted
+
     def do_translate(self, text: str) -> str:
         return self._run_single_translation(text)
+
+    def translate(self, text: str, ignore_cache: bool = False) -> str:
+        """Translate one item without ever caching an unvalidated Codex result."""
+        if self._is_passthrough_text(text):
+            return text
+        if not (self.ignore_cache or ignore_cache):
+            cached = self.cache.get(text)
+            accepted = self._accepted_translation(text, cached)
+            if accepted is not None:
+                return accepted
+
+        for require_complete_translation in (False, True):
+            try:
+                candidate = self._run_single_translation(
+                    text,
+                    require_complete_translation=require_complete_translation,
+                )
+            except RuntimeError:
+                if require_complete_translation:
+                    raise
+                continue
+            accepted = self._accepted_translation(text, candidate)
+            if accepted is None:
+                continue
+            self.cache.set(text, accepted)
+            return accepted
+        return text
 
     def translate_batch(
         self, texts: list[str], ignore_cache: bool = False
     ) -> list[str]:
         if self.prompttext:
-            translated = self._map_batches(
+            return self._map_batches(
                 texts,
                 lambda text: self.translate(
                     text,
                     ignore_cache=ignore_cache,
                 ),
             )
-            return [
-                target
-                if self._validate_formula_translation(source, target)
-                else source
-                for source, target in zip(texts, translated, strict=True)
-            ]
 
-        results = [None] * len(texts)
-        pending_items = []
+        results: list[str | None] = [None] * len(texts)
+        pending_items: list[tuple[int, str]] = []
         for idx, text in enumerate(texts):
             if self._is_passthrough_text(text):
                 results[idx] = text
                 continue
             if not (self.ignore_cache or ignore_cache):
                 cache_result = self.cache.get(text)
-                if cache_result is not None and self._validate_formula_translation(
-                    text,
-                    cache_result,
-                ):
-                    results[idx] = cache_result
+                accepted_cache = self._accepted_translation(text, cache_result)
+                if accepted_cache is not None:
+                    results[idx] = accepted_cache
                     continue
             pending_items.append((idx, text))
 
         if pending_items:
-            expanded_items = []
+            expanded_items: list[tuple[int, str]] = []
             segment_sources: dict[int, list[str]] = {}
             recombine_map: dict[int, list[int]] = {}
             expanded_index = 0
@@ -2696,7 +3325,7 @@ class CodexTranslator(BaseTranslator):
                     recombine_map[original_idx].append(expanded_index)
                     expanded_index += 1
 
-            expanded_results: dict[int, str] = {}
+            expanded_results: dict[int, str | None] = {}
             batches = self._chunk_batch(expanded_items)
             all_batch_results = self._map_batches(
                 batches,
@@ -2714,42 +3343,52 @@ class CodexTranslator(BaseTranslator):
                     translated_batch,
                     strict=True,
                 ):
-                    if not self._validate_formula_translation(
+                    expanded_results[batch_idx] = self._accepted_translation(
                         segment_source,
                         translated_text,
-                    ):
-                        retry = self._run_batch_translation([segment_source])[0]
-                        translated_text = (
-                            retry
-                            if self._validate_formula_translation(
-                                segment_source,
-                                retry,
-                            )
-                            else segment_source
-                        )
-                    expanded_results[batch_idx] = translated_text
+                    )
 
             for original_idx, source_text in pending_items:
                 segment_indices = recombine_map[original_idx]
                 translated_segments = [
                     expanded_results[segment_idx] for segment_idx in segment_indices
                 ]
-                combined_translation = self._recombine_translated_segments(
-                    segment_sources[original_idx], translated_segments
-                )
-                combined_translation = self._normalize_translation_output(
-                    combined_translation
-                )
-                if not self._validate_formula_translation(
-                    source_text,
-                    combined_translation,
-                ):
-                    results[original_idx] = source_text
-                    continue
-                results[original_idx] = combined_translation
-                self.cache.set(source_text, combined_translation)
+                accepted: str | None = None
+                if all(segment is not None for segment in translated_segments):
+                    combined_translation = self._recombine_translated_segments(
+                        segment_sources[original_idx],
+                        [
+                            segment
+                            for segment in translated_segments
+                            if segment is not None
+                        ],
+                    )
+                    accepted = self._accepted_translation(
+                        source_text,
+                        combined_translation,
+                    )
 
-        return [text if result is None else result for text, result in zip(texts, results)]
+                if accepted is None:
+                    retry = self._run_batch_translation(
+                        [source_text],
+                        require_complete_translation=True,
+                    )[0]
+                    accepted = self._accepted_translation(source_text, retry)
+
+                if accepted is None:
+                    results[original_idx] = source_text
+                    logger.warning(
+                        "Codex returned an incomplete or unsafe translation; the "
+                        "source text was preserved without caching."
+                    )
+                    continue
+                results[original_idx] = accepted
+                self.cache.set(source_text, accepted)
+
+        return [
+            text if result is None else result
+            for text, result in zip(texts, results, strict=True)
+        ]
 
     @classmethod
     def _reference_cache_key(cls, entry: str, cache_context: str = "") -> str:
@@ -2760,8 +3399,483 @@ class CodexTranslator(BaseTranslator):
         )
         return cls.REFERENCE_CACHE_PREFIX + payload
 
+    @classmethod
+    def _reference_continuation_cache_key(
+        cls,
+        left_entry: str,
+        right_prefix: str,
+    ) -> str:
+        payload = json.dumps(
+            {"left_entry": left_entry, "right_prefix": right_prefix},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return cls.REFERENCE_CONTINUATION_CACHE_PREFIX + payload
+
+    def _validated_reference_continuation_payload(
+        self,
+        left_entry: str,
+        right_prefix: str,
+        payload: object,
+    ) -> tuple[ExactReplacement, ExactReplacement] | None:
+        if not isinstance(payload, dict):
+            return None
+        source_left = payload.get("source_left")
+        source_right = payload.get("source_right")
+        target_left = payload.get("target_left")
+        target_right = payload.get("target_right")
+        if not all(
+            isinstance(value, str)
+            for value in (source_left, source_right, target_left, target_right)
+        ):
+            return None
+        if not source_left or not source_right or not target_left or not target_right:
+            return None
+        if (
+            left_entry.count(source_left) != 1
+            or right_prefix.count(source_right) != 1
+            or not left_entry.endswith(source_left)
+            or not right_prefix.startswith(source_right)
+        ):
+            return None
+        normalized_left = self._normalize_translation_output(target_left)
+        normalized_right = self._normalize_translation_output(target_right)
+        logical_source = source_left + source_right
+        logical_target = normalized_left + normalized_right
+        if self._checks_english_residue() and (
+            self._reference_title_has_unsafe_residue(
+                logical_source,
+                logical_target,
+            )
+            or has_unchanged_reference_title_fragment(
+                source_left,
+                normalized_left,
+                title_source=logical_source,
+                title_target=logical_target,
+            )
+            or has_unchanged_reference_title_fragment(
+                source_right,
+                normalized_right,
+                title_source=logical_source,
+                title_target=logical_target,
+            )
+        ):
+            return None
+        return (
+            ExactReplacement(source_left, normalized_left),
+            ExactReplacement(source_right, normalized_right),
+        )
+
+    def _reference_continuation_replacements(
+        self,
+        left_entry: str,
+        right_prefix: str,
+        replacements: list[ExactReplacement] | None,
+    ) -> tuple[ExactReplacement, ExactReplacement] | None:
+        if not replacements or len(replacements) != 1:
+            return None
+        replacement = replacements[0]
+        boundary = self.REFERENCE_BOUNDARY_TOKEN
+        if (
+            replacement.source.count(boundary) != 1
+            or replacement.translated.count(boundary) != 1
+        ):
+            return None
+        logical_entry = left_entry + boundary + right_prefix
+        _, is_valid = self._apply_reference_title_replacements(
+            logical_entry,
+            replacements,
+        )
+        if not is_valid:
+            return None
+        source_left, source_right = replacement.source.split(boundary)
+        translated_title = self._normalize_translation_output(
+            replacement.translated
+        )
+        target_left, target_right = translated_title.split(boundary)
+        return self._validated_reference_continuation_payload(
+            left_entry,
+            right_prefix,
+            {
+                "source_left": source_left,
+                "source_right": source_right,
+                "target_left": target_left,
+                "target_right": target_right,
+            },
+        )
+
+    def _rebalance_reference_continuation(
+        self,
+        replacements: tuple[ExactReplacement, ExactReplacement],
+    ) -> tuple[ExactReplacement, ExactReplacement]:
+        """Move only a high-confidence unfinished Chinese modifier suffix.
+
+        The physical source boundary must sit between two lower-case Latin words,
+        which is strong evidence that it cuts one source-language noun phrase.  On
+        the target side, only a small closed set of productive Chinese modifiers is
+        eligible.  Arbitrary short words and anything adjacent to punctuation or an
+        internal layout token stay untouched.
+        """
+
+        left, right = replacements
+        if self.lang_out.lower() not in {
+            "zh",
+            "zh-cn",
+            "zh-tw",
+            "zh-hans",
+            "zh-hant",
+        }:
+            return replacements
+        source_left = left.source.rstrip()
+        source_right = right.source.lstrip()
+        if (
+            re.search(r"[a-z][A-Za-z'’\-]*$", source_left) is None
+            or re.match(r"[a-z][A-Za-z'’\-]*", source_right) is None
+        ):
+            return replacements
+        target_left = left.translated.rstrip()
+        target_right = right.translated.lstrip()
+        protected_tokens = (
+            self.REFERENCE_BOUNDARY_TOKEN,
+            self.FLOW_TOKEN_PREFIX,
+            self.ITALIC_TAG_PREFIX,
+            "{v",
+        )
+        if (
+            not target_left
+            or not target_right
+            or re.match(self.CJK_CHAR_RE, target_right) is None
+            or any(
+                token in target_left or token in target_right
+                for token in protected_tokens
+            )
+        ):
+            return replacements
+
+        suffix = next(
+            (
+                candidate
+                for candidate in self.REFERENCE_INCOMPLETE_CJK_MODIFIER_SUFFIXES
+                if target_left.endswith(candidate)
+            ),
+            "",
+        )
+        if not suffix or not 1 <= len(suffix) <= 4:
+            return replacements
+        prefix = target_left[: -len(suffix)]
+        if prefix and re.fullmatch(self.CJK_CHAR_RE, prefix[-1]) is None:
+            return replacements
+        return (
+            ExactReplacement(left.source, prefix),
+            ExactReplacement(right.source, suffix + target_right),
+        )
+
+    def translate_reference_continuation_fragments(
+        self,
+        left_entry: str,
+        right_prefix: str,
+        *,
+        ignore_cache: bool = False,
+    ) -> tuple[ExactReplacement, ExactReplacement] | None:
+        """Translate one work title split across consecutive physical pages."""
+        if not left_entry.strip() or not right_prefix.strip():
+            return None
+        unsafe_marker = (
+            self.FORMULA_TOKEN_RE.search(left_entry + right_prefix) is not None
+            or self.ITALIC_TAG_PREFIX in left_entry + right_prefix
+            or self.FLOW_TOKEN_PREFIX in left_entry + right_prefix
+            or "[[PDF2ZH_REF_BOUNDARY_" in left_entry + right_prefix
+        )
+        if unsafe_marker:
+            return None
+
+        cache_key = self._reference_continuation_cache_key(
+            left_entry,
+            right_prefix,
+        )
+        if not (self.ignore_cache or ignore_cache):
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                try:
+                    payload = json.loads(cached)
+                except (TypeError, json.JSONDecodeError):
+                    payload = None
+                validated = self._validated_reference_continuation_payload(
+                    left_entry,
+                    right_prefix,
+                    payload,
+                )
+                if validated is not None:
+                    return self._rebalance_reference_continuation(validated)
+
+        logical_entry = (
+            left_entry + self.REFERENCE_BOUNDARY_TOKEN + right_prefix
+        )
+        for _ in range(2):
+            replacements = self._run_reference_title_batch([logical_entry])[0]
+            validated = self._reference_continuation_replacements(
+                left_entry,
+                right_prefix,
+                replacements,
+            )
+            if validated is None:
+                continue
+            left_replacement, right_replacement = validated
+            self.cache.set(
+                cache_key,
+                json.dumps(
+                    {
+                        "source_left": left_replacement.source,
+                        "source_right": right_replacement.source,
+                        "target_left": left_replacement.translated,
+                        "target_right": right_replacement.translated,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            return self._rebalance_reference_continuation(validated)
+        return None
+
     @staticmethod
-    def _reference_title_boundary_is_safe(entry: str, source_title: str) -> bool:
+    def _reference_venue_name_is_plausible(candidate: str) -> bool:
+        """Recognize a bibliographic container without enumerating journal names.
+
+        Journal tails in extracted PDFs commonly use abbreviated tokens (``Appl.``,
+        ``Phys.``, ``J.``) and therefore cannot be matched with a ``[^.]`` regex.
+        At the same time, accepting arbitrary prose before a volume number would
+        allow a truncated title such as ``method. Appl. Phys. Lett. 12, ...``.
+        Require every non-connector token to look like a proper-name/container
+        token, and reject a sentence-like multi-word clause before a period.
+        """
+
+        compact = re.sub(r"\s+", " ", candidate).strip(" \t\r\n\"'()[]{}.,;:")
+        if not compact or len(compact) > 100:
+            return False
+        words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*", compact)
+        if not words or len(words) > 14:
+            return False
+        connectors = {"a", "an", "and", "for", "in", "of", "on", "the", "to"}
+        lowercase_brands = {"elife", "iscience", "npj"}
+        venue_signals = {
+            "ann",
+            "annals",
+            "appl",
+            "applied",
+            "cell",
+            "commun",
+            "communications",
+            "condens",
+            "j",
+            "journal",
+            "lett",
+            "letters",
+            "mater",
+            "materials",
+            "nanotechnol",
+            "nature",
+            "phys",
+            "physical",
+            "physics",
+            "proc",
+            "proceedings",
+            "rev",
+            "review",
+            "sci",
+            "science",
+            "soc",
+            "supercond",
+            "tech",
+            "technol",
+            "technology",
+            "trans",
+            "transactions",
+        }
+        for word in words:
+            folded = word.casefold()
+            if folded in connectors or folded in lowercase_brands:
+                continue
+            if word[0].isupper() or word.isupper():
+                continue
+            return False
+        has_venue_signal = any(
+            folded == signal
+            or (len(signal) >= 6 and folded.startswith(signal))
+            for word in words
+            for folded in (word.casefold(),)
+            for signal in venue_signals
+        )
+        if not (
+            "." in compact
+            or has_venue_signal
+            or any(word.casefold() in lowercase_brands for word in words)
+        ):
+            return False
+
+        # A full title sentence accidentally left before the real venue is not a
+        # container.  Abbreviation runs have one-word clauses (``Appl.``) or end
+        # in a short abbreviation (``Vacuum Sci.``), unlike ``Quantum method.``.
+        for clause in compact.split(".")[:-1]:
+            clause_words = re.findall(
+                r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*",
+                clause,
+            )
+            if (
+                clause_words
+                and len(clause_words[-1]) > 4
+                and clause_words[-1].casefold() not in venue_signals
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _reference_preserves_lowercase_qubit_family_name(
+        cls,
+        source_title: str,
+        translated_title: str,
+    ) -> bool:
+        """Certify one conventional lower-case qubit-family name.
+
+        Reference-title validation normally rejects even one lower-case English
+        word left in a Chinese result.  That is correct for ordinary prose, but
+        coined superconducting-qubit family names are commonly retained.  Accept
+        only one exact source word, only when it directly modifies ``qubit`` in
+        the source, only with a characteristic family-name suffix, and only when
+        the rest of the target is visibly Chinese.
+        """
+
+        target_words = re.findall(
+            r"[A-Za-z]+(?:['’-][A-Za-z]+)*",
+            translated_title,
+        )
+        if (
+            len(target_words) != 1
+            or not target_words[0].islower()
+            or re.search(cls.CJK_CHAR_RE, translated_title) is None
+        ):
+            return False
+        family_name = target_words[0]
+        if cls.REFERENCE_LOWERCASE_QUBIT_FAMILY_RE.fullmatch(family_name) is None:
+            return False
+        source_words = re.findall(
+            r"[A-Za-z]+(?:['’-][A-Za-z]+)*",
+            source_title,
+        )
+        if sum(word.casefold() == family_name for word in source_words) != 1:
+            return False
+        return re.search(
+            rf"(?<![A-Za-z]){re.escape(family_name)}\s+qubits?(?![A-Za-z])",
+            source_title,
+            re.IGNORECASE,
+        ) is not None
+
+    @classmethod
+    def _reference_title_has_unsafe_residue(
+        cls,
+        source_title: str,
+        translated_title: str,
+    ) -> bool:
+        if not has_suspicious_reference_title_residue(
+            source_title,
+            translated_title,
+        ):
+            return False
+        return not cls._reference_preserves_lowercase_qubit_family_name(
+            source_title,
+            translated_title,
+        )
+
+    @staticmethod
+    def _reference_prefix_is_author_et_al(prefix: str) -> bool:
+        """Recognize ``et al.`` only when it terminates an author-list prefix."""
+
+        label = re.match(
+            r"^\s*(?:[\[［]\s*\d+\s*[\]］]|\d+[.)．）])\s*",
+            prefix,
+        )
+        if label is None:
+            return False
+        author_text = prefix[label.end() :].strip()
+        if re.search(r"\bet\s+al\.$", author_text, re.IGNORECASE) is None:
+            return False
+        if not (
+            "," in author_text
+            or "&" in author_text
+            or re.search(r"\b[A-Z]\.", author_text)
+        ):
+            return False
+        allowed_lowercase_name_parts = {
+            "al",
+            "da",
+            "de",
+            "del",
+            "der",
+            "di",
+            "dos",
+            "du",
+            "et",
+            "la",
+            "le",
+            "van",
+            "von",
+        }
+        words = re.findall(
+            r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*",
+            author_text,
+        )
+        return bool(words) and all(
+            word[:1].isupper()
+            or word.isupper()
+            or word.casefold() in allowed_lowercase_name_parts
+            for word in words
+        )
+
+    @classmethod
+    def _reference_metadata_tail_is_safe(cls, remaining: str) -> bool:
+        """Return whether text after a selected title begins bibliography metadata."""
+
+        if re.match(
+            r"^(?:\d|doi\b|arxiv\b|isbn\b|issn\b|https?://|www\.)",
+            remaining,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.match(
+            r"^(?:preprint\s+at\b|(?:ph\.?\s*d\.?|doctoral|master(?:'s)?)\s+"
+            r"thesis\b|dissertation\b|zenodo\b|in\s+\S)",
+            remaining,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.match(
+            r"^(?:Nature\b|Science\b|Cell\b|Physical\s+Review\b|"
+            r"Phys\.?\s+Rev\.?\b|IEEE\b|ACM\b|"
+            r"npj\s+[A-Za-z]|(?:New\s+)?Journal\s+of\b|"
+            r"Review\s+of\s+Scientific\s+Instruments\b|"
+            r"Springer\b|Wiley\b|Elsevier\b|"
+            r"IOP\s+Publishing\b|AIP\s+Publishing\b)",
+            remaining,
+            re.IGNORECASE,
+        ):
+            return True
+
+        volume = re.match(
+            r"^(?P<venue>.+?)\s+\d{1,4}[A-Za-z]?\s*[,;(]",
+            remaining,
+        )
+        return bool(
+            volume
+            and cls._reference_venue_name_is_plausible(volume.group("venue"))
+        )
+
+    @classmethod
+    def _reference_title_boundary_is_safe(
+        cls,
+        entry: str,
+        source_title: str,
+        peer_source_titles: tuple[str, ...] = (),
+    ) -> bool:
         if source_title != source_title.strip() or entry.count(source_title) != 1:
             return False
         title_start = entry.find(source_title)
@@ -2769,6 +3883,46 @@ class CodexTranslator(BaseTranslator):
         prefix = entry[:title_start]
         suffix = entry[title_end:]
         if not prefix.strip() or not suffix.strip():
+            return False
+        prefix_boundary = prefix.rstrip()
+        suffix_boundary = suffix.lstrip()
+        if prefix_boundary[-1].isalnum():
+            # Starting immediately after an ordinary word is evidence that the
+            # model selected only a suffix of the work title.
+            return False
+        internal_title_separators = ":;—–-"
+        if prefix_boundary[-1] in internal_title_separators:
+            preceding = prefix_boundary[:-1].rstrip()
+            if not any(
+                preceding.endswith(peer) for peer in peer_source_titles
+            ):
+                return False
+        if prefix_boundary.endswith(".") and not cls._reference_prefix_is_author_et_al(
+            prefix_boundary
+        ):
+            preceding_clause = re.split(
+                r"[,.;]",
+                prefix_boundary[:-1],
+            )[-1]
+            preceding_words = re.findall(r"[A-Za-z]+", preceding_clause)
+            if len(preceding_words) >= 2 and any(
+                word[:1].islower() for word in preceding_words
+            ):
+                # The replacement starts after a preceding title sentence, not
+                # after an initials/surname author terminator.
+                return False
+
+        remaining = suffix_boundary.lstrip(
+            " \t\r\n\"'’”)]}》」』】.,;:!?—–-"
+        )
+        if any(remaining.startswith(peer) for peer in peer_source_titles):
+            remaining = ""
+        if remaining[:1].isalpha() and not cls._reference_metadata_tail_is_safe(
+            remaining
+        ):
+            # A title substring must reach its following punctuation/container
+            # boundary; otherwise applying it would leave the unselected title
+            # tail in English and cache a mixed-language reference.
             return False
         if re.match(
             r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|"
@@ -2830,18 +3984,37 @@ class CodexTranslator(BaseTranslator):
             return entry, False
 
         normalized_replacements: list[ExactReplacement] = []
+        source_titles = tuple(
+            replacement.source for replacement in replacements
+        )
         for replacement in replacements:
+            translated_title = self._normalize_translation_output(
+                replacement.translated
+            )
             if (
                 replacement.translated != replacement.translated.strip()
                 or not self._reference_title_boundary_is_safe(
-                    entry, replacement.source
+                    entry,
+                    replacement.source,
+                    tuple(
+                        source
+                        for source in source_titles
+                        if source != replacement.source
+                    ),
+                )
+                or (
+                    self._checks_english_residue()
+                    and self._reference_title_has_unsafe_residue(
+                        replacement.source,
+                        translated_title,
+                    )
                 )
             ):
                 return entry, False
             normalized_replacements.append(
                 ExactReplacement(
                     replacement.source,
-                    self._normalize_translation_output(replacement.translated),
+                    translated_title,
                 )
             )
         translated_entry = apply_exact_replacements(
@@ -2880,7 +4053,7 @@ class CodexTranslator(BaseTranslator):
                 # replacement list so a later, better structured response can
                 # still translate the work title.
                 if cached is not None and cached != entry:
-                    results[idx] = cached
+                    results[idx] = self._normalize_translation_output(cached)
                     continue
             pending_items.append((idx, entry))
 
@@ -2902,6 +4075,14 @@ class CodexTranslator(BaseTranslator):
                 translated_entry, is_valid = self._apply_reference_title_replacements(
                     entry, replacements
                 )
+                if not is_valid and replacements:
+                    retry_replacements = self._run_reference_title_batch([entry])[0]
+                    translated_entry, is_valid = (
+                        self._apply_reference_title_replacements(
+                            entry,
+                            retry_replacements,
+                        )
+                    )
                 results[entry_idx] = translated_entry
                 if is_valid:
                     self.cache.set(
