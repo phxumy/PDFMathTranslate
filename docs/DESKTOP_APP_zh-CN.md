@@ -11,6 +11,7 @@
 - 允许下载翻译结果，并将外部链接交给系统默认浏览器。
 - 关闭窗口时同步关闭 Gradio 服务，不留下后台进程。
 - 若桌面组件启动失败，会在窗口中显示错误；原浏览器 WebUI 和命令行不受影响。
+- 经典浏览器 WebUI 未指定端口时也会自动寻找 7860 之后的可用端口；显式 `--serverport` 仍严格使用指定端口。
 
 ## 从源码运行
 
@@ -50,6 +51,21 @@ pdf2zh --desktop --serverport 7868 --onnx "D:\models\doclayout.onnx"
 | `pdf2zh document.pdf ...` | 保留所有原命令行翻译参数。 |
 
 `--share`、`--authorized` 是对外提供 WebUI 时使用的选项，不应用于只绑定本机的桌面窗口。MCP、SSE、Flask、Celery 和 Docker 等服务端模式也继续通过原命令行运行。
+
+选择 Codex 服务时，线程数会自动设为 `1` 并锁定，因为 Codex 后端按顺序执行翻译请求。切回其他服务后线程输入框会恢复可编辑。
+
+## Codex CLI 自动发现
+
+当 `CODEX_BIN` 填写 `codex` 或留作默认值时，程序会依次检查：
+
+1. 便携包 `build/codex-cli/.../codex.exe`；
+2. `CODEX_CLI_PATH` 环境变量；
+3. 系统 `PATH` 返回的绝对 `.exe` 或 `.CMD` 路径；
+4. Codex Desktop 的本机安装目录。
+
+显式填写完整路径时始终优先使用该路径；路径不存在会直接报错，不会悄悄切换到另一份 Codex。便携版建议保持默认自动发现，或填写同目录内的完整 `codex.exe` 路径。
+
+如果刚更新过桌面代码，请关闭并重新打开 `PDFMathTranslate-Codex.exe`，已经运行的窗口不会自动重新加载 Python 模块。
 
 ## Windows 打包
 

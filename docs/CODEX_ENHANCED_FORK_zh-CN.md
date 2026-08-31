@@ -55,7 +55,7 @@ pdf2zh -i
 
 | 选项 | 建议值 | 说明 |
 | --- | --- | --- |
-| `CODEX_BIN` | `codex`，或本机 `codex.exe` 的完整路径 | Codex CLI 可执行文件。若已加入 `PATH`，使用 `codex` 即可。 |
+| `CODEX_BIN` | `codex`，或本机 `codex.exe` 的完整路径 | 默认值会自动检查便携包、`CODEX_CLI_PATH`、`PATH` 和 Codex Desktop；完整路径始终优先。 |
 | `CODEX_PROFILE` | 留空 | 可选的 Codex CLI profile 名称；只有确实在 Codex 配置中创建了对应 profile 时才填写。 |
 | `CODEX_MODEL` | 留空 | 留空时使用 Codex CLI 当前默认模型；也可以填写当前 CLI 支持的具体模型 ID。 |
 | `CODEX_REASONING_EFFORT` | `none` | 可选值：`none`、`low`、`medium`、`high`、`xhigh`、`max`。翻译通常无需高推理强度。 |

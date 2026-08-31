@@ -656,6 +656,9 @@ desktop_css = """
         border-radius: 22px !important;
         background: var(--desk-paper) !important;
         box-shadow: 0 14px 38px rgba(21, 58, 65, 0.08) !important;
+    }
+
+    #preview-panel {
         backdrop-filter: blur(18px);
     }
 
@@ -862,7 +865,13 @@ with gr.Blocks(
             with gr.Accordion("Open for More Experimental Options!", open=False):
                 gr.Markdown("#### Experimental")
                 threads = gr.Textbox(
-                    label="number of threads", interactive=True, value="4"
+                    label="number of threads",
+                    interactive=service_map[enabled_services[0]].name != "codex",
+                    value=(
+                        "1"
+                        if service_map[enabled_services[0]].name == "codex"
+                        else "4"
+                    ),
                 )
                 skip_subset_fonts = gr.Checkbox(
                     label="Skip font subsetting", interactive=True, value=False
@@ -912,6 +921,11 @@ with gr.Blocks(
                 return [
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
+                    (
+                        gr.update(value="1", interactive=False)
+                        if translator.name == "codex"
+                        else gr.update(interactive=True)
+                    ),
                 ]
 
             def on_select_filetype(file_type):
@@ -951,7 +965,7 @@ with gr.Blocks(
             service.select(
                 on_select_service,
                 service,
-                [*envs, prompt],
+                [*envs, prompt, threads],
             )
             vfont.change(on_vfont_change, inputs=vfont, outputs=None)
             file_type.select(
@@ -1075,7 +1089,7 @@ def parse_user_passwd(file_path: str) -> tuple:
 
 
 def setup_gui(
-    share: bool = False, auth_file: list = ["", ""], server_port=7860
+    share: bool = False, auth_file: list = ["", ""], server_port: int | None = None
 ) -> None:
     """
     Setup the GUI with the given parameters.

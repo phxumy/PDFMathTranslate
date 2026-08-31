@@ -1,8 +1,10 @@
 import unittest
 import json
+import os
 import subprocess
 from pathlib import Path
 from string import Template
+from tempfile import TemporaryDirectory
 from textwrap import dedent
 from unittest import mock
 
@@ -15,11 +17,36 @@ from pdf2zh.translator import (
     CodexTranslator,
     OllamaTranslator,
     OpenAIlikedTranslator,
+    find_codex_executable,
 )
 
 # Since it is necessary to test whether the functionality meets the expected requirements,
 # private functions and private methods are allowed to be called.
 # pyright: reportPrivateUsage=false
+
+
+_original_config_instance = None
+_temporary_config = None
+
+
+def setUpModule():
+    """Keep translator tests away from the user's real configuration file."""
+
+    global _original_config_instance, _temporary_config
+    _original_config_instance = ConfigManager._instance
+    ConfigManager._instance = None
+    _temporary_config = TemporaryDirectory(prefix="pdf2zh-test-config-")
+    config_path = Path(_temporary_config.name) / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    ConfigManager.custome_config(config_path)
+
+
+def tearDownModule():
+    global _original_config_instance, _temporary_config
+    ConfigManager._instance = _original_config_instance
+    if _temporary_config is not None:
+        _temporary_config.cleanup()
+    _temporary_config = None
 
 
 class AutoIncreaseTranslator(BaseTranslator):
@@ -233,12 +260,114 @@ class TestOllamaTranslator(unittest.TestCase):
         )
 
 
+class TestCodexExecutableDiscovery(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory(prefix="pdf2zh-codex-discovery-")
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _clean_environment(self):
+        return mock.patch.dict(
+            os.environ,
+            {
+                "PYSTAND": str(self.root / "PDFMathTranslate-Codex.exe"),
+                "PYSTAND_HOME": "",
+                "CODEX_CLI_PATH": "",
+                "LOCALAPPDATA": str(self.root / "local-app-data"),
+            },
+            clear=False,
+        )
+
+    def test_portable_codex_next_to_pystand_is_preferred(self):
+        candidate = (
+            self.root
+            / "codex-cli"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"portable")
+
+        with self._clean_environment(), mock.patch(
+            "pdf2zh.translator.shutil.which", return_value=None
+        ):
+            resolved = find_codex_executable("codex")
+
+        self.assertEqual(str(candidate.resolve()), resolved)
+
+    def test_explicit_missing_path_does_not_fall_back(self):
+        missing = self.root / "missing" / "codex.exe"
+        with self._clean_environment(), mock.patch(
+            "pdf2zh.translator.shutil.which", return_value="C:/other/codex.cmd"
+        ) as which:
+            resolved = find_codex_executable(str(missing))
+
+        self.assertIsNone(resolved)
+        which.assert_not_called()
+
+    def test_codex_cli_path_is_used_before_path_lookup(self):
+        candidate = self.root / "configured" / "codex.exe"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"configured")
+        with self._clean_environment(), mock.patch.dict(
+            os.environ, {"CODEX_CLI_PATH": str(candidate)}, clear=False
+        ), mock.patch("pdf2zh.translator.shutil.which", return_value=None):
+            resolved = find_codex_executable("codex")
+
+        self.assertEqual(str(candidate.resolve()), resolved)
+
+    def test_path_lookup_returns_absolute_cmd_wrapper(self):
+        candidate = self.root / "npm" / "codex.CMD"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"@echo off")
+
+        def which(command):
+            return str(candidate) if command == "codex" else None
+
+        with self._clean_environment(), mock.patch(
+            "pdf2zh.translator.shutil.which", side_effect=which
+        ):
+            resolved = find_codex_executable("codex")
+
+        self.assertEqual(str(candidate.resolve()), resolved)
+
+    def test_custom_bare_command_uses_path_instead_of_portable_fallback(self):
+        portable = (
+            self.root
+            / "codex-cli"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        portable.parent.mkdir(parents=True)
+        portable.write_bytes(b"portable")
+        custom = self.root / "custom" / "research-codex.cmd"
+        custom.parent.mkdir(parents=True)
+        custom.write_bytes(b"@echo off")
+
+        with self._clean_environment(), mock.patch(
+            "pdf2zh.translator.shutil.which", return_value=str(custom)
+        ):
+            resolved = find_codex_executable("research-codex")
+
+        self.assertEqual(str(custom.resolve()), resolved)
+
+
 class TestCodexTranslator(unittest.TestCase):
     def setUp(self):
         self.test_db = cache.init_test_db()
         ConfigManager.clear()
+        self.codex_resolver = mock.patch(
+            "pdf2zh.translator.find_codex_executable",
+            side_effect=lambda configured: configured or "codex",
+        )
+        self.codex_resolver.start()
 
     def tearDown(self):
+        self.codex_resolver.stop()
         cache.clean_test_db(self.test_db)
         ConfigManager.clear()
 

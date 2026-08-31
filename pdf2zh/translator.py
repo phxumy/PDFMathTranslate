@@ -2,8 +2,11 @@ import html
 import json
 import logging
 import os
+from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unicodedata
 from collections import Counter
@@ -39,6 +42,74 @@ logger = logging.getLogger(__name__)
 
 def remove_control_characters(s):
     return "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")
+
+
+def find_codex_executable(configured: str | None = None) -> str | None:
+    """Resolve Codex without relying on Windows resolving a bare command name."""
+
+    raw = os.path.expandvars(os.path.expanduser(str(configured or "codex").strip()))
+    raw = raw or "codex"
+    explicit = Path(raw)
+    is_explicit_path = explicit.is_absolute() or "/" in raw or "\\" in raw
+    if is_explicit_path:
+        return str(explicit.resolve()) if explicit.is_file() else None
+
+    is_auto = raw.casefold() in {"auto", "codex", "codex.exe"}
+    if not is_auto:
+        discovered = shutil.which(raw)
+        return str(Path(discovered).resolve()) if discovered else None
+
+    relative_codex = Path("codex-cli") / "x86_64-pc-windows-msvc" / "bin" / "codex.exe"
+    roots: list[Path] = []
+    pystand = os.environ.get("PYSTAND")
+    if pystand:
+        roots.append(Path(pystand).expanduser().resolve().parent)
+    pystand_home = os.environ.get("PYSTAND_HOME")
+    if pystand_home:
+        roots.append(Path(pystand_home).expanduser().resolve())
+    executable = Path(sys.executable).resolve()
+    roots.extend([executable.parent, executable.parent.parent])
+    module_path = Path(__file__).resolve()
+    roots.extend(module_path.parents[:4])
+
+    seen: set[Path] = set()
+    for root in roots:
+        for candidate in (root / relative_codex, root / "build" / relative_codex):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.is_file():
+                return str(candidate.resolve())
+
+    cli_path = os.environ.get("CODEX_CLI_PATH")
+    if cli_path:
+        candidate = Path(os.path.expandvars(os.path.expanduser(cli_path)))
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    command_name = "codex" if raw.casefold() == "auto" else raw
+    commands = (
+        (f"{command_name}.exe", command_name)
+        if not command_name.lower().endswith(".exe")
+        else (command_name,)
+    )
+    for command in commands:
+        discovered = shutil.which(command)
+        if discovered:
+            return str(Path(discovered).resolve())
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        codex_app_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+        if codex_app_bin.is_dir():
+            candidates = sorted(
+                codex_app_bin.glob("*/codex.exe"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                return str(candidates[0].resolve())
+    return None
 
 
 class BaseTranslator:
@@ -1052,7 +1123,14 @@ class CodexTranslator(BaseTranslator):
                 f"{self.reasoning_effort!r}; expected one of: {supported}."
             )
         super().__init__(lang_in, lang_out, model, ignore_cache)
-        self.codex_bin = self.envs["CODEX_BIN"] or "codex"
+        configured_codex_bin = self.envs["CODEX_BIN"] or "codex"
+        self.codex_bin = find_codex_executable(configured_codex_bin)
+        if self.codex_bin is None:
+            raise RuntimeError(
+                f"codex executable not found: {configured_codex_bin}. Checked the "
+                "portable package, CODEX_CLI_PATH, PATH, and the Codex desktop app. "
+                "Set CODEX_BIN to the full path of codex.exe."
+            )
         self.profile = self.envs["CODEX_PROFILE"]
         self.timeout = int(self.envs.get("CODEX_TIMEOUT") or "120")
         self.prompttext = prompt
