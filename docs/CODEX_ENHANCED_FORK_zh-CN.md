@@ -61,7 +61,9 @@ pdf2zh -i
 | `CODEX_REASONING_EFFORT` | `none` | 可选值：`none`、`low`、`medium`、`high`、`xhigh`、`max`。翻译通常无需高推理强度。 |
 | `CODEX_TIMEOUT` | `120` | 单次 Codex 请求超时秒数。长段落或较慢网络可适当增加。 |
 
-Codex 后端会把有效并行数固定为 `1`。WebUI 的 `number of threads` 即使填写更大的值也不会并行启动多个 Codex 请求，这是为了避免上下文错乱、速率限制、额度快速消耗和输出顺序问题。
+选择 Codex 时，WebUI 会把 `number of threads` 默认设为 `1`，但输入框仍可编辑。该数值表示最多同时运行多少个相互独立的 Codex 请求；例如填写 `4`，程序会保留原有的批次划分和输出顺序，只把已经划分好的批次最多并行执行 4 个。并行不会把同一内容重复翻译，因此同一文档的总输入/输出量通常与单线程接近，但瞬时请求速率会提高，限流、超时或结果校验失败造成的重试可能带来少量额外消耗。建议先使用 `1` 或 `2`，确认账户速率和电脑负载稳定后再尝试 `4`。
+
+Windows 桌面版会以隐藏窗口方式启动后台 Codex CLI；翻译期间不会为每个请求弹出控制台窗口。
 
 ## 命令行使用
 
@@ -71,7 +73,7 @@ PowerShell 示例：
 $env:CODEX_BIN = "codex"
 $env:CODEX_REASONING_EFFORT = "none"
 $env:CODEX_TIMEOUT = "120"
-pdf2zh "D:\papers\example.pdf" -s codex -li en -lo zh -t 1
+pdf2zh "D:\papers\example.pdf" -s codex -li en -lo zh -t 4
 ```
 
 如需指定模型：

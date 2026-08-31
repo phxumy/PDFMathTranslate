@@ -1,3 +1,4 @@
+import concurrent.futures
 import html
 import json
 import logging
@@ -12,7 +13,7 @@ import unicodedata
 from collections import Counter
 from copy import copy
 from string import Template
-from typing import cast
+from typing import Callable, TypeVar, cast
 import deepl
 import ollama
 import openai
@@ -40,8 +41,21 @@ from tenacity import wait_exponential
 logger = logging.getLogger(__name__)
 
 
+BatchT = TypeVar("BatchT")
+BatchResultT = TypeVar("BatchResultT")
+
+
 def remove_control_characters(s):
     return "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")
+
+
+def codex_subprocess_window_kwargs() -> dict[str, int]:
+    """Keep console-based Codex CLI calls invisible in Windows GUI builds."""
+
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if os.name == "nt" and create_no_window:
+        return {"creationflags": create_no_window}
+    return {}
 
 
 def find_codex_executable(configured: str | None = None) -> str | None:
@@ -1191,6 +1205,7 @@ class CodexTranslator(BaseTranslator):
         self.fast_command_available = False
         self.compat_command_available = False
         self.preferred_command_mode = "fast"
+        self.max_concurrency = 1
         self._probe_cli()
         self.add_cache_impact_parameters("profile", self.profile)
         self.add_cache_impact_parameters("reasoning_effort", self.reasoning_effort)
@@ -1199,6 +1214,30 @@ class CodexTranslator(BaseTranslator):
         self.add_cache_impact_parameters(
             "scientific_translation_policy", self.SCIENTIFIC_TRANSLATION_POLICY
         )
+
+    def set_concurrency(self, value: int | str | None) -> None:
+        """Set the maximum number of independent Codex requests in flight."""
+
+        try:
+            concurrency = int(value or 1)
+        except (TypeError, ValueError):
+            concurrency = 1
+        self.max_concurrency = max(1, concurrency)
+
+    def _map_batches(
+        self,
+        batches: list[BatchT],
+        worker: Callable[[BatchT], BatchResultT],
+    ) -> list[BatchResultT]:
+        """Run the same precomputed batches serially or concurrently, in order."""
+
+        if len(batches) < 2 or self.max_concurrency == 1:
+            return [worker(batch) for batch in batches]
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(self.max_concurrency, len(batches)),
+            thread_name_prefix="pdf2zh-codex",
+        ) as executor:
+            return list(executor.map(worker, batches))
 
     def _build_codex_prompt(self, text: str) -> str:
         base_prompt = self.prompt(text, self.prompttext)[0]["content"]
@@ -1623,6 +1662,7 @@ class CodexTranslator(BaseTranslator):
                 errors="replace",
                 timeout=5,
                 check=False,
+                **codex_subprocess_window_kwargs(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -1864,6 +1904,7 @@ class CodexTranslator(BaseTranslator):
                         errors="replace",
                         timeout=self.timeout,
                         check=False,
+                        **codex_subprocess_window_kwargs(),
                     )
                 except FileNotFoundError as exc:
                     raise RuntimeError(
@@ -2173,13 +2214,19 @@ class CodexTranslator(BaseTranslator):
                 if not context
             ]
 
-            for batch in self._chunk_context_batch(contextual_items):
-                batch_texts = [source for _, source, _ in batch]
-                batch_contexts = [context for _, _, context in batch]
-                batch_results = self._run_formula_context_batch_request(
-                    batch_texts,
-                    batch_contexts,
-                )
+            contextual_batches = self._chunk_context_batch(contextual_items)
+            contextual_batch_results = self._map_batches(
+                contextual_batches,
+                lambda batch: self._run_formula_context_batch_request(
+                    [source for _, source, _ in batch],
+                    [context for _, _, context in batch],
+                ),
+            )
+            for batch, batch_results in zip(
+                contextual_batches,
+                contextual_batch_results,
+                strict=True,
+            ):
                 for (index, source, context), target in zip(
                     batch,
                     batch_results,
@@ -2208,9 +2255,18 @@ class CodexTranslator(BaseTranslator):
                     expanded_results[index] = target
                     expanded_is_valid[index] = is_valid
 
-            for batch in self._chunk_batch(ordinary_items):
-                batch_texts = [source for _, source in batch]
-                batch_results = self._run_batch_translation(batch_texts)
+            ordinary_batches = self._chunk_batch(ordinary_items)
+            ordinary_batch_results = self._map_batches(
+                ordinary_batches,
+                lambda batch: self._run_batch_translation(
+                    [source for _, source in batch]
+                ),
+            )
+            for batch, batch_results in zip(
+                ordinary_batches,
+                ordinary_batch_results,
+                strict=True,
+            ):
                 for (index, source), target in zip(
                     batch,
                     batch_results,
@@ -2477,13 +2533,15 @@ class CodexTranslator(BaseTranslator):
                     continue
             pending.append((index, source, context))
 
-        for batch in self._chunk_context_batch(pending):
-            batch_sources = [source for _, source, _ in batch]
-            batch_contexts = [context for _, _, context in batch]
-            batch_results = self._run_styled_batch_request(
-                batch_sources,
-                batch_contexts,
-            )
+        batches = self._chunk_context_batch(pending)
+        all_batch_results = self._map_batches(
+            batches,
+            lambda batch: self._run_styled_batch_request(
+                [source for _, source, _ in batch],
+                [context for _, _, context in batch],
+            ),
+        )
+        for batch, batch_results in zip(batches, all_batch_results, strict=True):
             for (index, source, context), translated in zip(
                 batch,
                 batch_results,
@@ -2594,10 +2652,12 @@ class CodexTranslator(BaseTranslator):
         self, texts: list[str], ignore_cache: bool = False
     ) -> list[str]:
         if self.prompttext:
-            translated = BaseTranslator.translate_batch(
-                self,
+            translated = self._map_batches(
                 texts,
-                ignore_cache=ignore_cache,
+                lambda text: self.translate(
+                    text,
+                    ignore_cache=ignore_cache,
+                ),
             )
             return [
                 target
@@ -2637,9 +2697,18 @@ class CodexTranslator(BaseTranslator):
                     expanded_index += 1
 
             expanded_results: dict[int, str] = {}
-            for batch in self._chunk_batch(expanded_items):
-                batch_texts = [text for _, text in batch]
-                translated_batch = self._run_batch_translation(batch_texts)
+            batches = self._chunk_batch(expanded_items)
+            all_batch_results = self._map_batches(
+                batches,
+                lambda batch: self._run_batch_translation(
+                    [text for _, text in batch]
+                ),
+            )
+            for batch, translated_batch in zip(
+                batches,
+                all_batch_results,
+                strict=True,
+            ):
                 for (batch_idx, segment_source), translated_text in zip(
                     batch,
                     translated_batch,
@@ -2815,9 +2884,18 @@ class CodexTranslator(BaseTranslator):
                     continue
             pending_items.append((idx, entry))
 
-        for batch in self._chunk_batch(pending_items):
-            batch_entries = [entry for _, entry in batch]
-            title_replacements = self._run_reference_title_batch(batch_entries)
+        batches = self._chunk_batch(pending_items)
+        all_title_replacements = self._map_batches(
+            batches,
+            lambda batch: self._run_reference_title_batch(
+                [entry for _, entry in batch]
+            ),
+        )
+        for batch, title_replacements in zip(
+            batches,
+            all_title_replacements,
+            strict=True,
+        ):
             for (entry_idx, entry), replacements in zip(
                 batch, title_replacements, strict=True
             ):

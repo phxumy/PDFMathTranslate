@@ -314,12 +314,6 @@ def translate_file(
         threads = int(threads)
     except ValueError:
         threads = 1
-    if translator.name == "codex" and threads != 1:
-        gr.Info(
-            "Codex currently runs with effective concurrency fixed to 1. "
-            "The requested thread count will be ignored."
-        )
-        threads = 1
 
     param = {
         "files": [str(file_raw)],
@@ -866,7 +860,7 @@ with gr.Blocks(
                 gr.Markdown("#### Experimental")
                 threads = gr.Textbox(
                     label="number of threads",
-                    interactive=service_map[enabled_services[0]].name != "codex",
+                    interactive=True,
                     value=(
                         "1"
                         if service_map[enabled_services[0]].name == "codex"
@@ -922,7 +916,7 @@ with gr.Blocks(
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
                     (
-                        gr.update(value="1", interactive=False)
+                        gr.update(value="1", interactive=True)
                         if translator.name == "codex"
                         else gr.update(interactive=True)
                     ),

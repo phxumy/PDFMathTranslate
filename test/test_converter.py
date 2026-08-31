@@ -115,8 +115,10 @@ class TestTranslateConverter(unittest.TestCase):
                 lang_in="en",
                 lang_out="zh",
                 service="codex",
+                thread=4,
             )
         self.assertIsInstance(converter.translator, CodexTranslator)
+        self.assertEqual(4, converter.translator.max_concurrency)
 
     @patch.object(CodexTranslator, "_probe_cli", return_value=None)
     def test_codex_translate_segments_uses_batch_path(self, _mock_probe):

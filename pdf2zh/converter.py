@@ -760,6 +760,8 @@ class TranslateConverter(PDFConverterEx):
                 self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache)
         if not self.translator:
             raise ValueError("Unsupported translation service")
+        if self.translator.name == "codex":
+            self.translator.set_concurrency(self.thread)
         self.translation_policy = DocumentTranslationPolicy()
         self.layout_region_types: dict[int, dict[int, str]] = {}
         self._pending_page: PageLayoutDraft | None = None
@@ -864,11 +866,6 @@ class TranslateConverter(PDFConverterEx):
                 raise e
 
         if getattr(self.translator, "name", "") == "codex":
-            if self.thread and self.thread > 1:
-                log.warning(
-                    "Codex translator currently forces effective concurrency to 1; requested thread=%s is ignored.",
-                    self.thread,
-                )
             results = list(sstk)
             ordinary_indices: list[int] = []
             ordinary_texts: list[str] = []

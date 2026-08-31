@@ -2,6 +2,7 @@ import unittest
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 from string import Template
 from tempfile import TemporaryDirectory
@@ -446,6 +447,13 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertIn("--config", cmd)
         self.assertIn('model_reasoning_effort="none"', cmd)
         self.assertNotIn("--model", cmd)
+        if os.name == "nt":
+            self.assertEqual(
+                subprocess.CREATE_NO_WINDOW,
+                run.call_args.kwargs["creationflags"],
+            )
+        else:
+            self.assertNotIn("creationflags", run.call_args.kwargs)
 
     def test_do_translate_honors_profile_model_and_timeout(self):
         envs = {
@@ -534,6 +542,40 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertIn("--output-schema", cmd)
         self.assertEqual("甲", translator.cache.get("a"))
         self.assertEqual("乙", translator.cache.get("b"))
+
+    def test_translate_batch_can_run_precomputed_batches_concurrently(self):
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        translator.MAX_BATCH_ITEMS = 1
+        translator.set_concurrency(2)
+        rendezvous = threading.Barrier(2, timeout=3)
+
+        def fake_batch(texts):
+            rendezvous.wait()
+            return [{"a": "甲", "b": "乙"}[texts[0]]]
+
+        with mock.patch.object(
+            translator,
+            "_run_batch_translation",
+            side_effect=fake_batch,
+        ) as run_batch:
+            translated = translator.translate_batch(["a", "b"])
+
+        self.assertEqual(["甲", "乙"], translated)
+        self.assertEqual(2, run_batch.call_count)
+
+    def test_codex_concurrency_defaults_to_one_and_remains_configurable(self):
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+
+        self.assertEqual(1, translator.max_concurrency)
+        translator.set_concurrency("4")
+        self.assertEqual(4, translator.max_concurrency)
+        translator.set_concurrency(0)
+        self.assertEqual(1, translator.max_concurrency)
 
     def test_translate_batch_splits_and_retries_on_mismatched_length(self):
         with mock.patch("pdf2zh.translator.subprocess.run") as run:
@@ -789,6 +831,8 @@ class TestCodexTranslator(unittest.TestCase):
     def test_gui_service_map_includes_codex(self):
         gui_source = Path("pdf2zh/gui.py").read_text(encoding="utf-8")
         self.assertIn('"Codex": CodexTranslator', gui_source)
+        self.assertIn('gr.update(value="1", interactive=True)', gui_source)
+        self.assertNotIn("effective concurrency fixed to 1", gui_source)
 
 
 if __name__ == "__main__":
