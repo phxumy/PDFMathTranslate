@@ -15,8 +15,8 @@
   <a href="https://hub.docker.com/repository/docker/byaidu/pdf2zh">
     <img src="https://img.shields.io/docker/pulls/byaidu/pdf2zh"></a>
   <!-- License -->
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/github/license/Byaidu/PDFMathTranslate"/></a>
+  <a href="../LICENSE">
+    <img src="https://img.shields.io/github/license/phxumy/PDFMathTranslate"/></a>
   <a href="https://huggingface.co/spaces/reycn/PDFMathTranslate-Docker">
     <img src="https://img.shields.io/badge/%F0%9F%A4%97-Online%20Demo-FF9E0D"/></a>
   <a href="https://www.modelscope.cn/studios/AI-ModelScope/PDFMathTranslate">
@@ -33,13 +33,38 @@
 
 </div>
 
+> [!IMPORTANT]
+>
+> 当前 `desktop-app` 是基于经典版 v1.9.11 的**非官方 Codex 增强版**，
+> 不是 PDFMathTranslate 官方发布，也不是 OpenAI 官方产品或背书。
+
+## Windows 桌面版下载
+
+适用于 **Windows 10/11 x64**，无需安装 Python。
+
+- **推荐直接下载：** [`PDFMathTranslate-Codex-win64-with-assets.zip`](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-win64-with-assets.zip)
+- [查看最新 Release、版本说明和 SHA-256](https://github.com/phxumy/PDFMathTranslate/releases/latest)
+- [桌面版完整安装和故障排查](./DESKTOP_APP_zh-CN.md)
+
+一分钟上手：
+
+1. 下载上面的 ZIP 并完整解压，不要直接在压缩包预览窗口中运行。
+2. 使用 Codex 服务前，双击包内的 `Login-Codex.cmd`，在浏览器中完成官方登录。
+3. 双击 `PDFMathTranslate-Codex.exe`。
+4. 在 `Service` 中选择 `Codex`，上传 PDF 后开始翻译。
+
+发布包内置官方 **Codex CLI 0.145.0 程序**，无需另装 Python 或 Codex CLI；但不包含
+账号、套餐或免费额度、登录凭据、API Key、用户论文或翻译缓存。界面只绑定
+`127.0.0.1`，选择云翻译服务后，待翻译文本仍会发送给对应服务商；Codex 后端会使用
+你登录的账户调用 OpenAI/Codex 服务。账户和登录方式以 [OpenAI 官方 Codex CLI 说明](https://developers.openai.com/codex/cli)为准。
+
 科学 PDF 文档翻译及双语对照工具
 
 - 📊 保留公式、图表、目录和注释 *([预览效果](#preview))*
 - 🌐 支持 [多种语言](./ADVANCED.md#language) 和 [诸多翻译服务](./ADVANCED.md#services)
 - 🤖 提供 [命令行工具](#usage)，[图形交互界面](#gui)，以及 [容器化部署](#docker)
 
-欢迎在 [GitHub Issues](https://github.com/Byaidu/PDFMathTranslate/issues) 或 [Telegram 用户群](https://t.me/+Z9_SgnxmsmA5NzBl)
+Codex 增强版的问题请提交到[本 fork 的 GitHub Issues](https://github.com/phxumy/PDFMathTranslate/issues)；上游功能请前往 [PDFMathTranslate 官方仓库](https://github.com/PDFMathTranslate/PDFMathTranslate)。
 
 有关如何贡献的详细信息，请查阅 [贡献指南](https://github.com/Byaidu/PDFMathTranslate/wiki/Contribution-Guide---%E8%B4%A1%E7%8C%AE%E6%8C%87%E5%8D%97)
 
@@ -96,9 +121,13 @@
 <details>
   <summary>2. Windows exe</summary>
 
-1. 从 [发布页面](https://github.com/Byaidu/PDFMathTranslate/releases) 下载 pdf2zh-version-win64.zip
+1. 从[本 fork 最新 Release](https://github.com/phxumy/PDFMathTranslate/releases/latest)下载 `PDFMathTranslate-Codex-win64-with-assets.zip`。
 
-2. 解压缩并双击 `pdf2zh.exe` 运行。
+2. 完整解压；使用 Codex 前双击 `Login-Codex.cmd` 完成登录。
+
+3. 双击 `PDFMathTranslate-Codex.exe`。包内的 `pdf2zh.exe` 仍用于经典浏览器 WebUI 和命令行。
+
+压缩包已经包含固定版本的官方 Codex CLI 程序和 BabelDOC 离线资源，不包含任何人的账户或凭据。
 
 </details>
 

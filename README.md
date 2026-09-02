@@ -27,7 +27,7 @@ English | [简体中文](docs/README_zh-CN.md) | [繁體中文](docs/README_zh-T
     <img src="https://img.shields.io/badge/Telegram-2CA5E0?style=flat-squeare&logo=telegram&logoColor=white"></a>
   <!-- License -->
   <a href="./LICENSE">
-    <img src="https://img.shields.io/github/license/Byaidu/PDFMathTranslate"></a>
+    <img src="https://img.shields.io/github/license/phxumy/PDFMathTranslate"></a>
 </p>
 
 <a href="https://trendshift.io/repositories/12424" target="_blank"><img src="https://trendshift.io/api/badge/repositories/12424" alt="Byaidu%2FPDFMathTranslate | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
@@ -38,9 +38,33 @@ English | [简体中文](docs/README_zh-CN.md) | [繁體中文](docs/README_zh-T
 >
 > This repository contains an **unofficial Codex-enhanced v1.9.11 branch**.
 > It adds a local Codex CLI translation backend and scientific-PDF layout fixes;
-> it is not an official PDFMathTranslate release. See the
+> it is not an official PDFMathTranslate or OpenAI release. See the
 > [Chinese usage and attribution guide](./docs/CODEX_ENHANCED_FORK_zh-CN.md)
 > and the [Windows desktop app guide](./docs/DESKTOP_APP_zh-CN.md).
+
+## Download the Windows desktop app
+
+The ready-to-use package is for **Windows 10/11 x64** and does not require
+Python.
+
+- **Recommended:** [download the latest desktop ZIP with offline layout assets](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-win64-with-assets.zip)
+- [Open the latest release page and SHA-256 checksums](https://github.com/phxumy/PDFMathTranslate/releases/latest)
+- [Read the detailed Chinese desktop guide](./docs/DESKTOP_APP_zh-CN.md)
+
+Quick start:
+
+1. Download the ZIP above and extract the entire archive to a normal folder. Do not run the program from inside the ZIP preview.
+2. To use Codex, double-click `Login-Codex.cmd` once and complete the official browser sign-in. Skip this step if you only use another translation service.
+3. Double-click `PDFMathTranslate-Codex.exe`.
+4. Choose `Codex` under **Service**, upload a PDF, and start translating.
+
+The release includes the official **Codex CLI 0.145.0 program** so a separate
+Python or Codex installation is unnecessary. It does **not** include an account,
+subscription, free quota, login credentials, API keys, user PDFs, or translation
+caches. The desktop interface is bound to `127.0.0.1`, but text is sent to the
+translation provider you select; Codex requests are sent to OpenAI according to
+the account that signs in. See the [official OpenAI Codex CLI documentation](https://developers.openai.com/codex/cli)
+for account and sign-in details.
 
 PDF scientific paper translation and bilingual comparison.
 
@@ -48,7 +72,7 @@ PDF scientific paper translation and bilingual comparison.
 - 🌐 Support [multiple languages](#language), and diverse [translation services](#services).
 - 🤖 Provides [commandline tool](#usage), [interactive user interface](#gui), and [Docker](#docker)
 
-Feel free to provide feedback in [GitHub Issues](https://github.com/Byaidu/PDFMathTranslate/issues) or [Telegram Group](https://t.me/+Z9_SgnxmsmA5NzBl).
+For problems specific to this Codex-enhanced fork, use this fork's [GitHub Issues](https://github.com/phxumy/PDFMathTranslate/issues). For upstream PDFMathTranslate discussions, use the [upstream project](https://github.com/PDFMathTranslate/PDFMathTranslate).
 
 For details on how to contribute, please consult the [Contribution Guide](https://github.com/Byaidu/PDFMathTranslate/wiki/Contribution-Guide---%E8%B4%A1%E7%8C%AE%E6%8C%87%E5%8D%97).
 
@@ -115,9 +139,15 @@ For different use cases, we provide distinct methods to use our program:
 <details>
   <summary>2. Windows exe</summary>
 
-1. Download pdf2zh-version-win64.zip from [release page](https://github.com/Byaidu/PDFMathTranslate/releases)
+1. Download `PDFMathTranslate-Codex-win64-with-assets.zip` from [this fork's latest release](https://github.com/phxumy/PDFMathTranslate/releases/latest).
 
-2. Unzip and double-click `pdf2zh.exe` to run.
+2. Extract the complete archive. To use Codex, double-click `Login-Codex.cmd` once and complete sign-in.
+
+3. Double-click `PDFMathTranslate-Codex.exe`.
+
+The package includes the pinned official Codex CLI program and BabelDOC offline
+assets. `pdf2zh.exe` is also included for the classic browser UI and command-line
+use. No account or login credential is bundled.
 
 </details>
 

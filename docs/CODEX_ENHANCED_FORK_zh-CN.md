@@ -29,7 +29,21 @@ Windows 独立窗口的安装和打包方式请参阅[桌面工作台说明](./D
 
 这些策略是保守启发式规则，复杂或扫描质量较差的 PDF 仍可能需要人工检查。
 
-## 安装前提
+## 普通用户安装
+
+Windows 10/11 x64 用户可以直接下载带离线版面资源的桌面包，无需安装 Python：
+
+1. 从[本项目最新 Release](https://github.com/phxumy/PDFMathTranslate/releases/latest)下载 `PDFMathTranslate-Codex-win64-with-assets.zip`。
+2. 完整解压；使用 Codex 前双击 `Login-Codex.cmd`，在浏览器中完成官方登录。
+3. 双击 `PDFMathTranslate-Codex.exe`。
+
+详细步骤、SHA-256 校验和故障排查参阅[桌面工作台说明](./DESKTOP_APP_zh-CN.md)。
+
+发布包包含经过固定哈希校验的官方 Codex CLI 0.145.0 程序，但不包含账号、套餐额度、
+Codex 登录凭据、用户论文、API Key 或翻译缓存。登录和账户规则以
+[OpenAI 官方 Codex CLI 说明](https://developers.openai.com/codex/cli)为准。
+
+## 从源码安装
 
 1. 安装并登录 Codex CLI：
 
@@ -44,7 +58,7 @@ Windows 独立窗口的安装和打包方式请参阅[桌面工作台说明](./D
    python -m pip install -e .
    ```
 
-本仓库只发布源码，不包含 `codex.exe`、Codex 登录凭据、模型资产、用户论文或翻译缓存。不要复制或上传 `~/.codex/auth.json`。
+源码安装也不会读取或分发 Codex 登录凭据。不要复制或上传 `~/.codex/auth.json`。
 
 ## WebUI 使用
 

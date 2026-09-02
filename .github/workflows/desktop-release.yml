@@ -1,0 +1,320 @@
+name: Publish Windows desktop release
+
+on:
+  push:
+    tags:
+      - "v*-codex.*"
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12.9"
+  PYTHON_EMBED_SHA256: "615861fb801e8b04c847598db4e1e46e4b046295017caa37cb5486dde72b5865"
+  PYSTAND_VERSION: "1.1.4"
+  PYSTAND_SHA256: "51898744692cba9fd6db2b1212629d5cf04bea15559c80493d6e7d8356d5122a"
+  CODEX_VERSION: "0.145.0"
+  CODEX_SHA256: "8d0d281346aedf63c4cc3922997df822fbb8881f7ffb2b57416f48e8c52a734e"
+  RELEASE_DIRECTORY: "PDFMathTranslate-Codex"
+  RELEASE_ASSET: "PDFMathTranslate-Codex-win64-with-assets.zip"
+
+jobs:
+  build-test-release:
+    name: Build, verify, and publish Windows x64 package
+    runs-on: windows-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Cache BabelDOC assets
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/babeldoc
+          key: desktop-release-babeldoc-${{ hashFiles('uv.lock') }}
+
+      - name: Validate the tag and locked environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ("${{ github.ref_name }}" -notmatch '^v\d+\.\d+\.\d+-codex\.\d+$') {
+              throw "Unexpected release tag: ${{ github.ref_name }}"
+          }
+          uv lock --check
+          uv sync --locked --python $env:PYTHON_VERSION
+
+      - name: Run unit tests and formatting checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          uv run --locked pytest .
+          uv run --locked black --check .
+
+      - name: Build the clean portable application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseRoot = Join-Path $env:GITHUB_WORKSPACE "release-staging\$env:RELEASE_DIRECTORY"
+          $dependencyRoot = Join-Path $env:GITHUB_WORKSPACE "release-dependencies"
+          $runtimeVenv = Join-Path $dependencyRoot "runtime-venv"
+          $runtimePython = Join-Path $runtimeVenv "Scripts\python.exe"
+
+          New-Item -Path (Join-Path $releaseRoot "runtime") -ItemType Directory -Force | Out-Null
+          New-Item -Path (Join-Path $releaseRoot "licenses") -ItemType Directory -Force | Out-Null
+          New-Item -Path $dependencyRoot -ItemType Directory -Force | Out-Null
+
+          function Assert-Sha256([string] $Path, [string] $Expected) {
+              $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $Expected.ToLowerInvariant()) {
+                  throw "SHA-256 mismatch for $Path. Expected $Expected, got $actual."
+              }
+          }
+
+          Write-Host "Downloading verified Python embedded runtime $env:PYTHON_VERSION"
+          $pythonArchive = Join-Path $dependencyRoot "python-embed.zip"
+          $pythonUrl = "https://www.python.org/ftp/python/$env:PYTHON_VERSION/python-$env:PYTHON_VERSION-embed-amd64.zip"
+          Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonArchive
+          Assert-Sha256 $pythonArchive $env:PYTHON_EMBED_SHA256
+          Expand-Archive -Path $pythonArchive -DestinationPath (Join-Path $releaseRoot "runtime") -Force
+
+          Write-Host "Downloading verified PyStand launchers $env:PYSTAND_VERSION"
+          $pystandArchive = Join-Path $dependencyRoot "PyStand.zip"
+          $pystandUrl = "https://github.com/skywind3000/PyStand/releases/download/$env:PYSTAND_VERSION/PyStand-v$env:PYSTAND_VERSION-exe.zip"
+          Invoke-WebRequest -Uri $pystandUrl -OutFile $pystandArchive
+          Assert-Sha256 $pystandArchive $env:PYSTAND_SHA256
+          $pystandRoot = Join-Path $dependencyRoot "PyStand"
+          Expand-Archive -Path $pystandArchive -DestinationPath $pystandRoot -Force
+          Copy-Item (Join-Path $pystandRoot "PyStand-x64-CLI\PyStand.exe") (Join-Path $releaseRoot "pdf2zh.exe")
+          Copy-Item (Join-Path $pystandRoot "PyStand-x64-GUI\PyStand.exe") (Join-Path $releaseRoot "PDFMathTranslate-Codex.exe")
+
+          Write-Host "Installing the exact dependencies recorded in uv.lock"
+          $requirements = Join-Path $dependencyRoot "runtime-requirements.txt"
+          uv export --locked --no-dev --extra desktop --no-emit-project --format requirements-txt --output-file $requirements
+          uv venv $runtimeVenv --python $env:PYTHON_VERSION
+          uv pip install --python $runtimePython --require-hashes -r $requirements
+          uv build --wheel --out-dir (Join-Path $dependencyRoot "dist")
+          $wheels = @(Get-ChildItem (Join-Path $dependencyRoot "dist") -Filter "*.whl")
+          if ($wheels.Count -ne 1) {
+              throw "Expected exactly one project wheel, found $($wheels.Count)."
+          }
+          $wheel = $wheels[0]
+          uv pip install --python $runtimePython --no-deps $wheel.FullName
+          Copy-Item (Join-Path $runtimeVenv "Lib\site-packages") $releaseRoot -Recurse
+
+          Copy-Item "script\_pystand_static.int" $releaseRoot
+          Copy-Item "LICENSE" $releaseRoot
+          Copy-Item "packaging\Login-Codex.cmd" $releaseRoot
+          Copy-Item "packaging\README-Windows.txt" $releaseRoot
+          Copy-Item "packaging\README-使用说明.txt" $releaseRoot
+          Copy-Item "packaging\OFFLINE-ASSETS-SOURCES.txt" (Join-Path $releaseRoot "licenses")
+          Copy-Item (Join-Path $releaseRoot "runtime\LICENSE.txt") (Join-Path $releaseRoot "licenses\Python-3.12.9-LICENSE.txt")
+
+          Write-Host "Generating the BabelDOC offline asset archive"
+          & (Join-Path $runtimeVenv "Scripts\babeldoc.exe") --generate-offline-assets $releaseRoot
+          if ($LASTEXITCODE -ne 0) {
+              throw "BabelDOC offline asset generation failed with exit code $LASTEXITCODE."
+          }
+
+          Write-Host "Downloading verified official Codex CLI $env:CODEX_VERSION"
+          $codexArchive = Join-Path $dependencyRoot "codex-package.tar.gz"
+          $codexUrl = "https://github.com/openai/codex/releases/download/rust-v$env:CODEX_VERSION/codex-package-x86_64-pc-windows-msvc.tar.gz"
+          Invoke-WebRequest -Uri $codexUrl -OutFile $codexArchive
+          Assert-Sha256 $codexArchive $env:CODEX_SHA256
+          $codexRoot = Join-Path $releaseRoot "codex-cli"
+          New-Item -Path $codexRoot -ItemType Directory -Force | Out-Null
+          tar -xzf $codexArchive -C $codexRoot
+          if ($LASTEXITCODE -ne 0) {
+              throw "Codex CLI archive extraction failed with exit code $LASTEXITCODE."
+          }
+
+          Write-Host "Adding pinned third-party license notices"
+          $licenseDownloads = @(
+              @{
+                  Url = "https://raw.githubusercontent.com/openai/codex/rust-v$env:CODEX_VERSION/LICENSE"
+                  Path = (Join-Path $releaseRoot "licenses\Codex-CLI-LICENSE.txt")
+                  Sha256 = "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+              },
+              @{
+                  Url = "https://raw.githubusercontent.com/openai/codex/rust-v$env:CODEX_VERSION/NOTICE"
+                  Path = (Join-Path $releaseRoot "licenses\Codex-CLI-NOTICE.txt")
+                  Sha256 = "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+              },
+              @{
+                  Url = "https://raw.githubusercontent.com/skywind3000/PyStand/$env:PYSTAND_VERSION/LICENSE"
+                  Path = (Join-Path $releaseRoot "licenses\PyStand-LICENSE.txt")
+                  Sha256 = "5a67e8ca3f851fc7b6a780239b6bda57c856906c7d513c83b8ff3d3e9abbe9b9"
+              }
+          )
+          foreach ($item in $licenseDownloads) {
+              Invoke-WebRequest -Uri $item.Url -OutFile $item.Path
+              Assert-Sha256 $item.Path $item.Sha256
+          }
+
+          $sourceUrl = "https://github.com/$env:GITHUB_REPOSITORY/tree/${{ github.ref_name }}"
+          $sourceArchive = "https://github.com/$env:GITHUB_REPOSITORY/archive/refs/tags/${{ github.ref_name }}.zip"
+          @(
+              "PDFMathTranslate Codex Edition build information",
+              "Release tag: ${{ github.ref_name }}",
+              "Source commit: $env:GITHUB_SHA",
+              "Source: $sourceUrl",
+              "GitHub Actions run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+              "Python embedded runtime: $env:PYTHON_VERSION",
+              "PyStand: $env:PYSTAND_VERSION",
+              "Bundled official Codex CLI: $env:CODEX_VERSION",
+              "Dependencies: uv.lock from the source tag",
+              "Build host: GitHub-hosted windows-latest"
+          ) | Set-Content -Path (Join-Path $releaseRoot "BUILD-INFO.txt") -Encoding utf8
+          @(
+              "The complete corresponding source for this binary release is available at:",
+              $sourceUrl,
+              "",
+              "Download the source archive:",
+              $sourceArchive,
+              "",
+              "Exact Git commit:",
+              $env:GITHUB_SHA
+          ) | Set-Content -Path (Join-Path $releaseRoot "SOURCE-CODE.txt") -Encoding utf8
+
+      - name: Verify package contents and launchers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseRoot = Join-Path $env:GITHUB_WORKSPACE "release-staging\$env:RELEASE_DIRECTORY"
+          $codex = Join-Path $releaseRoot "codex-cli\x86_64-pc-windows-msvc\bin\codex.exe"
+
+          $requiredTopLevel = @(
+              "PDFMathTranslate-Codex.exe",
+              "pdf2zh.exe",
+              "_pystand_static.int",
+              "runtime",
+              "site-packages",
+              "codex-cli",
+              "Login-Codex.cmd",
+              "README-Windows.txt",
+              "README-使用说明.txt",
+              "BUILD-INFO.txt",
+              "SOURCE-CODE.txt",
+              "LICENSE",
+              "licenses"
+          )
+          foreach ($name in $requiredTopLevel) {
+              if (-not (Test-Path (Join-Path $releaseRoot $name))) {
+                  throw "Required release item is missing: $name"
+              }
+          }
+
+          $topLevelItems = @(Get-ChildItem $releaseRoot -Force)
+          foreach ($item in $topLevelItems) {
+              if ($item.Name -in $requiredTopLevel) { continue }
+              if (-not $item.PSIsContainer -and $item.Name -like "offline_assets_*.zip") { continue }
+              throw "Unexpected top-level item in clean release: $($item.Name)"
+          }
+
+          $offlineAssets = @(Get-ChildItem $releaseRoot -Filter "offline_assets_*.zip" -File)
+          if ($offlineAssets.Count -ne 1 -or $offlineAssets[0].Length -le 0) {
+              throw "Expected exactly one non-empty BabelDOC offline asset archive."
+          }
+          $assetListing = tar -tf $offlineAssets[0].FullName
+          if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect the generated offline asset archive."
+          }
+          foreach ($pattern in @("models/doclayout_", "models/ch_PP-OCR", "fonts/SourceHan")) {
+              if (-not ($assetListing | Select-String -SimpleMatch $pattern)) {
+                  throw "Offline assets are missing required content matching: $pattern"
+              }
+          }
+
+          $forbidden = @(Get-ChildItem $releaseRoot -Recurse -Force | Where-Object {
+              $_.Name -in @("auth.json", ".codex", "pdf2zh_files", ".env") -or
+              $_.Name -like ".env.*" -or
+              $_.Extension -in @(".pdf", ".db", ".sqlite", ".sqlite3")
+          })
+          if ($forbidden.Count -gt 0) {
+              $paths = ($forbidden.FullName -join "`n")
+              throw "Forbidden private or user-document content found in release:`n$paths"
+          }
+
+          $versionOutput = & (Join-Path $releaseRoot "pdf2zh.exe") --version
+          if ($LASTEXITCODE -ne 0) {
+              throw "pdf2zh.exe --version failed with exit code $LASTEXITCODE."
+          }
+          $helpOutput = & (Join-Path $releaseRoot "pdf2zh.exe") --help
+          if ($LASTEXITCODE -ne 0 -or -not ($helpOutput | Select-String -SimpleMatch "--desktop")) {
+              throw "The packaged command-line launcher does not expose --desktop."
+          }
+
+          $codexVersion = & $codex --version
+          if ($LASTEXITCODE -ne 0 -or -not ($codexVersion | Select-String -SimpleMatch $env:CODEX_VERSION)) {
+              throw "Bundled Codex CLI version check failed: $codexVersion"
+          }
+          $codexHelp = & $codex exec --help
+          if ($LASTEXITCODE -ne 0) {
+              throw "Bundled Codex CLI exec help failed with exit code $LASTEXITCODE."
+          }
+          foreach ($option in @("--skip-git-repo-check", "--ephemeral", "--sandbox", "--color", "--output-schema", "--output-last-message")) {
+              if (-not ($codexHelp | Select-String -SimpleMatch $option)) {
+                  throw "Bundled Codex CLI is missing required option: $option"
+              }
+          }
+
+      - name: Create ZIP and checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stagingRoot = Join-Path $env:GITHUB_WORKSPACE "release-staging"
+          $distRoot = Join-Path $env:GITHUB_WORKSPACE "release-dist"
+          New-Item -Path $distRoot -ItemType Directory -Force | Out-Null
+          $zipPath = Join-Path $distRoot $env:RELEASE_ASSET
+
+          Push-Location $stagingRoot
+          try {
+              & 7z a -tzip -mx=9 $zipPath $env:RELEASE_DIRECTORY
+              if ($LASTEXITCODE -ne 0) {
+                  throw "7-Zip failed with exit code $LASTEXITCODE."
+              }
+          }
+          finally {
+              Pop-Location
+          }
+
+          if ((Get-Item $zipPath).Length -ge 2GB) {
+              throw "The release archive exceeds GitHub's 2 GiB per-file limit."
+          }
+          $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:RELEASE_ASSET" | Set-Content (Join-Path $distRoot "SHA256SUMS.txt") -Encoding ascii
+
+      - name: Publish the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $title = "PDFMathTranslate Codex Edition $tag"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "release-dist\$env:RELEASE_ASSET"
+          $checksums = Join-Path $env:GITHUB_WORKSPACE "release-dist\SHA256SUMS.txt"
+          $notes = Join-Path $env:GITHUB_WORKSPACE "packaging\RELEASE_NOTES.md"
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+              gh release upload $tag $archive $checksums --clobber --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) { throw "Updating release assets failed." }
+              gh release edit $tag --title $title --notes-file $notes --latest --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) { throw "Updating release metadata failed." }
+          }
+          else {
+              gh release create $tag $archive $checksums --verify-tag --latest --title $title --notes-file $notes --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) { throw "Creating the GitHub Release failed." }
+          }
