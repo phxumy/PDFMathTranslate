@@ -66,6 +66,32 @@ translation provider you select; Codex requests are sent to OpenAI according to
 the account that signs in. See the [official OpenAI Codex CLI documentation](https://developers.openai.com/codex/cli)
 for account and sign-in details.
 
+### Codex model IDs (verified September 2, 2026)
+
+`CODEX_MODEL` is passed verbatim to `codex exec --model`. It expects an exact
+model ID, not a short nickname. Leave it blank to use the model selected by the
+Codex CLI and the signed-in account.
+
+| Official name | Exact `CODEX_MODEL` value | Intended use |
+| --- | --- | --- |
+| GPT-5.6 Sol | `gpt-5.6-sol` | Flagship model for complex reasoning and high-quality work. The moving alias `gpt-5.6` currently routes to Sol. |
+| GPT-5.6 Terra | `gpt-5.6-terra` | Balanced intelligence and cost for everyday work. |
+| GPT-5.6 Luna | `gpt-5.6-luna` | Fast, cost-efficient model for repeatable or high-volume work such as translation. |
+
+For example, `gpt-5.6-luna` with `CODEX_REASONING_EFFORT=max` requests **Luna
+with Max reasoning**. The lower-case suffix is the correct spelling. Do not enter
+only `luna`, `terra`, or `sol`: those short labels are not documented model IDs,
+and this fork does not expand them or silently fall back to another model.
+
+This release accepts reasoning values `none`, `low`, `medium`, `high`, `xhigh`,
+and `max`; it does not accept `ultra` in the PDF translation backend. Model
+availability still depends on the signed-in plan, workspace policy, region, and
+OpenAI rollout. See the [official OpenAI model catalog](https://developers.openai.com/api/docs/models/gpt),
+[GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/latest-model),
+and [Codex availability notes](https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/).
+This program invokes Codex CLI; it does not turn a ChatGPT subscription into an
+OpenAI API key, and direct API usage is billed separately.
+
 PDF scientific paper translation and bilingual comparison.
 
 - 📊 Preserve formulas, charts, table of contents, and annotations _([preview](#preview))_.

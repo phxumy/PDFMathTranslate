@@ -78,6 +78,24 @@ pdf2zh -i
 | `CODEX_REASONING_EFFORT` | `none` | 可选值：`none`、`low`、`medium`、`high`、`xhigh`、`max`。翻译通常无需高推理强度。 |
 | `CODEX_TIMEOUT` | `120` | 单次 Codex 请求超时秒数。长段落或较慢网络可适当增加。 |
 
+### 当前 Codex 模型 ID（核对日期：2026-09-02）
+
+| 官方名称 | `CODEX_MODEL` 精确值 | 说明 |
+| --- | --- | --- |
+| GPT-5.6 Sol | `gpt-5.6-sol` | 旗舰模型；`gpt-5.6` 当前是指向 Sol 的滚动别名。 |
+| GPT-5.6 Terra | `gpt-5.6-terra` | 智能和成本均衡。 |
+| GPT-5.6 Luna | `gpt-5.6-luna` | 快速、经济，适合翻译等高吞吐任务。 |
+
+模型 ID 会作为 `codex exec --model` 的参数原样传入。`gpt-5.6-luna` 中的小写
+`luna` 是正确写法；只写 `luna` 并不是官方模型 ID。本 fork 不会改写模型名称或在
+模型无效时静默回退。留空则由 Codex CLI 和当前登录账户选择默认模型。模型可用范围
+取决于套餐、工作区、地区和发布状态，请同时查看 [OpenAI 官方模型目录](https://developers.openai.com/api/docs/models/gpt)
+和 [Codex 可用范围说明](https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/)。
+
+本后端支持 `none`、`low`、`medium`、`high`、`xhigh`、`max` 六种推理强度；
+`ultra` 不是当前 PDF 翻译后端可填写的值。例如 `gpt-5.6-luna` 与 `max` 的组合表示
+请求 Luna 模型并使用 Max 推理强度。
+
 选择 Codex 时，WebUI 会把 `number of threads` 默认设为 `1`，但输入框仍可编辑。该数值表示最多同时运行多少个相互独立的 Codex 请求；例如填写 `4`，程序会保留原有的批次划分和输出顺序，只把已经划分好的批次最多并行执行 4 个。并行不会把同一内容重复翻译，因此同一文档的总输入/输出量通常与单线程接近，但瞬时请求速率会提高，限流、超时或结果校验失败造成的重试可能带来少量额外消耗。建议先使用 `1` 或 `2`，确认账户速率和电脑负载稳定后再尝试 `4`。
 
 Windows 桌面版会以隐藏窗口方式启动后台 Codex CLI；翻译期间不会为每个请求弹出控制台窗口。
