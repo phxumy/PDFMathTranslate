@@ -114,27 +114,17 @@ class RotatedTextTests(unittest.TestCase):
         for matrix in matrices:
             with self.subTest(matrix=matrix):
                 ops = render_single_protected_char(matrix, fontsize=1.0)
-                serialized_matrix = " ".join(
-                    f"{value:f}" for value in matrix
-                )
+                serialized_matrix = " ".join(f"{value:f}" for value in matrix)
                 self.assertIn(f"{serialized_matrix} Tm", ops)
                 self.assertIn("/F1 1.000000 Tf", ops)
 
     def test_non_horizontal_detection_uses_a_relative_tolerance(self) -> None:
         self.assertTrue(
-            _is_non_horizontal_text_matrix(
-                (1e-10, 9.0, -9.0, -1e-10, 0.0, 0.0)
-            )
+            _is_non_horizontal_text_matrix((1e-10, 9.0, -9.0, -1e-10, 0.0, 0.0))
         )
-        self.assertTrue(
-            _is_non_horizontal_text_matrix(
-                (8.0, 4.0, -4.0, 8.0, 0.0, 0.0)
-            )
-        )
+        self.assertTrue(_is_non_horizontal_text_matrix((8.0, 4.0, -4.0, 8.0, 0.0, 0.0)))
         self.assertFalse(
-            _is_non_horizontal_text_matrix(
-                (9.0, 1e-10, 0.0, 9.0, 0.0, 0.0)
-            )
+            _is_non_horizontal_text_matrix((9.0, 1e-10, 0.0, 9.0, 0.0, 0.0))
         )
 
 

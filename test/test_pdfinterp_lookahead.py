@@ -45,7 +45,7 @@ def paragraph_for(
     y0: float,
     y1: float,
 ) -> Paragraph:
-    x0, x1 = ((52.0, 297.0) if column == 0 else (315.0, 560.0))
+    x0, x1 = (52.0, 297.0) if column == 0 else (315.0, 560.0)
     return Paragraph(
         y1,
         x0,
@@ -73,11 +73,7 @@ def make_draft(
 ) -> PageLayoutDraft:
     ltpage = LTPage(page_id, (0.0, 0.0, 612.0, 792.0))
     sstk = [] if text is None else [text]
-    pstk = (
-        []
-        if text is None
-        else [paragraph_for(page_id, column=column, y0=y0, y1=y1)]
-    )
+    pstk = [] if text is None else [paragraph_for(page_id, column=column, y0=y0, y1=y1)]
     marker = font_marker or f"font-page-{page_id}"
     return PageLayoutDraft(
         ltpage=ltpage,
@@ -145,7 +141,9 @@ def make_converter(
 
 
 class ConverterLookaheadLifecycleTests(unittest.TestCase):
-    def test_second_page_commits_first_page_and_restores_its_font_snapshot(self) -> None:
+    def test_second_page_commits_first_page_and_restores_its_font_snapshot(
+        self,
+    ) -> None:
         drafts = {
             0: make_draft(0, 101, font_marker="first-font"),
             1: make_draft(1, 102, font_marker="second-font"),
@@ -183,7 +181,9 @@ class ConverterLookaheadLifecycleTests(unittest.TestCase):
         self.assertEqual(converter.flush_deferred_pages(), {})
         self.assertEqual([call["page_id"] for call in final_calls], [4])
 
-    def test_figure_is_finalized_immediately_without_touching_pending_page(self) -> None:
+    def test_figure_is_finalized_immediately_without_touching_pending_page(
+        self,
+    ) -> None:
         pending = make_draft(5, 505)
         converter, _, final_calls = make_converter({5: pending})
         converter._pending_page = pending
@@ -209,9 +209,7 @@ class ConverterLookaheadLifecycleTests(unittest.TestCase):
         previous = make_draft(
             2,
             202,
-            text=(
-                "The four terms represent the coupling strength of the virtual"
-            ),
+            text=("The four terms represent the coupling strength of the virtual"),
             column=1,
             y0=74.0,
             y1=111.0,
@@ -219,9 +217,7 @@ class ConverterLookaheadLifecycleTests(unittest.TestCase):
         following = make_draft(
             4,
             404,
-            text=(
-                "exchange interaction via the intermediate state and the coupler"
-            ),
+            text=("exchange interaction via the intermediate state and the coupler"),
             column=0,
             y0=488.0,
             y1=742.0,
@@ -309,9 +305,7 @@ class PDFInterpreterDeferredPatchTests(unittest.TestCase):
         )
 
         interpreter.process_page(first)
-        first_base_patch = (
-            "q BASE-OPS-PAGE-0 Q 1 0 0 1 11.0 22.0 cm "
-        )
+        first_base_patch = "q BASE-OPS-PAGE-0 Q 1 0 0 1 11.0 22.0 cm "
         self.assertEqual(obj_patch[101], first_base_patch)
 
         interpreter.process_page(second)

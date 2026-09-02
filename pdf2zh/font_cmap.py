@@ -20,7 +20,6 @@ from pathlib import Path
 
 from fontTools.ttLib import TTFont
 
-
 _CACHE_FORMAT_VERSION = "v1"
 
 

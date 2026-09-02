@@ -62,9 +62,7 @@ def fake_mixed_run(parts: list[tuple[str, str]]):
             if char.isspace():
                 x += 2.5
                 continue
-            chars.append(
-                FakeItalicChar(char, x, x + 4.0, fontname=fontname)
-            )
+            chars.append(FakeItalicChar(char, x, x + 4.0, fontname=fontname))
             x += 4.0
     return chars
 
@@ -214,7 +212,9 @@ class ItalicClassifierTests(unittest.TestCase):
             index_tagged,
         )
 
-    def test_math_identifiers_products_names_and_ieee_titles_stay_protected(self) -> None:
+    def test_math_identifiers_products_names_and_ieee_titles_stay_protected(
+        self,
+    ) -> None:
         protected = (
             "Senior Member IEEE",
             "Marc Delcroix",
@@ -315,20 +315,17 @@ class ItalicMarkupTests(unittest.TestCase):
         )
         self.assertEqual(ids, (12,))
         self.assertIn(
-            "[[PDF2ZH_ITALIC_12_BEGIN]]in situ"
-            "[[PDF2ZH_ITALIC_12_END]]",
+            "[[PDF2ZH_ITALIC_12_BEGIN]]in situ" "[[PDF2ZH_ITALIC_12_END]]",
             tagged,
         )
         self.assertIn("{v13}", tagged)
 
     def test_codex_validator_rejects_damaged_style_or_formula_markers(self) -> None:
         source = (
-            "tuned [[PDF2ZH_ITALIC_12_BEGIN]]in situ"
-            "[[PDF2ZH_ITALIC_12_END]] by {v1}"
+            "tuned [[PDF2ZH_ITALIC_12_BEGIN]]in situ" "[[PDF2ZH_ITALIC_12_END]] by {v1}"
         )
         valid = (
-            "通过[[PDF2ZH_ITALIC_12_BEGIN]]原位"
-            "[[PDF2ZH_ITALIC_12_END]]方式调谐{v1}"
+            "通过[[PDF2ZH_ITALIC_12_BEGIN]]原位" "[[PDF2ZH_ITALIC_12_END]]方式调谐{v1}"
         )
         self.assertTrue(CodexTranslator._validate_styled_translation(source, valid))
         self.assertFalse(
@@ -408,7 +405,9 @@ class ItalicMarkupTests(unittest.TestCase):
             ["insitu"],
             612.0,
             italic_candidates={12: "in situ"},
-        )[0]
+        )[
+            0
+        ]
         self.assertEqual(fallback, "frequency tuned in situ by flux")
 
     def test_target_text_operator_uses_and_resets_synthetic_italic(self) -> None:

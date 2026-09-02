@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
-
 ROLE_TRANSLATE = "translate"
 ROLE_PRESERVE = "preserve"
 ROLE_REFERENCE = "reference"
@@ -150,17 +149,13 @@ _AUTHOR_PROSE_RE = re.compile(
     re.IGNORECASE,
 )
 _AUTHOR_NAME_PATTERNS = (
-    re.compile(
-        r"(?<![A-Za-z])(?:[A-Z]\.(?:\s*)?){1,4}"
-        r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+"
-    ),
+    re.compile(r"(?<![A-Za-z])(?:[A-Z]\.(?:\s*)?){1,4}" r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+"),
     re.compile(
         r"(?<![A-Za-z])[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{1,}"
         r"\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{1,}"
     ),
     re.compile(
-        r"(?<![A-Za-z])[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{1,},\s*"
-        r"(?:[A-Z]\.(?:\s*)?){1,4}"
+        r"(?<![A-Za-z])[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{1,},\s*" r"(?:[A-Z]\.(?:\s*)?){1,4}"
     ),
 )
 
@@ -211,18 +206,15 @@ def find_reference_markers(
             "supplement-bracket",
         ),
         (
-            r"(?<![\dA-Za-z])[(（]?\s*[Ss]\s*(\d(?:\s*\d){0,2})"
-            r"\s*[.．。)）](?=\s)",
+            r"(?<![\dA-Za-z])[(（]?\s*[Ss]\s*(\d(?:\s*\d){0,2})" r"\s*[.．。)）](?=\s)",
             "supplement",
         ),
         (
-            r"(?<![\dA-Za-z])[(（]\s*(\d(?:\s*\d){0,2})\s*[)）]"
-            r"(?=\s*[A-Z])",
+            r"(?<![\dA-Za-z])[(（]\s*(\d(?:\s*\d){0,2})\s*[)）]" r"(?=\s*[A-Z])",
             "parenthetical",
         ),
         (
-            r"(?<![\dA-Za-z(（])(\d(?:\s*\d){0,2})\s*[)）]"
-            r"(?=\s*[A-Z])",
+            r"(?<![\dA-Za-z(（])(\d(?:\s*\d){0,2})\s*[)）]" r"(?=\s*[A-Z])",
             "closing",
         ),
         (
@@ -230,8 +222,7 @@ def find_reference_markers(
             "dotted",
         ),
         (
-            r"(?<![\dA-Za-z])(\d(?:\s*\d){0,2})"
-            r"(?=(?:[A-Z]\.\s*){1,4}[A-Z])",
+            r"(?<![\dA-Za-z])(\d(?:\s*\d){0,2})" r"(?=(?:[A-Z]\.\s*){1,4}[A-Z])",
             "tight-initial",
         ),
         (
@@ -254,10 +245,13 @@ def find_reference_markers(
         # placeholders attached to a word prevents author bylines such as
         # ``A. Smith{v1}, B. Jones{v2}`` from being split as references.
         prefix = text[: match.start()]
-        if re.search(
-            r"[0-9A-Za-zÀ-ÖØ-öø-ÿ'’\-]\s*$",
-            prefix,
-        ) and _REFERENCE_HEADING_RE.fullmatch(prefix) is None:
+        if (
+            re.search(
+                r"[0-9A-Za-zÀ-ÖØ-öø-ÿ'’\-]\s*$",
+                prefix,
+            )
+            and _REFERENCE_HEADING_RE.fullmatch(prefix) is None
+        ):
             continue
         markers.append(
             ReferenceMarker(
@@ -297,9 +291,7 @@ def find_reference_markers(
         if overlap_index is None:
             selected.append(marker)
             continue
-        if priority.get(marker.kind, 0) > priority.get(
-            selected[overlap_index].kind, 0
-        ):
+        if priority.get(marker.kind, 0) > priority.get(selected[overlap_index].kind, 0):
             selected[overlap_index] = marker
     return tuple(sorted(selected, key=lambda item: (item.start, item.end)))
 
@@ -362,7 +354,7 @@ def _entry_texts(
     entries = []
     for index, marker in enumerate(markers):
         next_start = markers[index + 1].start if index + 1 < len(markers) else end
-        entries.append(text[marker.start:next_start])
+        entries.append(text[marker.start : next_start])
     return tuple(entries)
 
 
@@ -398,9 +390,7 @@ def _reference_sequence_is_confident(
             return strong_entries >= 2
         if len(markers) == 2:
             return strong_entries == 2
-        return scores[0] >= 5 and (
-            heading_hint or expected_match or starts_entry
-        )
+        return scores[0] >= 5 and (heading_hint or expected_match or starts_entry)
     if len(markers) >= 3 and strong_entries >= 2:
         return True
     if len(markers) == 2 and strong_entries == 2:
@@ -566,8 +556,7 @@ def _looks_like_detector_title_byline(segment: SourceSegment) -> bool:
         if not 2 <= len(tokens) <= 5:
             return False
         if any(
-            _STRICT_BYLINE_NAME_TOKEN_RE.fullmatch(token) is None
-            for token in tokens
+            _STRICT_BYLINE_NAME_TOKEN_RE.fullmatch(token) is None for token in tokens
         ):
             return False
     return True
@@ -616,9 +605,7 @@ def _affiliation_markers(
         if number is None:
             continue
         following = text[match.end() : match.end() + 80]
-        if _AFFILIATION_RE.search(following) or _AFFILIATION_NOTE_RE.search(
-            following
-        ):
+        if _AFFILIATION_RE.search(following) or _AFFILIATION_NOTE_RE.search(following):
             markers.append((match.start(), match.end(), match.group(0)))
     plain_pattern = re.compile(
         r"(?<![\w.])(\d{1,2}|[a-z]\))(?=\s*(?:Department|School|Faculty|"
@@ -683,9 +670,7 @@ def apply_exact_replacements(
             return None
         if re.search(r"https?://|\bdoi\b|10\.\d{4,9}/", old, re.IGNORECASE):
             return None
-        if sorted(_PLACEHOLDER_RE.findall(old)) != sorted(
-            _PLACEHOLDER_RE.findall(new)
-        ):
+        if sorted(_PLACEHOLDER_RE.findall(old)) != sorted(_PLACEHOLDER_RE.findall(new)):
             return None
         start = source.index(old)
         located.append((start, start + len(old), new))
@@ -738,18 +723,11 @@ class DocumentTranslationPolicy:
 
         if segment.region_kind == "title":
             badge = _PUBLICATION_BADGE_PREFIX_RE.match(text)
-            badge_text_end = (
-                len(badge.group(0).rstrip()) if badge is not None else -1
-            )
+            badge_text_end = len(badge.group(0).rstrip()) if badge is not None else -1
             badge_has_source_break = badge_text_end in segment.break_offsets or (
-                0 <= badge_text_end < len(text)
-                and text[badge_text_end] in "\r\n"
+                0 <= badge_text_end < len(text) and text[badge_text_end] in "\r\n"
             )
-            if (
-                badge is not None
-                and badge.end() < len(text)
-                and badge_has_source_break
-            ):
+            if badge is not None and badge.end() < len(text) and badge_has_source_break:
                 return SegmentPlan(
                     segment,
                     (
@@ -799,7 +777,9 @@ class DocumentTranslationPolicy:
         )
         if region is not None:
             self.pending_reference_heading = 0
-            numbers = [marker.number for marker in region.markers if marker.number is not None]
+            numbers = [
+                marker.number for marker in region.markers if marker.number is not None
+            ]
             if numbers:
                 maximum = max(numbers)
                 prefix = region.markers[0].prefix
@@ -830,7 +810,7 @@ class DocumentTranslationPolicy:
                     if index + 1 < len(region.markers)
                     else region.end
                 )
-                entry = text[marker.start:next_start]
+                entry = text[marker.start : next_start]
                 parts.append(
                     SegmentPart(
                         ROLE_REFERENCE,

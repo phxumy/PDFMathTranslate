@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
-
 CANVAS_SIZE = 1024
 ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
@@ -35,7 +34,9 @@ def _gradient_line(
             round(start[0] + (end[0] - start[0]) * right),
             round(start[1] + (end[1] - start[1]) * right),
         )
-        draw.line((p1, p2), fill=(*_mix(start_color, end_color, left), 255), width=width)
+        draw.line(
+            (p1, p2), fill=(*_mix(start_color, end_color, left), 255), width=width
+        )
 
 
 def build_icon() -> Image.Image:
@@ -106,7 +107,9 @@ def build_icon() -> Image.Image:
         (bottom, 40, (70, 166, 230)),
     ):
         x, y = point
-        lattice.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*color, 255))
+        lattice.ellipse(
+            (x - radius, y - radius, x + radius, y + radius), fill=(*color, 255)
+        )
         lattice.ellipse(
             (x - radius // 3, y - radius // 3, x + radius // 3, y + radius // 3),
             fill=(226, 255, 250, 210),

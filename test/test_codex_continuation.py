@@ -7,7 +7,6 @@ from tempfile import TemporaryDirectory
 
 from pdf2zh.translator import CodexTranslator
 
-
 ITALIC_0_BEGIN = "[[PDF2ZH_ITALIC_0_BEGIN]]"
 ITALIC_0_END = "[[PDF2ZH_ITALIC_0_END]]"
 ITALIC_1_BEGIN = "[[PDF2ZH_ITALIC_1_BEGIN]]"
@@ -41,10 +40,7 @@ def translator_stub() -> CodexTranslator:
 
 def rich_sources() -> list[str]:
     return [
-        (
-            f"The rate {{v0}} is tuned {ITALIC_0_BEGIN}in situ"
-            f"{ITALIC_0_END}{FLOW_0}"
-        ),
+        (f"The rate {{v0}} is tuned {ITALIC_0_BEGIN}in situ" f"{ITALIC_0_END}{FLOW_0}"),
         f"{FLOW_1} and the coupling {{v1}} remains fixed.",
     ]
 
@@ -111,9 +107,7 @@ class CodexContinuationTests(unittest.TestCase):
         self.assertEqual(len(translator.cache.set_calls), 1)
         self.assertEqual(len(translator.cache.values), 1)
         cache_key, cache_value = translator.cache.set_calls[0]
-        self.assertTrue(
-            cache_key.startswith(CodexTranslator.CONTINUATION_CACHE_PREFIX)
-        )
+        self.assertTrue(cache_key.startswith(CodexTranslator.CONTINUATION_CACHE_PREFIX))
         self.assertEqual(
             json.loads(cache_value),
             {"translations": rich_targets()},
@@ -158,10 +152,8 @@ class CodexContinuationTests(unittest.TestCase):
                 ensure_ascii=False,
             ),
         )
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: self.fail(
-                "a repairable continuation cache entry should be reused"
-            )
+        translator._run_continuation_request = lambda *args, **kwargs: self.fail(
+            "a repairable continuation cache entry should be reused"
         )
 
         result = translator.translate_continuation_fragments(
@@ -178,15 +170,11 @@ class CodexContinuationTests(unittest.TestCase):
     def test_cache_key_is_context_sensitive_and_mode_isolated(self) -> None:
         sources = ["The rate {v0} controls", "the gate response."]
         first_context = [
-            CodexTranslator._normalize_formula_context(
-                sources[0], {"{v0}": "ω_{c}"}
-            ),
+            CodexTranslator._normalize_formula_context(sources[0], {"{v0}": "ω_{c}"}),
             [],
         ]
         changed_context = [
-            CodexTranslator._normalize_formula_context(
-                sources[0], {"{v0}": "κ"}
-            ),
+            CodexTranslator._normalize_formula_context(sources[0], {"{v0}": "κ"}),
             [],
         ]
 
@@ -216,9 +204,7 @@ class CodexContinuationTests(unittest.TestCase):
         )
         self.assertNotEqual(
             key,
-            CodexTranslator._formula_context_cache_key(
-                sources[0], first_context[0]
-            ),
+            CodexTranslator._formula_context_cache_key(sources[0], first_context[0]),
         )
 
     def test_prompt_explains_formula_aware_target_boundary_placement(self) -> None:
@@ -278,16 +264,16 @@ class CodexContinuationTests(unittest.TestCase):
             "and the following clause continues on the next page.",
         ]
         targets = ["第一分句在物理边界处结束", "，其中下一分句在后页继续。"]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(targets)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(targets)
 
         result = translator.translate_continuation_fragments(
             sources,
             join_kind="cross-page",
         )
 
-        self.assertEqual(result, ["第一分句在物理边界处结束，", "其中下一分句在后页继续。"])
+        self.assertEqual(
+            result, ["第一分句在物理边界处结束，", "其中下一分句在后页继续。"]
+        )
         cached = json.loads(translator.cache.set_calls[0][1])
         self.assertEqual(cached["translations"], result)
 
@@ -298,16 +284,16 @@ class CodexContinuationTests(unittest.TestCase):
             "and then the explanation continues on the next page.",
         ]
         targets = ["括注的第一分句到此结束", "）”，然后说明在后页继续。"]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(targets)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(targets)
 
         result = translator.translate_continuation_fragments(
             sources,
             join_kind="cross-page",
         )
 
-        self.assertEqual(result, ["括注的第一分句到此结束）”，", "然后说明在后页继续。"])
+        self.assertEqual(
+            result, ["括注的第一分句到此结束）”，", "然后说明在后页继续。"]
+        )
 
     def test_boundary_rebalance_keeps_all_protected_tokens_in_their_fragments(
         self,
@@ -315,21 +301,13 @@ class CodexContinuationTests(unittest.TestCase):
         translator = translator_stub()
         sources = [
             f"The rate {{v0}} ends here{FLOW_0}",
-            (
-                f"{ITALIC_1_BEGIN}Next{ITALIC_1_END}{FLOW_1} continues "
-                "with {v1}."
-            ),
+            (f"{ITALIC_1_BEGIN}Next{ITALIC_1_END}{FLOW_1} continues " "with {v1}."),
         ]
         targets = [
             f"速率{{v0}}到此结束{FLOW_0}",
-            (
-                f"，{ITALIC_1_BEGIN}下一项{ITALIC_1_END}{FLOW_1}"
-                "继续包含{v1}。"
-            ),
+            (f"，{ITALIC_1_BEGIN}下一项{ITALIC_1_END}{FLOW_1}" "继续包含{v1}。"),
         ]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(targets)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(targets)
 
         result = translator.translate_continuation_fragments(
             sources,
@@ -341,10 +319,7 @@ class CodexContinuationTests(unittest.TestCase):
             result,
             [
                 f"速率{{v0}}到此结束{FLOW_0}，",
-                (
-                    f"{ITALIC_1_BEGIN}下一项{ITALIC_1_END}{FLOW_1}"
-                    "继续包含{v1}。"
-                ),
+                (f"{ITALIC_1_BEGIN}下一项{ITALIC_1_END}{FLOW_1}" "继续包含{v1}。"),
             ],
         )
         self.assertEqual(
@@ -360,9 +335,7 @@ class CodexContinuationTests(unittest.TestCase):
         translator = translator_stub()
         translator.lang_out = "en"
         sources = ["The first clause", ", and the second clause."]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(sources)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(sources)
 
         result = translator.translate_continuation_fragments(
             sources,
@@ -375,9 +348,10 @@ class CodexContinuationTests(unittest.TestCase):
         translator = translator_stub()
         translator.lang_out = "en"
         sources = ["first", "term"]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: ["first ", "term"]
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: [
+            "first ",
+            "term",
+        ]
 
         result = translator.translate_continuation_fragments(
             sources,
@@ -408,9 +382,10 @@ class CodexContinuationTests(unittest.TestCase):
     def test_chinese_continuation_keeps_compact_boundary_behavior(self) -> None:
         translator = translator_stub()
         sources = ["The first clause", "continues in the next fragment."]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: ["第一分句  ", "  在下一片段继续。"]
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: [
+            "第一分句  ",
+            "  在下一片段继续。",
+        ]
 
         result = translator.translate_continuation_fragments(
             sources,
@@ -424,9 +399,7 @@ class CodexContinuationTests(unittest.TestCase):
         translator.lang_out = "en"
         sources = [f"first{FLOW_0}", f"{FLOW_1}term"]
         targets = [f"first{FLOW_0}\t", f" {FLOW_1}term"]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(targets)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(targets)
 
         result = translator.translate_continuation_fragments(
             sources,
@@ -471,17 +444,11 @@ class CodexContinuationTests(unittest.TestCase):
 
     def test_unchanged_short_styled_span_rejects_the_whole_group(self) -> None:
         sources = [
-            (
-                f"Systems use {ITALIC_0_BEGIN}enrollment audio samples"
-                f"{ITALIC_0_END}"
-            ),
+            (f"Systems use {ITALIC_0_BEGIN}enrollment audio samples" f"{ITALIC_0_END}"),
             "to identify a target sound.",
         ]
         invalid_targets = [
-            (
-                f"系统使用{ITALIC_0_BEGIN}enrollment audio samples"
-                f"{ITALIC_0_END}"
-            ),
+            (f"系统使用{ITALIC_0_BEGIN}enrollment audio samples" f"{ITALIC_0_END}"),
             "来识别目标声音。",
         ]
 
@@ -528,9 +495,7 @@ class CodexContinuationTests(unittest.TestCase):
         sources = ["See Fig. 5 for", "the device layout."]
         targets = ["器件布局见图。5，", "如下所示。"]
         expected = ["器件布局见图5，", "如下所示。"]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(targets)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(targets)
 
         result = translator.translate_continuation_fragments(
             sources,
@@ -552,9 +517,7 @@ class CodexContinuationTests(unittest.TestCase):
             "约瑟夫森能量E{v36}可由",
             "根据测得的结室温电阻修正的Ambegaokar–Baratoff公式{v0}计算。",
         ]
-        translator._run_continuation_request = (
-            lambda *args, **kwargs: list(targets)
-        )
+        translator._run_continuation_request = lambda *args, **kwargs: list(targets)
 
         result = translator.translate_continuation_fragments(
             sources,

@@ -321,9 +321,7 @@ class ReferencePlanningTests(unittest.TestCase):
         )
 
         self.assertIsNone(split_numbered_reference_region(source))
-        self.assertIsNotNone(
-            split_numbered_reference_region(source, heading_hint=True)
-        )
+        self.assertIsNotNone(split_numbered_reference_region(source, heading_hint=True))
 
     def test_single_closing_entry_can_continue_expected_numbering(self) -> None:
         source = (
@@ -354,15 +352,15 @@ class ReferencePlanningTests(unittest.TestCase):
         self.assertEqual([part.role for part in plan.parts], [ROLE_PRESERVE])
         self.assertEqual(plan.parts[0].text, source)
 
-    def test_single_superscript_reference_block_is_detected_conservatively(self) -> None:
+    def test_single_superscript_reference_block_is_detected_conservatively(
+        self,
+    ) -> None:
         source = (
             "{v0} Altman, E. et al. Quantum simulators: architectures and "
             "opportunities. PRX Quantum 2, 017003 (2021)."
         )
 
-        region = split_numbered_reference_region(
-            source, formula_texts=("1",)
-        )
+        region = split_numbered_reference_region(source, formula_texts=("1",))
 
         self.assertIsNotNone(region)
         assert region is not None
@@ -371,9 +369,7 @@ class ReferencePlanningTests(unittest.TestCase):
     def test_single_numbered_equation_is_not_a_reference(self) -> None:
         source = "{v0} The effective coupling is obtained by diagonalization."
 
-        self.assertIsNone(
-            split_numbered_reference_region(source, formula_texts=("1",))
-        )
+        self.assertIsNone(split_numbered_reference_region(source, formula_texts=("1",)))
 
     def test_nature_references_resume_after_methods(self) -> None:
         policy = DocumentTranslationPolicy()
@@ -434,9 +430,7 @@ class ReferencePlanningTests(unittest.TestCase):
         plan = policy.plan_segment(segment(source))
 
         self.assertEqual(policy.last_reference_number, 58)
-        self.assertEqual(
-            sum(part.role == ROLE_REFERENCE for part in plan.parts), 2
-        )
+        self.assertEqual(sum(part.role == ROLE_REFERENCE for part in plan.parts), 2)
 
     def test_heading_and_single_entry_can_share_one_segment(self) -> None:
         source = (
@@ -464,9 +458,7 @@ class ReferencePlanningTests(unittest.TestCase):
         plan = policy.plan_segment(segment(source, 1))
 
         self.assertEqual(policy.last_reference_number, 2)
-        self.assertEqual(
-            sum(part.role == ROLE_REFERENCE for part in plan.parts), 2
-        )
+        self.assertEqual(sum(part.role == ROLE_REFERENCE for part in plan.parts), 2)
 
     def test_supplement_prefix_continues_independently(self) -> None:
         policy = DocumentTranslationPolicy()
@@ -491,9 +483,7 @@ class ExactReplacementTests(unittest.TestCase):
             "[1] A. Smith, Interesting quantum title. "
             "Phys. Rev. A 12, 34–56 (2020). doi:10.1000/example"
         )
-        replacement = ExactReplacement(
-            "Interesting quantum title", "有趣的量子题名"
-        )
+        replacement = ExactReplacement("Interesting quantum title", "有趣的量子题名")
 
         result = apply_exact_replacements(source, (replacement,))
 
@@ -621,8 +611,7 @@ class AuthorAffiliationTests(unittest.TestCase):
             "16These authors contributed equally: A. Alpha, B. Beta."
         )
         translated = (
-            "15美国普林斯顿大学物理系。 "
-            "16以下作者贡献相同：A. Alpha, B. Beta。"
+            "15美国普林斯顿大学物理系。 " "16以下作者贡献相同：A. Alpha, B. Beta。"
         )
 
         result = restore_affiliation_breaks(source, translated)

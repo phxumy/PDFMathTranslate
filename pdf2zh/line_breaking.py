@@ -673,9 +673,9 @@ def _join_formula_line_break_units(
             following = units[index]
             if not _unit_is_formula_syntax(following):
                 break
-            if _unit_ends_formula_terminator(LineBreakUnit(tuple(atoms))) and _unit_is_space(
-                following
-            ):
+            if _unit_ends_formula_terminator(
+                LineBreakUnit(tuple(atoms))
+            ) and _unit_is_space(following):
                 break
             if following.start != atoms[-1].end:
                 break

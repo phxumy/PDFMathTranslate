@@ -21,7 +21,7 @@ def segment(
     y1: float,
     kind: str = "plain text",
 ) -> FlowSegment:
-    x0, x1 = ((52.0, 297.0) if column == 0 else (315.0, 560.0))
+    x0, x1 = (52.0, 297.0) if column == 0 else (315.0, 560.0)
     return FlowSegment(
         SegmentRef(page, index),
         text,
@@ -149,9 +149,7 @@ class ReadingFlowDetectionTests(unittest.TestCase):
         )
         self.assertEqual(len(groups), 1)
         left_span, right_span = groups[0].fragments
-        self.assertTrue(
-            left.text[left_span.start : left_span.end].endswith("to the")
-        )
+        self.assertTrue(left.text[left_span.start : left_span.end].endswith("to the"))
         self.assertEqual(
             right.text[right_span.start : right_span.end],
             right.text,

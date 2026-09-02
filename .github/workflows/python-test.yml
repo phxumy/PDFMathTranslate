@@ -39,10 +39,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
       - name: Install dependencies
         run: |
-          uv sync
+          uv sync --locked
 
       - name: Test - Unit Test
         run: |

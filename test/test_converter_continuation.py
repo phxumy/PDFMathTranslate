@@ -33,10 +33,7 @@ class FakeContinuationTranslator:
         if self.fail:
             return None
         call_number = len(self.calls)
-        return [
-            f"联合{call_number}.{index}"
-            for index in range(1, len(texts) + 1)
-        ]
+        return [f"联合{call_number}.{index}" for index in range(1, len(texts) + 1)]
 
 
 def paragraph(
@@ -47,7 +44,7 @@ def paragraph(
     y1: float,
     kind: str = "plain text",
 ) -> Paragraph:
-    x0, x1 = ((48.0, 286.0) if column == 0 else (326.0, 564.0))
+    x0, x1 = (48.0, 286.0) if column == 0 else (326.0, 564.0)
     return Paragraph(
         y1,
         x0,
@@ -212,9 +209,7 @@ class ConverterContinuationTests(unittest.TestCase):
                     continue
                 self.assertTrue(left.end <= right.start or right.end <= left.start)
         translated_sources = " ".join(
-            fragment
-            for call in translator.calls
-            for fragment in call[0]
+            fragment for call in translator.calls for fragment in call[0]
         )
         self.assertNotIn("FIG. 3", translated_sources)
 

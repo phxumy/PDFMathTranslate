@@ -17,7 +17,6 @@ import sys
 from threading import Event, Lock
 from typing import Any, Callable
 
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_DESKTOP_PORT = 7860
@@ -174,7 +173,9 @@ def choose_desktop_port(requested: int | None = None) -> int:
             raise RuntimeError(f"Desktop server port {requested} is already in use.")
         return requested
 
-    for port in range(DEFAULT_DESKTOP_PORT, DEFAULT_DESKTOP_PORT + DESKTOP_PORT_SEARCH_LIMIT):
+    for port in range(
+        DEFAULT_DESKTOP_PORT, DEFAULT_DESKTOP_PORT + DESKTOP_PORT_SEARCH_LIMIT
+    ):
         if _port_is_available(port):
             return port
 
@@ -186,7 +187,9 @@ def choose_desktop_port(requested: int | None = None) -> int:
 def _default_demo_loader(onnx_path: str | None) -> Any:
     from pdf2zh.doclayout import ModelInstance, OnnxModel
 
-    ModelInstance.value = OnnxModel(onnx_path) if onnx_path else OnnxModel.load_available()
+    ModelInstance.value = (
+        OnnxModel(onnx_path) if onnx_path else OnnxModel.load_available()
+    )
     os.environ["PDF2ZH_DESKTOP"] = "1"
     from pdf2zh.gui import demo
 
@@ -201,7 +204,10 @@ def _set_status(window: Any, title: str, detail: str) -> None:
           if (status) status.textContent = %s;
           if (detail) detail.textContent = %s;
         })();
-    """ % (json.dumps(title, ensure_ascii=False), json.dumps(detail, ensure_ascii=False))
+    """ % (
+        json.dumps(title, ensure_ascii=False),
+        json.dumps(detail, ensure_ascii=False),
+    )
     try:
         window.evaluate_js(script)
     except Exception:
@@ -237,7 +243,9 @@ class DesktopRuntime:
 
     def start(self, window: Any) -> None:
         try:
-            _set_status(window, "正在加载版面模型", "首次启动或离线资源恢复可能需要稍等片刻…")
+            _set_status(
+                window, "正在加载版面模型", "首次启动或离线资源恢复可能需要稍等片刻…"
+            )
             demo = self._demo_loader(self.options.onnx_path)
             with self._close_lock:
                 self._demo = demo

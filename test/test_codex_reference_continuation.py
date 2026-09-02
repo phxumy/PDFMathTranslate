@@ -43,10 +43,7 @@ class CodexReferenceContinuationTests(unittest.TestCase):
             f"Qiskit metal{boundary}: an open-source framework for quantum "
             "device design & analysis (Q-EDA)"
         )
-        target = (
-            f"Qiskit metal{boundary}：用于量子器件设计与分析"
-            "（Q-EDA）的开源框架"
-        )
+        target = f"Qiskit metal{boundary}：用于量子器件设计与分析" "（Q-EDA）的开源框架"
         translator._run_reference_title_batch = lambda entries: [
             [ExactReplacement(source, target)]
         ]
@@ -71,9 +68,7 @@ class CodexReferenceContinuationTests(unittest.TestCase):
         boundary = translator.REFERENCE_BOUNDARY_TOKEN
         left = "17. A. Author. Quantum circuit method"
         right = ": an open-source analysis framework. Nature 1, 2 (2020)."
-        source = (
-            f"Quantum circuit method{boundary}: an open-source analysis framework"
-        )
+        source = f"Quantum circuit method{boundary}: an open-source analysis framework"
         target = f"Quantum circuit method{boundary}：一种开源分析框架"
         calls = 0
 

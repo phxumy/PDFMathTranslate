@@ -862,9 +862,7 @@ with gr.Blocks(
                     label="number of threads",
                     interactive=True,
                     value=(
-                        "1"
-                        if service_map[enabled_services[0]].name == "codex"
-                        else "4"
+                        "1" if service_map[enabled_services[0]].name == "codex" else "4"
                     ),
                 )
                 skip_subset_fonts = gr.Checkbox(

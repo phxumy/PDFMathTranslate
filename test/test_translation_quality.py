@@ -55,8 +55,7 @@ class CjkStructuralRepetitionNormalizationTests(unittest.TestCase):
 
         self.assertEqual(
             normalize_cjk_structural_repetitions(source),
-            "在式（17）中可以看出，由式（26）可见该结论；"
-            "根据式（30）同样成立。",
+            "在式（17）中可以看出，由式（26）可见该结论；" "根据式（30）同样成立。",
         )
 
     def test_legitimate_word_boundaries_and_reduplication_are_preserved(self) -> None:
@@ -191,7 +190,11 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
         cases = (
             ("Fig. 4 shows the result.", "图图 4 展示了结果。", "图 4 展示了结果。"),
             ("Fig. 4 shows the result.", "Fig. 图 4 展示了结果。", "图 4 展示了结果。"),
-            ("Table VI lists the result.", "Table 表 VI 列出了结果。", "表 VI 列出了结果。"),
+            (
+                "Table VI lists the result.",
+                "Table 表 VI 列出了结果。",
+                "表 VI 列出了结果。",
+            ),
         )
         for source, target, expected in cases:
             with self.subTest(target=target):
@@ -237,7 +240,9 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
             "这些系数可由制造参数确定，见图3c。例如，结具有余弦势。",
         )
 
-    def test_figure_example_cleanup_requires_exact_source_and_target_evidence(self) -> None:
+    def test_figure_example_cleanup_requires_exact_source_and_target_evidence(
+        self,
+    ) -> None:
         cases = (
             (
                 "See Fig. 3c. The example is discussed next.",
@@ -275,7 +280,9 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
             "化简式（6），可得到哈密顿量。",
         )
 
-    def test_delayed_equation_repair_fails_closed_for_long_or_ambiguous_prose(self) -> None:
+    def test_delayed_equation_repair_fails_closed_for_long_or_ambiguous_prose(
+        self,
+    ) -> None:
         source = "The value is constrained in Eq. (6)."
         target = "在式中" + ("这是一段不能安全移动编号的长文本" * 12) + "。（6）"
 
@@ -330,9 +337,7 @@ class SuspiciousEnglishResidueTests(unittest.TestCase):
 
     def test_long_english_paraphrase_is_rejected(self) -> None:
         source = "The measured response is controlled by the coupling strength."
-        target = (
-            "External coupling governs how the device responds during measurement."
-        )
+        target = "External coupling governs how the device responds during measurement."
 
         self.assertTrue(has_suspicious_english_residue(source, target))
 
@@ -391,9 +396,7 @@ class SuspiciousEnglishResidueTests(unittest.TestCase):
                 self.assertTrue(has_suspicious_english_residue(source, target))
 
     def test_copula_before_preserved_term_inside_chinese_is_rejected(self) -> None:
-        source = (
-            "The cavity field {v0} is evaluated at the transmon junction."
-        )
+        source = "The cavity field {v0} is evaluated at the transmon junction."
         target = "腔体电场{v0} is transmon 结处的电场。"
 
         self.assertTrue(has_suspicious_english_residue(source, target))
@@ -503,9 +506,7 @@ class UnchangedRoleTranslationTests(unittest.TestCase):
             "Quantum circuits",
         ):
             with self.subTest(source=source):
-                self.assertTrue(
-                    has_unchanged_translatable_english(source, source)
-                )
+                self.assertTrue(has_unchanged_translatable_english(source, source))
 
 
 class ReferenceTitleResidueTests(unittest.TestCase):
@@ -545,17 +546,13 @@ class ReferenceTitleResidueTests(unittest.TestCase):
         source = "A scalable robust quantum circuit method"
         target = "可扩展且稳健的 quantum circuit method"
 
-        self.assertTrue(
-            has_suspicious_reference_title_residue(source, target)
-        )
+        self.assertTrue(has_suspicious_reference_title_residue(source, target))
 
     def test_two_word_partial_source_clause_is_rejected(self) -> None:
         source = "A scalable method for quantum circuits"
         target = "可扩展方法用于 quantum circuits"
 
-        self.assertTrue(
-            has_suspicious_reference_title_residue(source, target)
-        )
+        self.assertTrue(has_suspicious_reference_title_residue(source, target))
 
     def test_fully_translated_title_is_accepted(self) -> None:
         self.assertFalse(
@@ -603,9 +600,7 @@ class ReferenceTitleResidueTests(unittest.TestCase):
         self.assertTrue(has_unchanged_reference_title_fragment("method", "method"))
         for value in ("Josephson", "QED", "R9C1"):
             with self.subTest(value=value):
-                self.assertFalse(
-                    has_unchanged_reference_title_fragment(value, value)
-                )
+                self.assertFalse(has_unchanged_reference_title_fragment(value, value))
 
     def test_a_real_translation_is_not_rejected(self) -> None:
         self.assertFalse(
@@ -635,9 +630,7 @@ class ReferenceTitleResidueTests(unittest.TestCase):
             "gpt-5.6-sol",
         ):
             with self.subTest(source=source):
-                self.assertFalse(
-                    has_unchanged_translatable_english(source, source)
-                )
+                self.assertFalse(has_unchanged_translatable_english(source, source))
 
     def test_all_caps_headings_are_not_mistaken_for_abbreviations(self) -> None:
         for source in (
@@ -646,9 +639,7 @@ class ReferenceTitleResidueTests(unittest.TestCase):
             "TABLE 3",
         ):
             with self.subTest(source=source):
-                self.assertTrue(
-                    has_unchanged_translatable_english(source, source)
-                )
+                self.assertTrue(has_unchanged_translatable_english(source, source))
 
 
 if __name__ == "__main__":

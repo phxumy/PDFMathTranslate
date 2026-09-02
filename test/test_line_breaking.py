@@ -43,9 +43,7 @@ class RenderAtomTests(unittest.TestCase):
 
     def test_doi_and_email_are_non_splittable_literal_atoms(self) -> None:
         atoms = list(
-            iter_render_atoms(
-                "doi:10.1038/s41534-021-00461-8 author.name@example.edu"
-            )
+            iter_render_atoms("doi:10.1038/s41534-021-00461-8 author.name@example.edu")
         )
 
         literals = [atom for atom in atoms if atom.kind == "literal"]
@@ -88,9 +86,7 @@ class RenderAtomTests(unittest.TestCase):
         self.assertEqual(source, normalize_protected_literals(source))
 
     def test_number_after_completed_url_is_not_joined_to_its_path(self) -> None:
-        source = (
-            "Preprint at http://arxiv.org/abs/2006.04130. 2006.04130."
-        )
+        source = "Preprint at http://arxiv.org/abs/2006.04130. 2006.04130."
 
         self.assertEqual(source, normalize_protected_literals(source))
 
@@ -210,7 +206,9 @@ class LineBreakUnitTests(unittest.TestCase):
         self.assertEqual(units[2].text, "and")
         self.assertEqual(units[4].text, "H{v2}")
 
-    def test_formula_cluster_keeps_misdecoded_parentheses_and_chinese_comma(self) -> None:
+    def test_formula_cluster_keeps_misdecoded_parentheses_and_chinese_comma(
+        self,
+    ) -> None:
         units = list(iter_line_break_units("Z{v12} ð Þ，其中"))
 
         self.assertEqual(units[0].text, "Z{v12} ð Þ，")

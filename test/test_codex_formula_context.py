@@ -113,9 +113,7 @@ class SafeFormulaSerializationTests(unittest.TestCase):
                 ["The transition {v0} controls the gate response."],
             )
         )
-        self.assertIsNone(
-            _serialize_safe_inline_formula(*args, ["{v0}"])
-        )
+        self.assertIsNone(_serialize_safe_inline_formula(*args, ["{v0}"]))
         self.assertIsNone(
             _serialize_safe_inline_formula(
                 0,
@@ -421,9 +419,7 @@ class CodexFormulaContextTests(unittest.TestCase):
         translator = translator_stub()
         source = "The {v0} response is controlled by {v1} in the circuit."
         translator._run_formula_context_batch_request = (
-            lambda texts, contexts, **kwargs: [
-                "电路中的{v1}控制{v0}响应。"
-            ]
+            lambda texts, contexts, **kwargs: ["电路中的{v1}控制{v0}响应。"]
         )
 
         def translate_ordinary(texts, *, require_complete_translation=False):
@@ -496,10 +492,7 @@ class CodexFormulaContextTests(unittest.TestCase):
                     "[[PDF2ZH_FLOW_900000002]]保持不变。"
                 ]
             if texts == [source]:
-                return [
-                    "速率{v1}设置线宽，频率{v0}控制谐振器，"
-                    "耦合{v2}保持不变。"
-                ]
+                return ["速率{v1}设置线宽，频率{v0}控制谐振器，" "耦合{v2}保持不变。"]
             translations = {
                 "The frequency ": "频率",
                 " controls the resonator, while the rate ": "控制谐振器，而速率",
@@ -545,9 +538,7 @@ class CodexFormulaContextTests(unittest.TestCase):
         contextual_calls: list[bool] = []
 
         def contextual(texts, contexts, **kwargs):
-            contextual_calls.append(
-                kwargs.get("require_complete_translation", False)
-            )
+            contextual_calls.append(kwargs.get("require_complete_translation", False))
             return list(texts)
 
         translator._run_formula_context_batch_request = contextual
@@ -570,9 +561,9 @@ class CodexFormulaContextTests(unittest.TestCase):
         target = f"{begin}量子{end}电路"
         key = translator._styled_cache_key(source, {})
         translator.cache.set(key, source)
-        translator._run_styled_batch_request = (
-            lambda texts, contexts, **kwargs: [target]
-        )
+        translator._run_styled_batch_request = lambda texts, contexts, **kwargs: [
+            target
+        ]
 
         result = translator.translate_styled_batch([source], [{}])
 
@@ -584,8 +575,8 @@ class CodexFormulaContextTests(unittest.TestCase):
         begin = "[[PDF2ZH_ITALIC_0_BEGIN]]"
         end = "[[PDF2ZH_ITALIC_0_END]]"
         source = f"{begin}Quantum{end} circuits"
-        translator._run_styled_batch_request = (
-            lambda texts, contexts, **kwargs: list(texts)
+        translator._run_styled_batch_request = lambda texts, contexts, **kwargs: list(
+            texts
         )
 
         result = translator.translate_styled_batch([source], [{}])
@@ -765,9 +756,11 @@ class CodexFormulaContextTests(unittest.TestCase):
         translator._run_batch_translation = lambda texts: [
             text.replace("Circuit diagram", "电路图") for text in texts
         ]
-        translator._run_formula_context_batch_request = lambda texts, contexts, **kwargs: [
-            text.replace("The rate", "速率") for text in texts
-        ]
+        translator._run_formula_context_batch_request = (
+            lambda texts, contexts, **kwargs: [
+                text.replace("The rate", "速率") for text in texts
+            ]
+        )
         source = "Circuit diagram of the device. The rate {v0} changes smoothly."
 
         result = translator.translate_batch_with_formula_contexts(
@@ -785,12 +778,8 @@ class RecordingContextTranslator:
 
     def __init__(self, *, fail_styled: bool = False) -> None:
         self.fail_styled = fail_styled
-        self.ordinary_calls: list[
-            tuple[list[str], list[dict[str, str]]]
-        ] = []
-        self.styled_calls: list[
-            tuple[list[str], list[dict[str, str]]]
-        ] = []
+        self.ordinary_calls: list[tuple[list[str], list[dict[str, str]]]] = []
+        self.styled_calls: list[tuple[list[str], list[dict[str, str]]]] = []
 
     def translate_batch(self, texts: list[str]) -> list[str]:
         return list(texts)

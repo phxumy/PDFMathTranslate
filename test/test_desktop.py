@@ -1,4 +1,5 @@
 import socket
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -153,7 +154,8 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertTrue(webview.settings["ALLOW_DOWNLOADS"])
         self.assertTrue(webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"])
-        self.assertEqual(webview.start_kwargs["gui"], "edgechromium")
+        expected_gui = "edgechromium" if sys.platform == "win32" else None
+        self.assertEqual(webview.start_kwargs["gui"], expected_gui)
         self.assertFalse(webview.start_kwargs["private_mode"])
         self.assertIn("icon", webview.start_kwargs)
         self.assertEqual(webview.create_kwargs["min_size"], (1040, 700))

@@ -21,7 +21,6 @@ from huggingface_hub import hf_hub_download
 
 from pdf2zh.config import ConfigManager
 
-
 _LAYOUT_CONFIDENCE_THRESHOLD = 0.25
 _SUPPLEMENTAL_TABLE_FOOTNOTE_THRESHOLD = 0.025
 

@@ -46,7 +46,6 @@ from tenacity import retry, retry_if_exception_type
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -1111,19 +1110,13 @@ class CodexTranslator(BaseTranslator):
     FORMULA_CONTEXT_CACHE_PREFIX = "pdf2zh:readonly-inline-formula:v2\n"
     STYLED_CACHE_PREFIX = "pdf2zh:styled-italic:v4\n"
     CONTINUATION_CACHE_PREFIX = "pdf2zh:continuation-fragments:v4\n"
-    REFERENCE_CONTINUATION_CACHE_PREFIX = (
-        "pdf2zh:reference-continuation-title:v2\n"
-    )
+    REFERENCE_CONTINUATION_CACHE_PREFIX = "pdf2zh:reference-continuation-title:v2\n"
     REFERENCE_BOUNDARY_TOKEN = "[[PDF2ZH_REF_BOUNDARY_0]]"
     MAX_FORMULA_CONTEXT_CODEPOINTS = 48
     ITALIC_TAG_PREFIX = "[[PDF2ZH_ITALIC_"
-    ITALIC_TAG_RE = re.compile(
-        r"\[\[PDF2ZH_ITALIC_(\d+)_(BEGIN|END)\]\]"
-    )
+    ITALIC_TAG_RE = re.compile(r"\[\[PDF2ZH_ITALIC_(\d+)_(BEGIN|END)\]\]")
     ITALIC_PAIR_RE = re.compile(
-        r"\[\[PDF2ZH_ITALIC_(\d+)_BEGIN\]\]"
-        r"(.*?)"
-        r"\[\[PDF2ZH_ITALIC_\1_END\]\]",
+        r"\[\[PDF2ZH_ITALIC_(\d+)_BEGIN\]\]" r"(.*?)" r"\[\[PDF2ZH_ITALIC_\1_END\]\]",
         re.DOTALL,
     )
     FORMULA_TOKEN_RE = re.compile(
@@ -1134,7 +1127,9 @@ class CodexTranslator(BaseTranslator):
     FLOW_TOKEN_RE = re.compile(r"\[\[PDF2ZH_FLOW_\d+\]\]")
     HSPACE_RE = r"[ \t\u00A0]+"
     CJK_CHAR_RE = r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
-    CJK_PUNCT_RE = r"[\u3001-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]"
+    CJK_PUNCT_RE = (
+        r"[\u3001-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]"
+    )
     REFERENCE_INCOMPLETE_CJK_MODIFIER_SUFFIXES = (
         "中低",
         "中高",
@@ -1165,9 +1160,7 @@ class CodexTranslator(BaseTranslator):
     # modify ``qubit``/``qubits`` and have a characteristic coined-family suffix.
     # This keeps ordinary untranslated words such as ``quantum`` and ``method``
     # subject to the complete-or-preserve reference-title gate.
-    REFERENCE_LOWERCASE_QUBIT_FAMILY_RE = re.compile(
-        r"^[a-z][a-z'-]{3,}(?:mon|onium)$"
-    )
+    REFERENCE_LOWERCASE_QUBIT_FAMILY_RE = re.compile(r"^[a-z][a-z'-]{3,}(?:mon|onium)$")
     PLACEHOLDER_RE = (
         r"(?:\[\[PDF2ZH_ITALIC_\d+_(?:BEGIN|END)\]\]|"
         r"\[\[PDF2ZH_FLOW_\d+\]\]|"
@@ -1180,9 +1173,9 @@ class CodexTranslator(BaseTranslator):
         self.set_envs(envs)
         if not model:
             model = self.envs["CODEX_MODEL"]
-        self.reasoning_effort = str(
-            self.envs.get("CODEX_REASONING_EFFORT") or "none"
-        ).strip().lower()
+        self.reasoning_effort = (
+            str(self.envs.get("CODEX_REASONING_EFFORT") or "none").strip().lower()
+        )
         if self.reasoning_effort not in self.SUPPORTED_REASONING_EFFORTS:
             supported = ", ".join(sorted(self.SUPPORTED_REASONING_EFFORTS))
             raise ValueError(
@@ -1859,8 +1852,7 @@ class CodexTranslator(BaseTranslator):
 
     def _build_exact_reference_title_prompt(self, titles: list[str]) -> str:
         indexed_titles = [
-            {"index": idx, "title": title}
-            for idx, title in enumerate(titles, start=1)
+            {"index": idx, "title": title} for idx, title in enumerate(titles, start=1)
         ]
         serialized_titles = json.dumps(indexed_titles, ensure_ascii=False)
         return (
@@ -1893,16 +1885,16 @@ class CodexTranslator(BaseTranslator):
                 **codex_subprocess_window_kwargs(),
             )
         except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"codex executable not found: {self.codex_bin}"
-            ) from exc
+            raise RuntimeError(f"codex executable not found: {self.codex_bin}") from exc
 
     def _probe_cli(self):
         version_result = self._run_probe_command(["--version"])
         if version_result.returncode != 0:
             detail = version_result.stderr.strip() or version_result.stdout.strip()
             raise RuntimeError(f"Codex CLI version probe failed: {detail}")
-        self.codex_version = version_result.stdout.strip() or version_result.stderr.strip()
+        self.codex_version = (
+            version_result.stdout.strip() or version_result.stderr.strip()
+        )
 
         help_result = self._run_probe_command(["exec", "--help"])
         if help_result.returncode != 0:
@@ -1930,9 +1922,10 @@ class CodexTranslator(BaseTranslator):
             )
 
         self.compat_command_available = True
-        self.fast_command_available = self.FAST_PATH_FLAGS.issubset(
-            self.supported_exec_flags
-        ) and not self.profile
+        self.fast_command_available = (
+            self.FAST_PATH_FLAGS.issubset(self.supported_exec_flags)
+            and not self.profile
+        )
         if self.profile:
             if "--profile" not in self.supported_exec_flags:
                 raise RuntimeError(
@@ -2013,7 +2006,9 @@ class CodexTranslator(BaseTranslator):
             with open(output_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except json.JSONDecodeError as exc:
-            raise RuntimeError("Codex translator returned invalid JSON output.") from exc
+            raise RuntimeError(
+                "Codex translator returned invalid JSON output."
+            ) from exc
 
     def _load_translation(self, output_path: str) -> str:
         payload = self._load_json_output(output_path)
@@ -2110,9 +2105,7 @@ class CodexTranslator(BaseTranslator):
             raise RuntimeError(
                 "Codex reference-title output contains invalid or missing indices."
             )
-        return [
-            indexed_replacements[index] for index in range(1, expected_count + 1)
-        ]
+        return [indexed_replacements[index] for index in range(1, expected_count + 1)]
 
     def _iter_command_modes(self) -> list[str]:
         if self.preferred_command_mode == "compat" or not self.fast_command_available:
@@ -2131,7 +2124,9 @@ class CodexTranslator(BaseTranslator):
             modes = [mode_override] if mode_override else self._iter_command_modes()
             last_error = None
             for mode in modes:
-                command = self._build_command(prompt_text, schema_path, output_path, mode)
+                command = self._build_command(
+                    prompt_text, schema_path, output_path, mode
+                )
                 try:
                     result = subprocess.run(
                         command,
@@ -2159,7 +2154,9 @@ class CodexTranslator(BaseTranslator):
                         self.preferred_command_mode = "compat"
                     return response_loader(output_path)
 
-                detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+                detail = (
+                    result.stderr.strip() or result.stdout.strip() or "unknown error"
+                )
                 last_error = RuntimeError(
                     f"Codex translator failed with exit code {result.returncode}: {detail}"
                 )
@@ -2613,9 +2610,7 @@ class CodexTranslator(BaseTranslator):
                 results[index] = target
 
         if pending:
-            expanded_items: list[
-                tuple[int, str, list[dict[str, str]]]
-            ] = []
+            expanded_items: list[tuple[int, str, list[dict[str, str]]]] = []
             segment_sources: dict[int, list[str]] = {}
             recombine_map: dict[int, list[int]] = {}
             expanded_index = 0
@@ -2630,9 +2625,7 @@ class CodexTranslator(BaseTranslator):
                         for item in context
                         if item["placeholder"] in segment_tokens
                     ]
-                    expanded_items.append(
-                        (expanded_index, segment, segment_context)
-                    )
+                    expanded_items.append((expanded_index, segment, segment_context))
                     recombine_map[original_index].append(expanded_index)
                     expanded_index += 1
 
@@ -2662,10 +2655,8 @@ class CodexTranslator(BaseTranslator):
                     batch_results,
                     strict=True,
                 ):
-                    expanded_results[index] = (
-                        self._accepted_contextual_translation(
-                            source, target, context
-                        )
+                    expanded_results[index] = self._accepted_contextual_translation(
+                        source, target, context
                     )
 
             ordinary_batches = self._chunk_batch(ordinary_items)
@@ -2842,11 +2833,9 @@ class CodexTranslator(BaseTranslator):
             if self._checks_english_residue():
                 joined_source = "".join(texts)
                 joined_target = "".join(normalized_targets)
-                joined_reference_check = (
-                    normalize_scientific_cross_reference_placement(
-                        joined_source,
-                        joined_target,
-                    )
+                joined_reference_check = normalize_scientific_cross_reference_placement(
+                    joined_source,
+                    joined_target,
                 )
                 if (
                     joined_reference_check is None
@@ -2866,8 +2855,7 @@ class CodexTranslator(BaseTranslator):
                     text.strip(boundary_whitespace) for text in texts
                 )
                 identity_target = "".join(
-                    text.strip(boundary_whitespace)
-                    for text in normalized_targets
+                    text.strip(boundary_whitespace) for text in normalized_targets
                 )
                 if has_unchanged_translatable_english(
                     identity_source,
@@ -3272,9 +3260,7 @@ class CodexTranslator(BaseTranslator):
             spans.append(title)
         return tuple(spans)
 
-    def _run_exact_reference_title_batch(
-        self, titles: list[str]
-    ) -> list[str | None]:
+    def _run_exact_reference_title_batch(self, titles: list[str]) -> list[str | None]:
         prompt_text = self._build_exact_reference_title_prompt(titles)
         try:
             return self._execute_codex_request(
@@ -3411,7 +3397,7 @@ class CodexTranslator(BaseTranslator):
             previous = normalized
             for left, right in pairs:
                 normalized = re.sub(
-                    fr"({left}){self.HSPACE_RE}({right})", r"\1\2", normalized
+                    rf"({left}){self.HSPACE_RE}({right})", r"\1\2", normalized
                 )
             changed = normalized != previous
         return normalized
@@ -3451,10 +3437,7 @@ class CodexTranslator(BaseTranslator):
             value = context_by_placeholder.get(first.group(0))
             if isinstance(value, str):
                 values.append(value)
-            while (
-                index + 1 < len(matches)
-                and matches[index + 1].start() == last.end()
-            ):
+            while index + 1 < len(matches) and matches[index + 1].start() == last.end():
                 index += 1
                 last = matches[index]
                 value = context_by_placeholder.get(last.group(0))
@@ -3655,9 +3638,7 @@ class CodexTranslator(BaseTranslator):
             batches = self._chunk_batch(expanded_items)
             all_batch_results = self._map_batches(
                 batches,
-                lambda batch: self._run_batch_translation(
-                    [text for _, text in batch]
-                ),
+                lambda batch: self._run_batch_translation([text for _, text in batch]),
             )
             for batch, translated_batch in zip(
                 batches,
@@ -3816,9 +3797,7 @@ class CodexTranslator(BaseTranslator):
         if not is_valid:
             return None
         source_left, source_right = replacement.source.split(boundary)
-        translated_title = self._normalize_translation_output(
-            replacement.translated
-        )
+        translated_title = self._normalize_translation_output(replacement.translated)
         target_left, target_right = translated_title.split(boundary)
         return self._validated_reference_continuation_payload(
             left_entry,
@@ -3935,9 +3914,7 @@ class CodexTranslator(BaseTranslator):
                 if validated is not None:
                     return self._rebalance_reference_continuation(validated)
 
-        logical_entry = (
-            left_entry + self.REFERENCE_BOUNDARY_TOKEN + right_prefix
-        )
+        logical_entry = left_entry + self.REFERENCE_BOUNDARY_TOKEN + right_prefix
         for _ in range(2):
             replacements = self._run_reference_title_batch([logical_entry])[0]
             validated = self._reference_continuation_replacements(
@@ -4026,8 +4003,7 @@ class CodexTranslator(BaseTranslator):
                 continue
             return False
         has_venue_signal = any(
-            folded == signal
-            or (len(signal) >= 6 and folded.startswith(signal))
+            folded == signal or (len(signal) >= 6 and folded.startswith(signal))
             for word in words
             for folded in (word.casefold(),)
             for signal in venue_signals
@@ -4090,11 +4066,14 @@ class CodexTranslator(BaseTranslator):
         )
         if sum(word.casefold() == family_name for word in source_words) != 1:
             return False
-        return re.search(
-            rf"(?<![A-Za-z]){re.escape(family_name)}\s+qubits?(?![A-Za-z])",
-            source_title,
-            re.IGNORECASE,
-        ) is not None
+        return (
+            re.search(
+                rf"(?<![A-Za-z]){re.escape(family_name)}\s+qubits?(?![A-Za-z])",
+                source_title,
+                re.IGNORECASE,
+            )
+            is not None
+        )
 
     @classmethod
     def _reference_title_has_unsafe_residue(
@@ -4191,8 +4170,7 @@ class CodexTranslator(BaseTranslator):
             remaining,
         )
         return bool(
-            volume
-            and cls._reference_venue_name_is_plausible(volume.group("venue"))
+            volume and cls._reference_venue_name_is_plausible(volume.group("venue"))
         )
 
     @classmethod
@@ -4219,9 +4197,7 @@ class CodexTranslator(BaseTranslator):
         internal_title_separators = ":;—–-"
         if prefix_boundary[-1] in internal_title_separators:
             preceding = prefix_boundary[:-1].rstrip()
-            if not any(
-                preceding.endswith(peer) for peer in peer_source_titles
-            ):
+            if not any(preceding.endswith(peer) for peer in peer_source_titles):
                 return False
         if prefix_boundary.endswith(".") and not cls._reference_prefix_is_author_et_al(
             prefix_boundary
@@ -4238,9 +4214,7 @@ class CodexTranslator(BaseTranslator):
                 # after an initials/surname author terminator.
                 return False
 
-        remaining = suffix_boundary.lstrip(
-            " \t\r\n\"'’”)]}》」』】.,;:!?—–-"
-        )
+        remaining = suffix_boundary.lstrip(" \t\r\n\"'’”)]}》」』】.,;:!?—–-")
         if any(remaining.startswith(peer) for peer in peer_source_titles):
             remaining = ""
         if remaining[:1].isalpha() and not cls._reference_metadata_tail_is_safe(
@@ -4251,8 +4225,7 @@ class CodexTranslator(BaseTranslator):
             # tail in English and cache a mixed-language reference.
             return False
         if re.match(
-            r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|"
-            r"[（(]?\s*[Ss]?\d+[.)．）])",
+            r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|" r"[（(]?\s*[Ss]?\d+[.)．）])",
             source_title,
         ):
             return False
@@ -4310,9 +4283,7 @@ class CodexTranslator(BaseTranslator):
             return entry, False
 
         normalized_replacements: list[ExactReplacement] = []
-        source_titles = tuple(
-            replacement.source for replacement in replacements
-        )
+        source_titles = tuple(replacement.source for replacement in replacements)
         for replacement in replacements:
             translated_title = self._normalize_translation_output(
                 replacement.translated
@@ -4343,9 +4314,7 @@ class CodexTranslator(BaseTranslator):
                     translated_title,
                 )
             )
-        translated_entry = apply_exact_replacements(
-            entry, normalized_replacements
-        )
+        translated_entry = apply_exact_replacements(entry, normalized_replacements)
         if translated_entry is None:
             return entry, False
         return translated_entry, True
@@ -4412,9 +4381,7 @@ class CodexTranslator(BaseTranslator):
                 results[entry_idx] = translated_entry
                 if is_valid:
                     self.cache.set(
-                        self._reference_cache_key(
-                            entry, cache_contexts[entry_idx]
-                        ),
+                        self._reference_cache_key(entry, cache_contexts[entry_idx]),
                         translated_entry,
                     )
                 elif replacements:

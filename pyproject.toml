@@ -26,9 +26,10 @@ dependencies = [
     "gradio<5.36",
     "huggingface_hub",
     "onnx",
-    "onnxruntime",
+    "onnxruntime<1.24; python_version < '3.11'",
+    "onnxruntime; python_version >= '3.11'",
     "opencv-python-headless",
-    "tencentcloud-sdk-python-tmt",
+    "tencentcloud-sdk-python-tmt==3.0.1419",
     "pdfminer-six==20250416",
     "gradio_pdf>=0.0.21",
     "pikepdf",
@@ -65,7 +66,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Byaidu/PDFMathTranslate"
+Homepage = "https://github.com/phxumy/PDFMathTranslate"
+Repository = "https://github.com/phxumy/PDFMathTranslate"
+Issues = "https://github.com/phxumy/PDFMathTranslate/issues"
+Upstream = "https://github.com/PDFMathTranslate/PDFMathTranslate"
 
 [build-system]
 requires = ["hatchling"]

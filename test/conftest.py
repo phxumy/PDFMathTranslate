@@ -36,7 +36,9 @@ def _stub_ollama():
 
         def chat(self, **kwargs):
             return types.SimpleNamespace(
-                message=types.SimpleNamespace(content=kwargs.get("messages", [{}])[0].get("content", ""))
+                message=types.SimpleNamespace(
+                    content=kwargs.get("messages", [{}])[0].get("content", "")
+                )
             )
 
     module.ResponseError = ResponseError
@@ -75,7 +77,13 @@ def _stub_openai():
             self.chat = _Chat()
 
     class AzureOpenAI(OpenAI):
-        def __init__(self, azure_endpoint=None, azure_deployment=None, api_version=None, api_key=None):
+        def __init__(
+            self,
+            azure_endpoint=None,
+            azure_deployment=None,
+            api_version=None,
+            api_key=None,
+        ):
             super().__init__(base_url=azure_endpoint, api_key=api_key)
             self.azure_deployment = azure_deployment
             self.api_version = api_version

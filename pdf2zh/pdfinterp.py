@@ -261,7 +261,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         # log.debug("Processing page: %r", page)
         # print(page.mediabox,page.cropbox)
         # (x0, y0, x1, y1) = page.mediabox
-        (x0, y0, x1, y1) = page.cropbox
+        x0, y0, x1, y1 = page.cropbox
         if page.rotate == 90:
             ctm = (0, -1, 1, 0, -y0, x1)
         elif page.rotate == 180:
@@ -321,7 +321,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             return
         while True:
             try:
-                (_, obj) = parser.nextobject()
+                _, obj = parser.nextobject()
             except PSEOF:
                 break
             if isinstance(obj, PSKeyword):

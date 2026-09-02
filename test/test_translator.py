@@ -194,15 +194,13 @@ class TestOllamaTranslator(unittest.TestCase):
         translator = OllamaTranslator(lang_in="en", lang_out="zh", model="test:3b")
         with mock.patch.object(translator, "client") as mock_client:
             chat_response = mock_client.chat.return_value
-            chat_response.message.content = dedent(
-                """\
+            chat_response.message.content = dedent("""\
                 <think>
                 Thinking...
                 </think>
                     
                 天空呈现蓝色是因为...
-                """
-            )
+                """)
 
             text = "The sky appears blue because of..."
             translated_result = translator.do_translate(text)
@@ -222,14 +220,12 @@ class TestOllamaTranslator(unittest.TestCase):
                 mock_client.chat()
 
     def test_remove_cot_content(self):
-        fake_cot_resp_text = dedent(
-            """\
+        fake_cot_resp_text = dedent("""\
             <think>
 
             </think>
 
-            The sky appears blue because of..."""
-        )
+            The sky appears blue because of...""")
         removed_cot_content = OllamaTranslator._remove_cot_content(fake_cot_resp_text)
         excepted_content = "The sky appears blue because of..."
         self.assertEqual(excepted_content, removed_cot_content.strip())
@@ -283,17 +279,14 @@ class TestCodexExecutableDiscovery(unittest.TestCase):
 
     def test_portable_codex_next_to_pystand_is_preferred(self):
         candidate = (
-            self.root
-            / "codex-cli"
-            / "x86_64-pc-windows-msvc"
-            / "bin"
-            / "codex.exe"
+            self.root / "codex-cli" / "x86_64-pc-windows-msvc" / "bin" / "codex.exe"
         )
         candidate.parent.mkdir(parents=True)
         candidate.write_bytes(b"portable")
 
-        with self._clean_environment(), mock.patch(
-            "pdf2zh.translator.shutil.which", return_value=None
+        with (
+            self._clean_environment(),
+            mock.patch("pdf2zh.translator.shutil.which", return_value=None),
         ):
             resolved = find_codex_executable("codex")
 
@@ -301,9 +294,12 @@ class TestCodexExecutableDiscovery(unittest.TestCase):
 
     def test_explicit_missing_path_does_not_fall_back(self):
         missing = self.root / "missing" / "codex.exe"
-        with self._clean_environment(), mock.patch(
-            "pdf2zh.translator.shutil.which", return_value="C:/other/codex.cmd"
-        ) as which:
+        with (
+            self._clean_environment(),
+            mock.patch(
+                "pdf2zh.translator.shutil.which", return_value="C:/other/codex.cmd"
+            ) as which,
+        ):
             resolved = find_codex_executable(str(missing))
 
         self.assertIsNone(resolved)
@@ -313,9 +309,13 @@ class TestCodexExecutableDiscovery(unittest.TestCase):
         candidate = self.root / "configured" / "codex.exe"
         candidate.parent.mkdir(parents=True)
         candidate.write_bytes(b"configured")
-        with self._clean_environment(), mock.patch.dict(
-            os.environ, {"CODEX_CLI_PATH": str(candidate)}, clear=False
-        ), mock.patch("pdf2zh.translator.shutil.which", return_value=None):
+        with (
+            self._clean_environment(),
+            mock.patch.dict(
+                os.environ, {"CODEX_CLI_PATH": str(candidate)}, clear=False
+            ),
+            mock.patch("pdf2zh.translator.shutil.which", return_value=None),
+        ):
             resolved = find_codex_executable("codex")
 
         self.assertEqual(str(candidate.resolve()), resolved)
@@ -328,8 +328,9 @@ class TestCodexExecutableDiscovery(unittest.TestCase):
         def which(command):
             return str(candidate) if command == "codex" else None
 
-        with self._clean_environment(), mock.patch(
-            "pdf2zh.translator.shutil.which", side_effect=which
+        with (
+            self._clean_environment(),
+            mock.patch("pdf2zh.translator.shutil.which", side_effect=which),
         ):
             resolved = find_codex_executable("codex")
 
@@ -337,11 +338,7 @@ class TestCodexExecutableDiscovery(unittest.TestCase):
 
     def test_custom_bare_command_uses_path_instead_of_portable_fallback(self):
         portable = (
-            self.root
-            / "codex-cli"
-            / "x86_64-pc-windows-msvc"
-            / "bin"
-            / "codex.exe"
+            self.root / "codex-cli" / "x86_64-pc-windows-msvc" / "bin" / "codex.exe"
         )
         portable.parent.mkdir(parents=True)
         portable.write_bytes(b"portable")
@@ -349,8 +346,9 @@ class TestCodexExecutableDiscovery(unittest.TestCase):
         custom.parent.mkdir(parents=True)
         custom.write_bytes(b"@echo off")
 
-        with self._clean_environment(), mock.patch(
-            "pdf2zh.translator.shutil.which", return_value=str(custom)
+        with (
+            self._clean_environment(),
+            mock.patch("pdf2zh.translator.shutil.which", return_value=str(custom)),
         ):
             resolved = find_codex_executable("research-codex")
 
@@ -804,16 +802,16 @@ class TestCodexTranslator(unittest.TestCase):
         normalized = translator._normalize_translation_output(
             "本文 提出 了一种 复合 控制 策略 ， 用于 实现 轨迹 跟踪 任务 。"
         )
-        self.assertEqual("本文提出了一种复合控制策略，用于实现轨迹跟踪任务。", normalized)
+        self.assertEqual(
+            "本文提出了一种复合控制策略，用于实现轨迹跟踪任务。", normalized
+        )
 
     def test_normalize_translation_output_preserves_english_boundary(self):
         with mock.patch("pdf2zh.translator.subprocess.run") as run:
             run.side_effect = self._probe_side_effect()
             translator = CodexTranslator("en", "zh", None)
 
-        normalized = translator._normalize_translation_output(
-            "MPC 跟踪 控制 对象"
-        )
+        normalized = translator._normalize_translation_output("MPC 跟踪 控制 对象")
         self.assertEqual("MPC 跟踪控制对象", normalized)
 
     def test_normalize_translation_output_removes_placeholder_spaces(self):
@@ -949,7 +947,7 @@ class TestCodexTranslator(unittest.TestCase):
                     lambda cmd, **kwargs: (
                         self._write_translation_payload(cmd, "单条回退"),
                         subprocess.CompletedProcess(cmd, 0, "", ""),
-                    )[1]
+                    )[1],
                 ]
             )
             translator = CodexTranslator("en", "zh", None)

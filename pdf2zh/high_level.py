@@ -40,9 +40,9 @@ _CAPTION_LAYOUT_CLASSES = frozenset(
 )
 _PRESERVED_LAYOUT_CLASSES = frozenset({"figure", "table"})
 _FORMULA_LAYOUT_CLASSES = frozenset({"isolate_formula", "formula_caption"})
-_NON_TEXT_LAYOUT_CLASSES = frozenset(
-    {"abandon"}
-) | _PRESERVED_LAYOUT_CLASSES | _FORMULA_LAYOUT_CLASSES
+_NON_TEXT_LAYOUT_CLASSES = (
+    frozenset({"abandon"}) | _PRESERVED_LAYOUT_CLASSES | _FORMULA_LAYOUT_CLASSES
+)
 
 
 @dataclass(frozen=True)
@@ -134,8 +134,7 @@ def _abandon_matches_stronger_text_region(
 ) -> bool:
     """Return true only for a near-duplicate, stronger text detection."""
     return any(
-        text_confidence > confidence
-        and _box_iou(bounds, text_bounds) >= minimum_iou
+        text_confidence > confidence and _box_iou(bounds, text_bounds) >= minimum_iou
         for text_bounds, text_confidence in text_regions
     )
 
@@ -179,9 +178,7 @@ def _build_layout_mask(
     layout_box = np.ones((height, width))
     confidence_map = np.full(layout_box.shape, -np.inf, dtype=np.float32)
     detections = _layout_detections(page_layout, height, width)
-    region_types = {
-        detection.value: detection.class_name for detection in detections
-    }
+    region_types = {detection.value: detection.class_name for detection in detections}
     text_regions: list[tuple[tuple[int, int, int, int], float]] = []
     semantic_text_regions: list[tuple[tuple[int, int, int, int], float]] = []
 
@@ -192,9 +189,7 @@ def _build_layout_mask(
         if detection.class_name == "title" or detection.class_name in (
             _CAPTION_LAYOUT_CLASSES
         ):
-            semantic_text_regions.append(
-                (detection.bounds, detection.confidence)
-            )
+            semantic_text_regions.append((detection.bounds, detection.confidence))
         _paint_layout_region(
             layout_box,
             confidence_map,

@@ -28,12 +28,9 @@ def translator_stub() -> CodexTranslator:
 class CodexReferenceTranslationTests(unittest.TestCase):
     def test_curly_quoted_title_uses_deterministic_complete_span(self) -> None:
         translator = translator_stub()
-        title = (
-            "Audio set: An ontology and human-labeled dataset for audio events"
-        )
+        title = "Audio set: An ontology and human-labeled dataset for audio events"
         entry = (
-            f'[57] J. F. Gemmeke et al., “{title},” in {{v47}}., '
-            "2017, pp. 776–780."
+            f"[57] J. F. Gemmeke et al., “{title},” in {{v47}}., " "2017, pp. 776–780."
         )
         seen_titles: list[str] = []
 
@@ -53,7 +50,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
         self.assertEqual(seen_titles, [title])
         self.assertEqual(
             result,
-            '[57] J. F. Gemmeke et al., “音频集：用于音频事件的本体与人工标注数据集,” '
+            "[57] J. F. Gemmeke et al., “音频集：用于音频事件的本体与人工标注数据集,” "
             "in {v47}., 2017, pp. 776–780.",
         )
         self.assertEqual(len(translator.cache.values), 1)
@@ -61,7 +58,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
     def test_curly_quote_extractor_excludes_delimiter_punctuation(self) -> None:
         self.assertEqual(
             CodexTranslator._quoted_reference_title_spans(
-                '[1] A. Smith, “Main title: Complete subtitle,” in Journal.'
+                "[1] A. Smith, “Main title: Complete subtitle,” in Journal."
             ),
             ("Main title: Complete subtitle",),
         )
@@ -89,10 +86,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
             "Implementation of a transmon qubit using superconducting "
             "granular aluminum"
         )
-        entry = (
-            f"105. Winkel, P. et al. {title}. "
-            "Phys. Rev. X 10, 031032 (2020). "
-        )
+        entry = f"105. Winkel, P. et al. {title}. " "Phys. Rev. X 10, 031032 (2020). "
         translated = "使用超导颗粒铝实现 transmon 量子比特"
         translator._run_reference_title_batch = lambda entries: [
             [ExactReplacement(title, translated)]
@@ -112,9 +106,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
         def partial(entries):
             nonlocal calls
             calls += 1
-            return [
-                [ExactReplacement(title, "实现 quantum 量子比特架构")]
-            ]
+            return [[ExactReplacement(title, "实现 quantum 量子比特架构")]]
 
         translator._run_reference_title_batch = partial
 
@@ -150,9 +142,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
         def partial(entries):
             nonlocal calls
             calls += 1
-            return [
-                [ExactReplacement(title, "可扩展且稳健的 quantum circuit method")]
-            ]
+            return [[ExactReplacement(title, "可扩展且稳健的 quantum circuit method")]]
 
         translator._run_reference_title_batch = partial
 
@@ -171,9 +161,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
         def partial(entries):
             nonlocal calls
             calls += 1
-            return [
-                [ExactReplacement(title, "可扩展且稳健的量子电路 method")]
-            ]
+            return [[ExactReplacement(title, "可扩展且稳健的量子电路 method")]]
 
         translator._run_reference_title_batch = partial
 
@@ -243,9 +231,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
         for replacements in cases:
             with self.subTest(replacements=replacements):
                 translator = translator_stub()
-                translator._run_reference_title_batch = lambda entries: [
-                    replacements
-                ]
+                translator._run_reference_title_batch = lambda entries: [replacements]
 
                 self.assertEqual(
                     translator.translate_reference_entries([entry]),
@@ -292,8 +278,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
     ) -> None:
         cases = (
             (
-                "[1] A. Smith et al. A complete work title. "
-                "Nature 1, 10 (2020).",
+                "[1] A. Smith et al. A complete work title. " "Nature 1, 10 (2020).",
                 "A complete work title",
             ),
             (
@@ -342,13 +327,9 @@ class CodexReferenceTranslationTests(unittest.TestCase):
     def test_full_single_word_journal_name_is_a_safe_metadata_tail(self) -> None:
         translator = translator_stub()
         title = (
-            "Junction fabrication by shadow evaporation without a sus- "
-            "pended bridge"
+            "Junction fabrication by shadow evaporation without a sus- " "pended bridge"
         )
-        entry = (
-            f"107. Lecocq, F. et al. {title}. "
-            "Nanotechnology 22, 315302 (2011). "
-        )
+        entry = f"107. Lecocq, F. et al. {title}. " "Nanotechnology 22, 315302 (2011). "
         translator._run_reference_title_batch = lambda entries: [
             [ExactReplacement(title, "无需悬桥的阴影蒸发法结制备")]
         ]
@@ -360,9 +341,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
     def test_arbitrary_single_word_title_tail_is_not_a_venue(self) -> None:
         translator = translator_stub()
-        entry = (
-            "[1] A. Smith, A scalable framework. Method 12, 34 (2020)."
-        )
+        entry = "[1] A. Smith, A scalable framework. Method 12, 34 (2020)."
         calls = 0
 
         def truncated(entries):
@@ -477,8 +456,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
     def test_formula_context_is_part_of_the_reference_cache_key(self) -> None:
         translator = translator_stub()
         entry = (
-            "{v0} A. Smith, A title with a protected marker. "
-            "Nature 1, 10 (2020)."
+            "{v0} A. Smith, A title with a protected marker. " "Nature 1, 10 (2020)."
         )
 
         first = translator._reference_cache_key(entry, "{v0}=1")

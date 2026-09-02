@@ -79,9 +79,7 @@ log = logging.getLogger(__name__)
 
 
 ITALIC_TAG_PREFIX = "[[PDF2ZH_ITALIC_"
-ITALIC_TAG_RE = re.compile(
-    r"\[\[PDF2ZH_ITALIC_(\d+)_(BEGIN|END)\]\]"
-)
+ITALIC_TAG_RE = re.compile(r"\[\[PDF2ZH_ITALIC_(\d+)_(BEGIN|END)\]\]")
 ITALIC_SHEAR = math.tan(math.radians(12.0))
 _FORMULA_MARKER_RE = re.compile(r"\{\s*v([\d\s]+)\s*\}", re.IGNORECASE)
 FLOW_TOKEN_PREFIX = "[[PDF2ZH_FLOW_"
@@ -143,19 +141,15 @@ _SUBSECTION_ITALIC_LABEL_RE = re.compile(
     r"^[A-Z]\.\s*[A-Z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*){0,15}$"
 )
 _RUNIN_ITALIC_HEADING_RE = re.compile(
-    r"^(?:\d+\)\s*)?[A-Z][A-Za-z-]*"
-    r"(?:\s+[A-Za-z][A-Za-z-]*){1,16}:$"
+    r"^(?:\d+\)\s*)?[A-Z][A-Za-z-]*" r"(?:\s+[A-Za-z][A-Za-z-]*){1,16}:$"
 )
-_RUNIN_CONNECTOR_RE = re.compile(
-    r"^(?:Both|Finally|For|In|Table|The|We),?$"
-)
+_RUNIN_CONNECTOR_RE = re.compile(r"^(?:Both|Finally|For|In|Table|The|We),?$")
 _PARENTHETICAL_ITALIC_CONNECTOR_RE = re.compile(
     r"^[\(\[（［]\s*(?:and|or|versus|vs\.?)\s*$",
     re.IGNORECASE,
 )
 _QUOTED_ITALIC_PROSE_RE = re.compile(
-    r"^[“\"][A-Za-z][A-Za-z'-]*[”\"]"
-    r"(?:\s+[A-Za-z][A-Za-z'-]*){1,5}$"
+    r"^[“\"][A-Za-z][A-Za-z'-]*[”\"]" r"(?:\s+[A-Za-z][A-Za-z'-]*){1,5}$"
 )
 
 
@@ -185,9 +179,7 @@ def _split_trailing_prose_openers(
         joined,
         re.IGNORECASE,
     )
-    if parenthetical is not None and all(
-        len(char.get_text()) == 1 for char in chars
-    ):
+    if parenthetical is not None and all(len(char.get_text()) == 1 for char in chars):
         opener = parenthetical.group(1)
         if joined.count(opener) > joined.count(pairs[opener]):
             split_at = parenthetical.start()
@@ -213,15 +205,28 @@ _PROSE_SENTENCE_PUNCTUATION = frozenset(".,;:!?，。；：！？")
 _FORMULA_TRAILING_PROSE_WORDS = frozenset(
     {
         "and",
-        "are", "be", "been", "being",
+        "are",
+        "be",
+        "been",
+        "being",
         "called",
-        "correspond", "corresponds", "corresponded",
-        "denote", "denotes", "denoted",
-        "in", "indicates",
+        "correspond",
+        "corresponds",
+        "corresponded",
+        "denote",
+        "denotes",
+        "denoted",
+        "in",
+        "indicates",
         "is",
-        "represent", "represents", "represented",
-        "respectively", "where", "which",
-        "was", "were",
+        "represent",
+        "represents",
+        "represented",
+        "respectively",
+        "where",
+        "which",
+        "was",
+        "were",
     }
 )
 
@@ -238,12 +243,8 @@ def _split_trailing_formula_prose_word(
     and immediately follow a mathematical-font glyph.  This intentionally does
     not classify arbitrary English labels or mathematical function names.
     """
-    if (
-        paragraph_layout_class == 0
-        or any(
-            getattr(char, "_pdf2zh_layout_class", None) == 0
-            for char in chars
-        )
+    if paragraph_layout_class == 0 or any(
+        getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars
     ):
         return chars, "", []
     split_at = len(chars)
@@ -266,8 +267,7 @@ def _split_trailing_formula_prose_word(
             _MATH_FONT_RE.search(_formula_font_name(char))
             or (
                 char.get_text()
-                and unicodedata.category(char.get_text()[0])
-                in {"Lm", "Mn", "Sk", "Sm"}
+                and unicodedata.category(char.get_text()[0]) in {"Lm", "Mn", "Sk", "Sm"}
             )
             for char in chars[max(0, split_at - 4) : split_at - 1]
         )
@@ -295,11 +295,8 @@ def _split_trailing_formula_prose_word(
     em = max(preceding_size, suffix_size, 1.0)
     if (
         min(preceding_size, suffix_size) <= 0
-        or max(preceding_size, suffix_size)
-        / min(preceding_size, suffix_size)
-        > 1.10
-        or abs(_char_baseline(preceding) - _char_baseline(suffix[0]))
-        > 0.15 * em
+        or max(preceding_size, suffix_size) / min(preceding_size, suffix_size) > 1.10
+        or abs(_char_baseline(preceding) - _char_baseline(suffix[0])) > 0.15 * em
     ):
         return chars, "", []
     gap = float(suffix[0].x0) - float(preceding.x1)
@@ -318,7 +315,10 @@ def _split_trailing_formula_prose_word(
         return chars, "", []
     if not (
         _MATH_FONT_RE.search(_formula_font_name(preceding))
-        or (preceding_text and unicodedata.category(preceding_text[0]) in {"Lm", "Mn", "Sk", "Sm"})
+        or (
+            preceding_text
+            and unicodedata.category(preceding_text[0]) in {"Lm", "Mn", "Sk", "Sm"}
+        )
         or preceding_is_formula_closer
     ):
         return chars, "", []
@@ -344,9 +344,7 @@ def _split_trailing_formula_prose_clause(
     if (
         len(chars) < 8
         or paragraph_layout_class == 0
-        or any(
-            getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars
-        )
+        or any(getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars)
     ):
         return chars, "", []
     for split_at, char in enumerate(chars):
@@ -359,13 +357,9 @@ def _split_trailing_formula_prose_clause(
         if (
             re.fullmatch(r"[a-z][a-z'-]{3,}", prefix_text) is None
             or not all(_is_prose_italic_font(item.fontname) for item in prefix)
-            or any(
-                _MATH_FONT_RE.search(_formula_font_name(item))
-                for item in suffix
-            )
+            or any(_MATH_FONT_RE.search(_formula_font_name(item)) for item in suffix)
             or re.fullmatch(
-                r"[.!?]\s*[“\"][A-Z][A-Za-z'-]{2,}[”\"]\s+"
-                r"(?:refers|means|denotes)",
+                r"[.!?]\s*[“\"][A-Z][A-Za-z'-]{2,}[”\"]\s+" r"(?:refers|means|denotes)",
                 suffix_text,
             )
             is None
@@ -375,8 +369,7 @@ def _split_trailing_formula_prose_clause(
         if any(
             _is_non_horizontal_text_matrix(
                 getattr(item, "_pdf2zh_source_text_state", None).matrix
-                if getattr(item, "_pdf2zh_source_text_state", None)
-                is not None
+                if getattr(item, "_pdf2zh_source_text_state", None) is not None
                 else item.matrix
             )
             for item in visible
@@ -391,9 +384,7 @@ def _split_trailing_formula_prose_clause(
             or min(sizes) <= 0
             or max(sizes) / min(sizes) > 1.10
             or max(baselines) - min(baselines) > 0.15 * typical_size
-            or not -0.10 * typical_size
-            <= boundary_gap
-            <= 0.45 * typical_size
+            or not -0.10 * typical_size <= boundary_gap <= 0.45 * typical_size
         ):
             continue
         return prefix, suffix_text, suffix
@@ -418,10 +409,7 @@ def _split_trailing_runin_connector(
     if (
         len(chars) < 6
         or paragraph_layout_class == 0
-        or any(
-            getattr(char, "_pdf2zh_layout_class", None) == 0
-            for char in chars
-        )
+        or any(getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars)
     ):
         return chars, "", []
     for split_at in range(1, len(chars)):
@@ -432,10 +420,7 @@ def _split_trailing_runin_connector(
         if (
             _RUNIN_ITALIC_HEADING_RE.fullmatch(heading) is None
             or _RUNIN_CONNECTOR_RE.fullmatch(connector) is None
-            or not all(
-                _is_prose_italic_font(char.fontname)
-                for char in heading_chars
-            )
+            or not all(_is_prose_italic_font(char.fontname) for char in heading_chars)
             or any(
                 _is_prose_italic_font(char.fontname)
                 or not _is_non_math_text_font(char.fontname)
@@ -528,8 +513,7 @@ def _should_bridge_cross_class_inline_script(
         or previous_region_kind != candidate_region_kind
         or previous_region_kind not in _INLINE_SCRIPT_REGION_KINDS
         or paragraph_size <= 0
-        or re.search(r"(?:^|[^A-Za-z])([A-Za-z])$", paragraph_text.rstrip())
-        is None
+        or re.search(r"(?:^|[^A-Za-z])([A-Za-z])$", paragraph_text.rstrip()) is None
         or re.fullmatch(r"[A-Za-z0-9]", previous.get_text()) is None
         or re.fullmatch(r"[A-Za-z0-9]", candidate.get_text()) is None
         or float(previous.size) < 0.90 * paragraph_size
@@ -662,8 +646,7 @@ def _should_absorb_trailing_formula_base(
     if (
         previous is None
         or paragraph_size <= 0
-        or re.search(r"(?:^|[^A-Za-z])([A-Za-z])$", paragraph_text.rstrip())
-        is None
+        or re.search(r"(?:^|[^A-Za-z])([A-Za-z])$", paragraph_text.rstrip()) is None
         or re.fullmatch(r"[A-Za-z]", previous.get_text()) is None
     ):
         return False
@@ -703,19 +686,16 @@ def _should_absorb_trailing_formula_base(
         return False
     previous_formula_right = max(float(char.x1) for char in previous_formula)
     candidate_text = candidate.get_text()
-    candidate_is_math = (
-        _MATH_FONT_RE.search(font_name) is not None
-        or (
-            bool(candidate_text)
-            and (
-                unicodedata.category(candidate_text[0])
-                in {"Lm", "Mn", "Sk", "Sm"}
-                or ord(candidate_text[0]) in range(0x370, 0x400)
-            )
+    candidate_is_math = _MATH_FONT_RE.search(font_name) is not None or (
+        bool(candidate_text)
+        and (
+            unicodedata.category(candidate_text[0]) in {"Lm", "Mn", "Sk", "Sm"}
+            or ord(candidate_text[0]) in range(0x370, 0x400)
         )
     )
     return (
-        -0.10 * paragraph_size <= float(previous.x0) - previous_formula_right
+        -0.10 * paragraph_size
+        <= float(previous.x0) - previous_formula_right
         <= 0.45 * paragraph_size
         and -0.10 * paragraph_size <= gap <= 0.12 * paragraph_size
         and candidate_is_math
@@ -897,9 +877,7 @@ def _merge_overlapping_split_math_islands(
                 and abs(float(char.y0) - baseline) <= 0.30 * size
                 and enclosure_left - 0.10 * size <= float(char.x0)
                 and float(char.x1) <= operator_left + 0.20 * size
-                and -0.10 * size
-                <= float(char.x0) - enclosure_left
-                <= 0.80 * size
+                and -0.10 * size <= float(char.x0) - enclosure_left <= 0.80 * size
             ]
             right_candidates = [
                 char
@@ -908,9 +886,7 @@ def _merge_overlapping_split_math_islands(
                 and abs(float(char.y0) - baseline) <= 0.30 * size
                 and operator_right - 0.20 * size <= float(char.x0)
                 and float(char.x1) <= enclosure_right + 0.10 * size
-                and -0.10 * size
-                <= enclosure_right - float(char.x1)
-                <= 2.00 * size
+                and -0.10 * size <= enclosure_right - float(char.x1) <= 2.00 * size
             ]
             if not left_candidates or not right_candidates:
                 continue
@@ -919,9 +895,7 @@ def _merge_overlapping_split_math_islands(
             if left_char is right_char:
                 continue
             middle_markers = [
-                value
-                for value in match.group("middle")
-                if value in ",;:"
+                value for value in match.group("middle") if value in ",;:"
             ]
             middle_chars: list[LTChar] = []
             for marker in middle_markers:
@@ -940,18 +914,20 @@ def _merge_overlapping_split_math_islands(
                 middle_chars.append(
                     min(
                         choices,
-                        key=lambda char: abs(
-                            float(char.x0) - operator_right
-                        ),
+                        key=lambda char: abs(float(char.x0) - operator_right),
                     )
                 )
             if len(middle_chars) != len(middle_markers):
                 continue
             if not (
-                enclosure_left <= float(left_char.x0) < float(left_char.x1)
+                enclosure_left
+                <= float(left_char.x0)
+                < float(left_char.x1)
                 <= operator_left + 0.20 * size
-                and operator_right - 0.20 * size <= float(right_char.x0)
-                < float(right_char.x1) <= enclosure_right + 0.10 * size
+                and operator_right - 0.20 * size
+                <= float(right_char.x0)
+                < float(right_char.x1)
+                <= enclosure_right + 0.10 * size
                 and any(
                     float(char.x1) <= float(left_char.x0) + 0.10 * size
                     for char in enclosing_group
@@ -1053,8 +1029,7 @@ def _split_formula_prose_boundaries(
         gap = float(right.x0) - float(left.x1)
         return (
             -0.10 * em <= gap <= 0.45 * em
-            and abs(_char_baseline(left) - _char_baseline(right))
-            <= 0.15 * em
+            and abs(_char_baseline(left) - _char_baseline(right)) <= 0.15 * em
         )
 
     def has_natural_word_after_quote(text: str) -> bool:
@@ -1119,18 +1094,14 @@ def _split_formula_prose_boundaries(
             float(prose[-1].y0), float(script[0].y0)
         )
         if (
-            not 0.10 * paragraph_size
-            <= center_offset
-            <= 0.70 * paragraph_size
+            not 0.10 * paragraph_size <= center_offset <= 0.70 * paragraph_size
             or vertical_overlap <= 0
         ):
             return None
         for previous, current in zip(script, script[1:], strict=False):
             em = max(float(previous.size), float(current.size), 1.0)
             if (
-                not -0.10 * em
-                <= float(current.x0) - float(previous.x1)
-                <= 0.45 * em
+                not -0.10 * em <= float(current.x0) - float(previous.x1) <= 0.45 * em
                 or abs(_char_baseline(previous) - _char_baseline(current))
                 > 0.12 * paragraph_size
             ):
@@ -1174,12 +1145,8 @@ def _split_formula_prose_boundaries(
         ):
             continue
         chars = formulas[formula_id]
-        if (
-            len(chars) < 4
-            or any(
-                getattr(char, "_pdf2zh_layout_class", None) == 0
-                for char in chars
-            )
+        if len(chars) < 4 or any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars
         ):
             continue
         marker = marker_for(formula_id)
@@ -1194,17 +1161,14 @@ def _split_formula_prose_boundaries(
         right_context = segments[paragraph_id][marker_match.end() :].lstrip()
 
         footnote_split = split_superscript_footnote(chars, paragraph_size)
-        if (
-            footnote_split is not None
-            and _segment_contains_prose(segments[paragraph_id])
+        if footnote_split is not None and _segment_contains_prose(
+            segments[paragraph_id]
         ):
             prose_chars, script_chars = footnote_split
             formulas[formula_id] = prose_chars
             setattr(prose_chars[0], _FORCED_STYLED_PROSE_ATTR, True)
             script_offset = (
-                offset
-                + float(script_chars[0].y0)
-                - float(prose_chars[0].y0)
+                offset + float(script_chars[0].y0) - float(prose_chars[0].y0)
             )
             script_id = append_formula(
                 script_chars,
@@ -1351,10 +1315,7 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     first = value[0]
     last = previous_value[-1] if previous_value else ""
     formula_text = "".join(char.get_text() for char in chars)
-    if (
-        first in "([（［"
-        and re.fullmatch(r"[\d\s,;\-–—.]+", formula_text) is not None
-    ):
+    if first in "([（［" and re.fullmatch(r"[\d\s,;\-–—.]+", formula_text) is not None:
         return False
     if last.isalnum() and first in "([（［":
         return gap <= 0.12 * em
@@ -1425,9 +1386,7 @@ def _formula_horizontal_geometry(chars: list[LTChar]) -> tuple[float, float]:
 
     if not chars:
         return 0.0, 0.0
-    if any(
-        getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars
-    ):
+    if any(getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars):
         anchor_x = float(chars[0].x0)
         x1 = max(float(char.x1) for char in chars)
         return anchor_x, max(0.0, x1 - anchor_x)
@@ -1498,7 +1457,9 @@ def _is_high_confidence_prose_italic(
     paragraph_size: float,
 ) -> str | None:
     """Return reconstructed prose only when an italic formula run is clearly text."""
-    visible = [char for char in chars if char.get_text() and not char.get_text().isspace()]
+    visible = [
+        char for char in chars if char.get_text() and not char.get_text().isspace()
+    ]
     if not visible:
         return None
     if any(getattr(char, "_pdf2zh_layout_class", 0) == 0 for char in visible):
@@ -1526,9 +1487,7 @@ def _is_high_confidence_prose_italic(
             return None
 
     text = _reconstruct_italic_run(chars)
-    parenthetical_connector = bool(
-        _PARENTHETICAL_ITALIC_CONNECTOR_RE.fullmatch(text)
-    )
+    parenthetical_connector = bool(_PARENTHETICAL_ITALIC_CONNECTOR_RE.fullmatch(text))
     quoted_prose = bool(_QUOTED_ITALIC_PROSE_RE.fullmatch(text))
     front_matter_label = bool(_STRUCTURAL_ITALIC_LABEL_RE.match(text))
     subsection_label = bool(_SUBSECTION_ITALIC_LABEL_RE.fullmatch(text))
@@ -1551,10 +1510,14 @@ def _is_high_confidence_prose_italic(
         # Only the closed front-matter/connector forms above may bridge the mixed
         # BoldItalic -> Bold runs emitted by IEEE PDFs.
         return None
-    if not text or any(
-        not (char.isalpha() or char.isspace() or char in "-‐‑–—'’.")
-        for char in text
-    ) and not (parenthetical_connector or runin_heading or quoted_prose):
+    if (
+        not text
+        or any(
+            not (char.isalpha() or char.isspace() or char in "-‐‑–—'’.")
+            for char in text
+        )
+        and not (parenthetical_connector or runin_heading or quoted_prose)
+    ):
         return None
     letters = [char for char in text if char.isalpha()]
     if len(letters) < (2 if parenthetical_connector else 4):
@@ -1578,9 +1541,7 @@ def _is_high_confidence_prose_italic(
         # (``Q factor``, ``p value``) than translatable emphasized prose.
         return None
     if not structural_label and any(
-        word != word.lower()
-        and word != word.upper()
-        and word != word.capitalize()
+        word != word.lower() and word != word.upper() and word != word.capitalize()
         for word in words
     ):
         # Preserve camel/mixed-case model and product identifiers such as
@@ -1636,12 +1597,10 @@ def _has_inline_prose_context(
         return False
     prose_boundary_punctuation = r"[\s,;:.!?“”\"'‘’]*"
     left_is_prose = (
-        re.search(rf"[A-Za-z]{{2,}}{prose_boundary_punctuation}$", left)
-        is not None
+        re.search(rf"[A-Za-z]{{2,}}{prose_boundary_punctuation}$", left) is not None
     )
     right_is_prose = (
-        re.match(rf"{prose_boundary_punctuation}[A-Za-z]{{2,}}", right)
-        is not None
+        re.match(rf"{prose_boundary_punctuation}[A-Za-z]{{2,}}", right) is not None
     )
     if left_is_prose and right_is_prose:
         return True
@@ -1658,10 +1617,7 @@ def _has_inline_prose_context(
     if not styled_text or not (left_is_prose or right_is_prose):
         words = re.findall(r"[^\W\d_]+", styled_text, flags=re.UNICODE)
         surrounding_prose = _FORMULA_MARKER_RE.sub(" ", segment)
-        if (
-            len(words) < 3
-            or len(re.findall(r"[A-Za-z]{2,}", surrounding_prose)) < 2
-        ):
+        if len(words) < 3 or len(re.findall(r"[A-Za-z]{2,}", surrounding_prose)) < 2:
             return False
     words = re.findall(r"[^\W\d_]+", styled_text, flags=re.UNICODE)
     # A strong multiword style run can sit at a paragraph boundary or directly
@@ -1697,14 +1653,11 @@ def _collect_translatable_italic_runs(
         ):
             text = None
         forced_styled_prose = any(
-            bool(getattr(char, _FORCED_STYLED_PROSE_ATTR, False))
-            for char in chars
+            bool(getattr(char, _FORCED_STYLED_PROSE_ATTR, False)) for char in chars
         )
         if text is not None and (
             forced_styled_prose
-            or _has_inline_prose_context(
-                segments[paragraph_id], formula_id, text
-            )
+            or _has_inline_prose_context(segments[paragraph_id], formula_id, text)
         ):
             candidates[formula_id] = text
     return candidates
@@ -2005,10 +1958,7 @@ def _gen_target_text_op(
     italic: bool = False,
 ) -> str:
     matrix = f"1 0 {ITALIC_SHEAR:f} 1" if italic else "1 0 0 1"
-    return (
-        f"/{font} {size:f} Tf {matrix} "
-        f"{x:f} {y:f} Tm [<{rtxt}>] TJ "
-    )
+    return f"/{font} {size:f} Tf {matrix} " f"{x:f} {y:f} Tm [<{rtxt}>] TJ "
 
 
 def _should_pre_wrap_line_break_unit(
@@ -2116,8 +2066,7 @@ def _rebalance_cjk_title_orphan(
         new_last_width += advance
 
     previous_remaining = sum(
-        _is_cjk_ideograph(character)
-        for character in text[previous_start:move_start]
+        _is_cjk_ideograph(character) for character in text[previous_start:move_start]
     )
     if last_count + moved < minimum_last_line or previous_remaining < minimum_last_line:
         return text
@@ -2247,9 +2196,9 @@ class PDFConverterEx(PDFConverter):
 
     def begin_page(self, page, ctm) -> None:
         # 重载替换 cropbox
-        (x0, y0, x1, y1) = page.cropbox
-        (x0, y0) = apply_matrix_pt(ctm, (x0, y0))
-        (x1, y1) = apply_matrix_pt(ctm, (x1, y1))
+        x0, y0, x1, y1 = page.cropbox
+        x0, y0 = apply_matrix_pt(ctm, (x0, y0))
+        x1, y1 = apply_matrix_pt(ctm, (x1, y1))
         mediabox = (0, 0, abs(x0 - x1), abs(y0 - y1))
         self.cur_item = LTPage(page.pageno, mediabox)
 

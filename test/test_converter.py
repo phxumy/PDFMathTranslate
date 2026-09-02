@@ -108,7 +108,10 @@ class TestTranslateConverter(unittest.TestCase):
             )
 
     def test_codex_translation_service(self):
-        with patch.object(CodexTranslator, "_probe_cli", return_value=None):
+        with (
+            patch("pdf2zh.translator.find_codex_executable", return_value="codex"),
+            patch.object(CodexTranslator, "_probe_cli", return_value=None),
+        ):
             converter = TranslateConverter(
                 self.rsrcmgr,
                 layout=self.layout,
@@ -120,15 +123,18 @@ class TestTranslateConverter(unittest.TestCase):
         self.assertIsInstance(converter.translator, CodexTranslator)
         self.assertEqual(4, converter.translator.max_concurrency)
 
-    @patch.object(CodexTranslator, "_probe_cli", return_value=None)
-    def test_codex_translate_segments_uses_batch_path(self, _mock_probe):
-        converter = TranslateConverter(
-            self.rsrcmgr,
-            layout=self.layout,
-            lang_in="en",
-            lang_out="zh",
-            service="codex",
-        )
+    def test_codex_translate_segments_uses_batch_path(self):
+        with (
+            patch("pdf2zh.translator.find_codex_executable", return_value="codex"),
+            patch.object(CodexTranslator, "_probe_cli", return_value=None),
+        ):
+            converter = TranslateConverter(
+                self.rsrcmgr,
+                layout=self.layout,
+                lang_in="en",
+                lang_out="zh",
+                service="codex",
+            )
         converter.thread = 4
         converter.translator = SimpleNamespace(
             name="codex",
@@ -140,15 +146,18 @@ class TestTranslateConverter(unittest.TestCase):
         self.assertEqual(["甲", "{v1}", "乙", " "], result)
         converter.translator.translate_batch.assert_called_once_with(["a", "b"])
 
-    @patch.object(CodexTranslator, "_probe_cli", return_value=None)
-    def test_codex_translate_segments_retries_transient_batch_errors(self, _mock_probe):
-        converter = TranslateConverter(
-            self.rsrcmgr,
-            layout=self.layout,
-            lang_in="en",
-            lang_out="zh",
-            service="codex",
-        )
+    def test_codex_translate_segments_retries_transient_batch_errors(self):
+        with (
+            patch("pdf2zh.translator.find_codex_executable", return_value="codex"),
+            patch.object(CodexTranslator, "_probe_cli", return_value=None),
+        ):
+            converter = TranslateConverter(
+                self.rsrcmgr,
+                layout=self.layout,
+                lang_in="en",
+                lang_out="zh",
+                service="codex",
+            )
         converter.thread = 1
         converter.translator = SimpleNamespace(
             name="codex",
@@ -160,15 +169,18 @@ class TestTranslateConverter(unittest.TestCase):
         self.assertEqual(["甲", "乙"], result)
         self.assertEqual(2, converter.translator.translate_batch.call_count)
 
-    @patch.object(CodexTranslator, "_probe_cli", return_value=None)
-    def test_codex_translate_segments_hides_and_restores_broken_url(self, _mock_probe):
-        converter = TranslateConverter(
-            self.rsrcmgr,
-            layout=self.layout,
-            lang_in="en",
-            lang_out="zh",
-            service="codex",
-        )
+    def test_codex_translate_segments_hides_and_restores_broken_url(self):
+        with (
+            patch("pdf2zh.translator.find_codex_executable", return_value="codex"),
+            patch.object(CodexTranslator, "_probe_cli", return_value=None),
+        ):
+            converter = TranslateConverter(
+                self.rsrcmgr,
+                layout=self.layout,
+                lang_in="en",
+                lang_out="zh",
+                service="codex",
+            )
         seen: list[str] = []
 
         def translate_batch(texts: list[str]) -> list[str]:

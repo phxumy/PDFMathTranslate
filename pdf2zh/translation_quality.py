@@ -324,11 +324,11 @@ def normalize_scientific_cross_reference_placement(
         kind = (
             "figure"
             if raw_label.startswith("fig")
-            else "table"
-            if raw_label.startswith(("tab", "tbl"))
-            else "equation"
-            if raw_label.startswith("eq")
-            else "reference"
+            else (
+                "table"
+                if raw_label.startswith(("tab", "tbl"))
+                else "equation" if raw_label.startswith("eq") else "reference"
+            )
         )
         following = masked_source[match.end() :]
         references.append(
@@ -364,9 +364,10 @@ def normalize_scientific_cross_reference_placement(
             identifier,
             source_is_terminal=source_is_terminal,
         )
-        if repaired is None or correct.search(
-            _mask_cross_reference_opaque_text(repaired)
-        ) is None:
+        if (
+            repaired is None
+            or correct.search(_mask_cross_reference_opaque_text(repaired)) is None
+        ):
             return None
         normalized = repaired
         consumed[key] = used + 1
@@ -533,9 +534,7 @@ def _repair_one_misplaced_cross_reference(
         rf"[\s\u00a0]*[。．.]\s*"
         rf"(?P<identifier>{_target_identifier_pattern(identifier)})"
     )
-    delayed_matches = tuple(
-        delayed.finditer(_mask_cross_reference_opaque_text(target))
-    )
+    delayed_matches = tuple(delayed.finditer(_mask_cross_reference_opaque_text(target)))
     if len(delayed_matches) != 1:
         return None
     match = delayed_matches[0]
@@ -750,8 +749,7 @@ def has_suspicious_reference_title_residue(source: str, target: str) -> bool:
         ):
             continue
         source_clause = tuple(
-            match.group(0)
-            for match in source_matches[block.a : block.a + block.size]
+            match.group(0) for match in source_matches[block.a : block.a + block.size]
         )
         # A fully capitalized named entity with an acronym (for example
         # ``Google Quantum AI``) may legitimately remain in a Chinese title.
@@ -801,9 +799,8 @@ def _preserved_reference_product_name(source: str, target: str) -> str | None:
         return None
     source_description = source_match.group("description")
     target_description = target_match.group("description")
-    if (
-        len(_ENGLISH_WORD_RE.findall(source_description)) < 3
-        or not any(_is_cjk_ideograph(char) for char in target_description)
+    if len(_ENGLISH_WORD_RE.findall(source_description)) < 3 or not any(
+        _is_cjk_ideograph(char) for char in target_description
     ):
         return None
     name_has_identifier = any(
@@ -844,10 +841,13 @@ def _is_numeric_scientific_unit(text: str, match: re.Match[str]) -> bool:
 
     if match.group(0).casefold() not in _SCIENTIFIC_UNIT_SYMBOLS:
         return False
-    return re.search(
-        r"(?:\d(?:[\d.,]*\d)?|[)\]}])\s*$",
-        text[: match.start()],
-    ) is not None
+    return (
+        re.search(
+            r"(?:\d(?:[\d.,]*\d)?|[)\]}])\s*$",
+            text[: match.start()],
+        )
+        is not None
+    )
 
 
 def has_unchanged_reference_title_fragment(
@@ -895,9 +895,8 @@ def has_unchanged_reference_title_fragment(
 
 def _is_preserved_english_identifier(text: str) -> bool:
     compact = text.strip()
-    if (
-        any(char.isdigit() for char in compact)
-        and _MODEL_IDENTIFIER_RE.fullmatch(compact)
+    if any(char.isdigit() for char in compact) and _MODEL_IDENTIFIER_RE.fullmatch(
+        compact
     ):
         return True
 

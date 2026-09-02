@@ -63,7 +63,10 @@ class SplitMathIslandTests(unittest.TestCase):
         formulas = [
             [FakeChar("∈", x0=100, x1=106, y0=50)],
             [FakeChar("c", x0=113, x1=117, y0=50)],
-            [FakeChar("{", x0=108, x1=111, y0=50), FakeChar("}", x0=127, x1=130, y0=50)],
+            [
+                FakeChar("{", x0=108, x1=111, y0=50),
+                FakeChar("}", x0=127, x1=130, y0=50),
+            ],
         ]
         punctuation = FakeChar(";", x0=118, x1=121, y0=50)
         q = FakeChar("q", x0=122, x1=126, y0=50)
@@ -100,12 +103,8 @@ class SplitMathIslandTests(unittest.TestCase):
             FakeChar("c", x0=425.37, x1=428.47, y0=434.04, size=7.47),
             FakeChar(".", x0=428.60, x1=430.10, y0=434.04, size=7.47),
         ]
-        left = FakeChar(
-            "c", x0=400.36, x1=403.47, y0=434.04, size=7.47
-        )
-        right = FakeChar(
-            "m", x0=412.72, x1=418.72, y0=434.04, size=7.47
-        )
+        left = FakeChar("c", x0=400.36, x1=403.47, y0=434.04, size=7.47)
+        right = FakeChar("m", x0=412.72, x1=418.72, y0=434.04, size=7.47)
         formulas = [[minus], enclosure]
 
         _merge_overlapping_split_math_islands(
@@ -121,14 +120,15 @@ class SplitMathIslandTests(unittest.TestCase):
             {minus, left, right, *enclosure},
         )
         self.assertEqual(
-            (min(char.x0 for char in formulas[0]), max(char.x1 for char in formulas[0])),
+            (
+                min(char.x0 for char in formulas[0]),
+                max(char.x1 for char in formulas[0]),
+            ),
             (397.47, 430.10),
         )
 
     def test_late_parentheses_absorb_split_diagonal_matrix_entries(self) -> None:
-        segments = [
-            "junction energies E{v0} diag E{v1}; E{v2}, which lead"
-        ]
+        segments = ["junction energies E{v0} diag E{v1}; E{v2}, which lead"]
         declaration = [
             FakeChar("J", x0=75.57, x1=77.79, y0=621.64, size=6.28),
             FakeChar(":", x0=80.96, x1=83.38, y0=623.0),
@@ -276,7 +276,9 @@ class FormulaTrailingProseTests(unittest.TestCase):
             paragraph_layout_class=2,
         )
 
-        self.assertEqual("".join(char.get_text() for char in formula), heading.replace(" ", ""))
+        self.assertEqual(
+            "".join(char.get_text() for char in formula), heading.replace(" ", "")
+        )
         self.assertEqual(prose, " In")
         self.assertEqual("".join(char.get_text() for char in prose_chars), connector)
 
@@ -422,9 +424,7 @@ class FormulaTrailingProseTests(unittest.TestCase):
                     chars,
                     has_prose_context=True,
                 )
-                self.assertEqual(
-                    "".join(ch.get_text() for ch in formula), formula_text
-                )
+                self.assertEqual("".join(ch.get_text() for ch in formula), formula_text)
                 self.assertEqual(prose, prose_text)
                 self.assertEqual(
                     "".join(ch.get_text() for ch in prose_chars),
@@ -436,9 +436,7 @@ class FormulaTrailingProseTests(unittest.TestCase):
             FakeChar("↓", fontname="CMSY10", layout_class=0),
             *[FakeChar(letter, layout_class=0) for letter in "indicates"],
         ]
-        formula, prose, prose_chars = _split_trailing_formula_prose_word(
-            protected
-        )
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(protected)
         self.assertEqual(formula, protected)
         self.assertEqual((prose, prose_chars), ("", []))
 
@@ -502,9 +500,7 @@ class FormulaTrailingProseTests(unittest.TestCase):
             FakeChar("x", fontname="CMMI10"),
             *[FakeChar(letter, fontname="CMMI10") for letter in "and"],
         ]
-        formula, prose, prose_chars = _split_trailing_formula_prose_word(
-            math_word
-        )
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(math_word)
         self.assertEqual(formula, math_word)
         self.assertEqual((prose, prose_chars), ("", []))
 
@@ -513,9 +509,7 @@ class FormulaTrailingProseTests(unittest.TestCase):
             FakeChar("i", fontname="Times-Roman"),
             FakeChar("n", fontname="Times-Roman"),
         ]
-        formula, prose, prose_chars = _split_trailing_formula_prose_word(
-            mixed_font_sin
-        )
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(mixed_font_sin)
         self.assertEqual(formula, mixed_font_sin)
         self.assertEqual((prose, prose_chars), ("", []))
 
@@ -523,28 +517,24 @@ class FormulaTrailingProseTests(unittest.TestCase):
         chars = []
         x = 0.0
         for value in "sounds":
-            chars.append(
-                FakeChar(value, x0=x, x1=x + 4, fontname="Times-Italic")
-            )
+            chars.append(FakeChar(value, x0=x, x1=x + 4, fontname="Times-Italic"))
             x += 4
         for value, gap in zip(
-            '.“Beam”refers',
+            ".“Beam”refers",
             [0, 2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
             strict=True,
         ):
             x += gap
-            chars.append(
-                FakeChar(value, x0=x, x1=x + 4, fontname="Times-Roman")
-            )
+            chars.append(FakeChar(value, x0=x, x1=x + 4, fontname="Times-Roman"))
             x += 4
 
         formula, prose, prose_chars = _split_trailing_formula_prose_clause(chars)
 
         self.assertEqual("".join(ch.get_text() for ch in formula), "sounds")
-        self.assertEqual(prose, '. “Beam” refers')
+        self.assertEqual(prose, ". “Beam” refers")
         self.assertEqual(
             "".join(ch.get_text() for ch in prose_chars),
-            '.“Beam”refers',
+            ".“Beam”refers",
         )
 
         protected = list(chars)
@@ -557,7 +547,7 @@ class FormulaTrailingProseTests(unittest.TestCase):
 
     def test_closed_quoted_clause_rejects_unsafe_geometry_and_shape(self) -> None:
         def make_clause(
-            suffix: str = '.“Beam”refers',
+            suffix: str = ".“Beam”refers",
         ) -> list[FakeChar]:
             result: list[FakeChar] = []
             x = 0.0
@@ -565,9 +555,7 @@ class FormulaTrailingProseTests(unittest.TestCase):
                 fontname = (
                     "Times-Italic" if len(result) < len("sounds") else "Times-Roman"
                 )
-                result.append(
-                    FakeChar(value, x0=x, x1=x + 4, fontname=fontname)
-                )
+                result.append(FakeChar(value, x0=x, x1=x + 4, fontname=fontname))
                 x += 4
             return result
 
@@ -575,8 +563,8 @@ class FormulaTrailingProseTests(unittest.TestCase):
             "rotated": make_clause(),
             "mixed_size": make_clause(),
             "zero_size": make_clause(),
-            "unbalanced_quote": make_clause('.“Beam refers'),
-            "unknown_verb": make_clause('.“Beam”changes'),
+            "unbalanced_quote": make_clause(".“Beam refers"),
+            "unknown_verb": make_clause(".“Beam”changes"),
         }
         unsafe["rotated"][-1].matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
         unsafe["mixed_size"][-1].size = 6.0
@@ -604,7 +592,9 @@ class FormulaTrailingProseTests(unittest.TestCase):
             [FakeChar("c", x0=113, x1=117, y0=50)],
             [FakeChar("x", x0=140, x1=145, y0=50)],
         ]
-        chars = [[FakeChar(";", x0=118, x1=121, y0=50), FakeChar("q", x0=122, x1=126, y0=50)]]
+        chars = [
+            [FakeChar(";", x0=118, x1=121, y0=50), FakeChar("q", x0=122, x1=126, y0=50)]
+        ]
         original = list(segments)
         _merge_overlapping_split_math_islands(segments, formulas, [0, 0, 0], chars)
         self.assertEqual(segments, original)
@@ -700,10 +690,8 @@ class FormulaProseBoundarySplitTests(unittest.TestCase):
         self.assertEqual(segments[0].count("{v1}"), 1)
 
     def test_math_variable_and_quoted_italic_descriptor_are_split(self) -> None:
-        variable = FakeChar(
-            "N", x0=0.0, x1=6.0, fontname="CMMI10", layout_class=4
-        )
-        suffix = self._italic_phrase('“seen” SE classes', x0=9.0)
+        variable = FakeChar("N", x0=0.0, x1=6.0, fontname="CMMI10", layout_class=4)
+        suffix = self._italic_phrase("“seen” SE classes", x0=9.0)
         segments = ["limited to the {v0} encountered during training"]
         formulas = [[variable, *suffix]]
         lines = [[]]
@@ -727,7 +715,7 @@ class FormulaProseBoundarySplitTests(unittest.TestCase):
         self.assertEqual("".join(ch.get_text() for ch in formulas[0]), "N")
         self.assertEqual(
             "".join(ch.get_text() for ch in formulas[1]),
-            '“seen”SEclasses',
+            "“seen”SEclasses",
         )
         self.assertEqual(
             (
@@ -789,7 +777,9 @@ class FormulaProseBoundarySplitTests(unittest.TestCase):
             (len(formulas),) * 3,
         )
 
-    def test_superscript_footnote_split_rejects_unsafe_or_mathematical_shapes(self) -> None:
+    def test_superscript_footnote_split_rejects_unsafe_or_mathematical_shapes(
+        self,
+    ) -> None:
         def make_formula(kind: str) -> list[FakeChar]:
             word_text = "cm" if kind == "short_word" else "samples"
             word = self._italic_phrase(word_text)
@@ -847,9 +837,7 @@ class FormulaProseBoundarySplitTests(unittest.TestCase):
                 )
 
     def test_math_variable_dimensional_suffix_is_released_to_prose(self) -> None:
-        variable = FakeChar(
-            "D", x0=0.0, x1=6.0, fontname="CMMI10", layout_class=4
-        )
+        variable = FakeChar("D", x0=0.0, x1=6.0, fontname="CMMI10", layout_class=4)
         suffix = []
         x = 6.2
         for value in "-dimensional":
@@ -1083,7 +1071,7 @@ class FormulaProseBoundarySplitTests(unittest.TestCase):
                 self.assertEqual(len(formulas), 1)
 
     def test_quoted_suffix_requires_a_natural_language_tail(self) -> None:
-        for suffix_text in ('“seen” X', '“seen” SE'):
+        for suffix_text in ("“seen” X", "“seen” SE"):
             with self.subTest(suffix=suffix_text):
                 variable = FakeChar(
                     "N",
@@ -1213,7 +1201,9 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
             )
         )
 
-    def test_subscript_and_differential_bases_are_absorbed_in_formula_island(self) -> None:
+    def test_subscript_and_differential_bases_are_absorbed_in_formula_island(
+        self,
+    ) -> None:
         base_v = FakeChar("v", x0=100.0, x1=105.0, y0=100.0, y1=109.0)
         subscript = FakeChar(
             "J",
@@ -1379,7 +1369,9 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
             )
         )
 
-    def test_formula_script_bridge_rejects_baseline_prose_and_region_change(self) -> None:
+    def test_formula_script_bridge_rejects_baseline_prose_and_region_change(
+        self,
+    ) -> None:
         base = FakeChar(
             "φ",
             x0=100.0,
@@ -1444,30 +1436,54 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
                 return 4 if 39 <= x < 47 else 13
 
         prose = [
-            FakeChar(letter, x0=10.0 + 4.0 * index, x1=14.0 + 4.0 * index,
-                     y0=100.0, y1=109.0, size=9.0)
+            FakeChar(
+                letter,
+                x0=10.0 + 4.0 * index,
+                x1=14.0 + 4.0 * index,
+                y0=100.0,
+                y1=109.0,
+                size=9.0,
+            )
             for index, letter in enumerate("value")
         ]
         base = FakeChar(
-            "φ", x0=34.0, x1=40.0, y0=100.0, y1=109.0, size=9.0,
+            "φ",
+            x0=34.0,
+            x1=40.0,
+            y0=100.0,
+            y1=109.0,
+            size=9.0,
             fontname="AdvOT65f8a23b.I+03",
         )
         subscript_m = FakeChar(
-            "m", x0=39.9, x1=44.0, y0=97.0, y1=103.0, size=6.0,
+            "m",
+            x0=39.9,
+            x1=44.0,
+            y0=97.0,
+            y1=103.0,
+            size=6.0,
             fontname="AdvOT65f8a23b.I",
         )
         subscript_j = FakeChar(
-            "j", x0=44.0, x1=47.0, y0=97.0, y1=103.0, size=6.0,
+            "j",
+            x0=44.0,
+            x1=47.0,
+            y0=97.0,
+            y1=103.0,
+            size=6.0,
             fontname="AdvOT65f8a23b.I",
         )
         period = FakeChar(
-            ".", x0=47.1, x1=49.0, y0=100.0, y1=109.0, size=9.0,
+            ".",
+            x0=47.1,
+            x1=49.0,
+            y0=100.0,
+            y1=109.0,
+            size=9.0,
         )
         converter = TranslateConverter.__new__(TranslateConverter)
         converter.layout = {1: FakeLayout()}
-        converter.layout_region_types = {
-            1: {4: "plain text", 13: "plain text"}
-        }
+        converter.layout_region_types = {1: {4: "plain text", 13: "plain text"}}
         converter.vfont = ""
         converter.vchar = ""
         converter.translator = type("Translator", (), {"name": "google"})()
@@ -1623,9 +1639,7 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         ]
         converter = TranslateConverter.__new__(TranslateConverter)
         converter.layout = {1: FakeLayout()}
-        converter.layout_region_types = {
-            1: {4: "plain text", 5: "plain text"}
-        }
+        converter.layout_region_types = {1: {4: "plain text", 5: "plain text"}}
         converter.vfont = ""
         converter.vchar = ""
         converter.translator = type("Translator", (), {"name": "google"})()
@@ -1685,9 +1699,7 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         )
         converter = TranslateConverter.__new__(TranslateConverter)
         converter.layout = {1: FakeLayout()}
-        converter.layout_region_types = {
-            1: {4: "plain text", 5: "plain text"}
-        }
+        converter.layout_region_types = {1: {4: "plain text", 5: "plain text"}}
         converter.vfont = ""
         converter.vchar = ""
         converter.translator = type("Translator", (), {"name": "google"})()
@@ -1717,7 +1729,13 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
             ("the EPR p", 3, 0, "plain text", "plain text"),
         ]
 
-        for text, previous_class, candidate_class, previous_kind, candidate_kind in cases:
+        for (
+            text,
+            previous_class,
+            candidate_class,
+            previous_kind,
+            candidate_kind,
+        ) in cases:
             with self.subTest(text=text, candidate_kind=candidate_kind):
                 self.assertFalse(
                     _should_bridge_cross_class_inline_script(
@@ -1783,9 +1801,7 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
             ("x?!", "x", "?!"),
         ]:
             with self.subTest(source=source):
-                formula, suffix = _split_trailing_prose_punctuation(
-                    chars(source)
-                )
+                formula, suffix = _split_trailing_prose_punctuation(chars(source))
                 self.assertEqual(
                     "".join(item.get_text() for item in formula),
                     expected_formula,
@@ -1908,9 +1924,7 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         ]
 
         self.assertTrue(_is_hidden_glyph_repertoire_probe(probe, 600.0))
-        self.assertFalse(
-            _is_hidden_glyph_repertoire_probe(probe[:3], 600.0)
-        )
+        self.assertFalse(_is_hidden_glyph_repertoire_probe(probe[:3], 600.0))
         visible = list(probe)
         visible[0] = FakeChar(
             "1",

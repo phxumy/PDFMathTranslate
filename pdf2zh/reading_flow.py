@@ -32,8 +32,7 @@ _DANGLING_CONTINUATION_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 _REFERENCE_INTERNAL_TOKEN_RE = re.compile(
-    r"\{\s*v[\d\s]+\s*\}|"
-    r"\[\[PDF2ZH_(?:FLOW|ITALIC|REF)(?:_[^\]]*)?\]\]",
+    r"\{\s*v[\d\s]+\s*\}|" r"\[\[PDF2ZH_(?:FLOW|ITALIC|REF)(?:_[^\]]*)?\]\]",
     re.IGNORECASE,
 )
 _REFERENCE_YEAR_END_RE = re.compile(
@@ -196,9 +195,7 @@ def _has_incomplete_reference_author_structure(text: str) -> bool:
     if len(matches) >= 2:
         return True
     return bool(
-        matches
-        and not text[: matches[0].start()].strip()
-        and text.count(",") >= 2
+        matches and not text[: matches[0].start()].strip() and text.count(",") >= 2
     )
 
 
@@ -369,9 +366,7 @@ def _compatible_boundary(
     if not (_looks_like_body_prose(left) and _looks_like_body_prose(right)):
         return False, ()
     continuation_start = _continuation_start_reason(right.text)
-    if continuation_start is None and _left_has_dangling_continuation_cue(
-        left.text
-    ):
+    if continuation_start is None and _left_has_dangling_continuation_cue(left.text):
         continuation_start = "capitalized-after-dangling-cue"
     if _ends_sentence(left.text) or continuation_start is None:
         return False, ()
