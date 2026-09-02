@@ -317,10 +317,10 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
               gh release upload $tag $archive $checksums --clobber --repo $env:GITHUB_REPOSITORY
               if ($LASTEXITCODE -ne 0) { throw "Updating release assets failed." }
-              gh release edit $tag --title $title --notes-file $notes --latest --repo $env:GITHUB_REPOSITORY
+              gh release edit $tag --target desktop-app --title $title --notes-file $notes --latest --repo $env:GITHUB_REPOSITORY
               if ($LASTEXITCODE -ne 0) { throw "Updating release metadata failed." }
           }
           else {
-              gh release create $tag $archive $checksums --verify-tag --latest --title $title --notes-file $notes --repo $env:GITHUB_REPOSITORY
+              gh release create $tag $archive $checksums --verify-tag --target desktop-app --latest --title $title --notes-file $notes --repo $env:GITHUB_REPOSITORY
               if ($LASTEXITCODE -ne 0) { throw "Creating the GitHub Release failed." }
           }
