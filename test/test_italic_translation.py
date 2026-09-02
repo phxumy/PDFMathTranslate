@@ -7,6 +7,7 @@ from pdf2zh.converter import (
     ITALIC_SHEAR,
     Paragraph,
     TranslateConverter,
+    _collect_translatable_italic_runs,
     _gen_target_text_op,
     _has_inline_prose_context,
     _is_high_confidence_prose_italic,
@@ -44,11 +45,27 @@ class FakeItalicChar:
 def fake_run(text: str, *, fontname: str = "TimesNewRoman-Italic"):
     chars = []
     x = 0.0
-    for index, char in enumerate(text.replace(" ", "")):
-        if text == "in situ" and index == 2:
+    for char in text:
+        if char.isspace():
             x += 2.5
+            continue
         chars.append(FakeItalicChar(char, x, x + 4.0, fontname=fontname))
         x += 4.0
+    return chars
+
+
+def fake_mixed_run(parts: list[tuple[str, str]]):
+    chars = []
+    x = 0.0
+    for text, fontname in parts:
+        for char in text:
+            if char.isspace():
+                x += 2.5
+                continue
+            chars.append(
+                FakeItalicChar(char, x, x + 4.0, fontname=fontname)
+            )
+            x += 4.0
     return chars
 
 
@@ -77,8 +94,18 @@ class FakeStyledTranslator:
         ]
 
 
-def paragraph() -> Paragraph:
-    return Paragraph(700.0, 50.0, 50.0, 550.0, 680.0, 710.0, 10.0, False)
+def paragraph(*, region_kind: str = "") -> Paragraph:
+    return Paragraph(
+        700.0,
+        50.0,
+        50.0,
+        550.0,
+        680.0,
+        710.0,
+        10.0,
+        False,
+        region_kind=region_kind,
+    )
 
 
 def converter_with(translator) -> TranslateConverter:
@@ -116,6 +143,168 @@ class ItalicClassifierTests(unittest.TestCase):
             char._pdf2zh_layout_class = 0
         self.assertIsNone(_is_high_confidence_prose_italic(protected, 10.0))
         self.assertFalse(_has_inline_prose_context("g={v3}+x", 3))
+
+    def test_page_edge_labels_and_adjacent_multiword_styles_are_released(self) -> None:
+        runs = [
+            fake_mixed_run(
+                [
+                    ("Abstract", "Times-BoldItalic"),
+                    ("—In", "Times-Bold"),
+                ]
+            ),
+            fake_run("SE class labels", fontname="Times-BoldItalic"),
+            fake_run("enrollment audio samples", fontname="Times-BoldItalic"),
+            fake_run("(or", fontname="Times-Bold"),
+            fake_run(")", fontname="Times-Bold"),
+            fake_mixed_run(
+                [
+                    ("IndexTerms", "Times-BoldItalic"),
+                    ("—Deep", "Times-Bold"),
+                ]
+            ),
+        ]
+        segments = [
+            "{v0}",
+            (
+                "many scenarios use target {v1} and {v2}{v3} "
+                "audio queries{v4}, which are prerecorded examples."
+            ),
+            "{v5}",
+        ]
+
+        candidates = _collect_translatable_italic_runs(
+            runs,
+            [0, 1, 1, 1, 1, 2],
+            [paragraph(), paragraph(), paragraph()],
+            segments,
+        )
+
+        self.assertEqual(
+            candidates,
+            {
+                0: "Abstract—In",
+                1: "SE class labels",
+                2: "enrollment audio samples",
+                3: "(or",
+                5: "IndexTerms—Deep",
+            },
+        )
+        label_tagged, label_ids = _tag_translatable_italic_formulas(
+            segments[0], candidates
+        )
+        tagged, ids = _tag_translatable_italic_formulas(segments[1], candidates)
+        index_tagged, index_ids = _tag_translatable_italic_formulas(
+            segments[2], candidates
+        )
+        self.assertEqual(label_ids, (0,))
+        self.assertEqual(ids, (1, 2, 3))
+        self.assertEqual(index_ids, (5,))
+        self.assertIn(
+            "[[PDF2ZH_ITALIC_0_BEGIN]]Abstract—In",
+            label_tagged,
+        )
+        self.assertIn(
+            "[[PDF2ZH_ITALIC_2_BEGIN]]enrollment audio samples",
+            tagged,
+        )
+        self.assertIn("[[PDF2ZH_ITALIC_3_BEGIN]](or", tagged)
+        self.assertIn("audio queries{v4}", tagged)
+        self.assertIn(
+            "[[PDF2ZH_ITALIC_5_BEGIN]]IndexTerms—Deep",
+            index_tagged,
+        )
+
+    def test_math_identifiers_products_names_and_ieee_titles_stay_protected(self) -> None:
+        protected = (
+            "Senior Member IEEE",
+            "Marc Delcroix",
+            "SoundBeam model",
+            "Q factor",
+            "sin x",
+            "iSWAP gate",
+        )
+        for text in protected:
+            with self.subTest(text=text):
+                self.assertIsNone(
+                    _is_high_confidence_prose_italic(fake_run(text), 10.0)
+                )
+
+    def test_formula_only_subsections_and_runin_headings_are_released(self) -> None:
+        runs = [
+            fake_run("A. Data"),
+            fake_run("C. Evaluation Metrics"),
+            fake_mixed_run(
+                [
+                    (
+                        "Extraction of new SE classes with few-shot adaptation:",
+                        "Times-Italic",
+                    ),
+                ]
+            ),
+            fake_mixed_run(
+                [
+                    ("1) Class Label Encoder:", "Times-Italic"),
+                ]
+            ),
+            fake_mixed_run(
+                [
+                    (
+                        "2) Extraction Results With Real Mixtures:",
+                        "Times-Italic",
+                    ),
+                ]
+            ),
+        ]
+        segments = [f"{{v{index}}}" for index in range(len(runs))]
+
+        candidates = _collect_translatable_italic_runs(
+            runs,
+            list(range(len(runs))),
+            [
+                paragraph(region_kind="title"),
+                paragraph(region_kind="title"),
+                paragraph(region_kind="plain text"),
+                paragraph(region_kind="plain text"),
+                paragraph(region_kind="plain text"),
+            ],
+            segments,
+        )
+
+        self.assertEqual(
+            candidates,
+            {
+                0: "A. Data",
+                1: "C. Evaluation Metrics",
+                2: "Extraction of new SE classes with few-shot adaptation:",
+                3: "1) Class Label Encoder:",
+                4: "2) Extraction Results With Real Mixtures:",
+            },
+        )
+
+    def test_section_shape_does_not_release_math_or_non_title_labels(self) -> None:
+        runs = [
+            fake_run("A. Data"),
+            fake_run("A. x"),
+            fake_mixed_run(
+                [
+                    ("Encoder: ", "Times-Italic"),
+                    ("x", "CMMI10"),
+                ]
+            ),
+        ]
+
+        candidates = _collect_translatable_italic_runs(
+            runs,
+            [0, 1, 2],
+            [
+                paragraph(region_kind="plain text"),
+                paragraph(region_kind="title"),
+                paragraph(region_kind="plain text"),
+            ],
+            ["{v0}", "{v1}", "{v2}"],
+        )
+
+        self.assertEqual(candidates, {})
 
 
 class ItalicMarkupTests(unittest.TestCase):
@@ -167,7 +356,40 @@ class ItalicMarkupTests(unittest.TestCase):
             )
         )
 
-    def test_styled_translation_and_fail_closed_fallback(self) -> None:
+    def test_styled_english_is_visible_to_translation_quality_gate(self) -> None:
+        translator = CodexTranslator.__new__(CodexTranslator)
+        translator.lang_in = "en"
+        translator.lang_out = "zh-cn"
+        source = (
+            "use [[PDF2ZH_ITALIC_9_BEGIN]]enrollment audio samples"
+            "[[PDF2ZH_ITALIC_9_END]] as clues"
+        )
+        untranslated_style = (
+            "使用[[PDF2ZH_ITALIC_9_BEGIN]]enrollment audio samples"
+            "[[PDF2ZH_ITALIC_9_END]]作为线索"
+        )
+        translated_style = (
+            "使用[[PDF2ZH_ITALIC_9_BEGIN]]注册音频样本"
+            "[[PDF2ZH_ITALIC_9_END]]作为线索"
+        )
+
+        self.assertIsNone(
+            translator._accepted_styled_translation(
+                source,
+                untranslated_style,
+                [],
+            )
+        )
+        self.assertEqual(
+            translator._accepted_styled_translation(
+                source,
+                translated_style,
+                [],
+            ),
+            translated_style,
+        )
+
+    def test_styled_translation_and_plain_prose_fallback(self) -> None:
         source = "frequency tuned {v12} by flux"
         converted = converter_with(FakeStyledTranslator())._translate_planned_segments(
             [source],
@@ -187,7 +409,7 @@ class ItalicMarkupTests(unittest.TestCase):
             612.0,
             italic_candidates={12: "in situ"},
         )[0]
-        self.assertEqual(fallback, source)
+        self.assertEqual(fallback, "frequency tuned in situ by flux")
 
     def test_target_text_operator_uses_and_resets_synthetic_italic(self) -> None:
         italic = _gen_target_text_op("noto", 10.0, 20.0, 30.0, "4e2d", True)

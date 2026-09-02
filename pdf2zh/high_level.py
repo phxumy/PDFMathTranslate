@@ -183,11 +183,18 @@ def _build_layout_mask(
         detection.value: detection.class_name for detection in detections
     }
     text_regions: list[tuple[tuple[int, int, int, int], float]] = []
+    semantic_text_regions: list[tuple[tuple[int, int, int, int], float]] = []
 
     for detection in detections:
         if detection.class_name in _NON_TEXT_LAYOUT_CLASSES:
             continue
         text_regions.append((detection.bounds, detection.confidence))
+        if detection.class_name == "title" or detection.class_name in (
+            _CAPTION_LAYOUT_CLASSES
+        ):
+            semantic_text_regions.append(
+                (detection.bounds, detection.confidence)
+            )
         _paint_layout_region(
             layout_box,
             confidence_map,
@@ -231,16 +238,24 @@ def _build_layout_mask(
             )
 
     # Formula boxes take final precedence inside a caption so their original PDF
-    # glyphs and equation numbers are never sent through translation.
+    # glyphs and equation numbers are never sent through translation.  A weak
+    # formula box that is a near-exact duplicate of a stronger semantic title or
+    # caption is a detector conflict, however, rather than an inline formula;
+    # retain the stronger semantic label in that narrow case.
     for detection in detections:
         if detection.class_name in _FORMULA_LAYOUT_CLASSES:
+            defer_formula = _abandon_matches_stronger_text_region(
+                detection.bounds,
+                detection.confidence,
+                semantic_text_regions,
+            )
             _paint_layout_region(
                 layout_box,
                 confidence_map,
                 detection.bounds,
                 0,
                 detection.confidence,
-                force=True,
+                force=not defer_formula,
             )
 
     return layout_box, region_types

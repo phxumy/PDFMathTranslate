@@ -9,10 +9,12 @@ ROLE_TRANSLATE = "translate"
 ROLE_PRESERVE = "preserve"
 ROLE_REFERENCE = "reference"
 ROLE_AFFILIATION = "affiliation"
+RUNNING_HEADER_REGION_KIND = "running_header"
 
 _TRANSLATABLE_CAPTION_REGION_KINDS = frozenset(
     {"figure_caption", "table_caption", "table_footnote"}
 )
+_RUNNING_HEADER_SOURCE_REGION_KINDS = frozenset({"", "plain text"})
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,36 @@ class SourceSegment:
     page_width: float = 0.0
     break_offsets: tuple[int, ...] = ()
     region_kind: str = ""
+    page_height: float = 0.0
+
+
+def is_running_header_segment(segment: SourceSegment) -> bool:
+    """Return whether an ordinary segment is a top-margin running header.
+
+    Journal running heads are often split into several parser segments by page
+    numbers, dates, or styled spans. Their stable signal is geometry: a single
+    short line inside the page's very top margin. Semantic regions such as
+    titles and captions are deliberately excluded even when a layout model
+    places them near the top of a page.
+    """
+
+    if segment.region_kind not in _RUNNING_HEADER_SOURCE_REGION_KINDS:
+        return False
+    page_height = float(segment.page_height)
+    if page_height <= 0.0:
+        return False
+    if not segment.text.strip() or segment.size <= 0.0:
+        return False
+    line_height = float(segment.y1) - float(segment.y0)
+    if line_height <= 0.0:
+        return False
+    if segment.y0 < page_height * 0.94:
+        return False
+    if segment.y1 > page_height * 1.01:
+        return False
+    if segment.size > page_height * 0.016:
+        return False
+    return line_height <= max(segment.size * 1.5, page_height * 0.015)
 
 
 @dataclass(frozen=True)
@@ -486,6 +518,61 @@ def looks_like_author_list(text: str) -> bool:
     )
 
 
+_STRICT_BYLINE_NAME_TOKEN_RE = re.compile(
+    r"(?:[A-Z]\.)|"
+    r"(?:[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+)|"
+    r"(?:de|del|der|di|du|la|le|van|von)",
+)
+
+
+def _looks_like_detector_title_byline(segment: SourceSegment) -> bool:
+    """Preserve only a compact, upper-page author line mislabeled as a title.
+
+    Layout models occasionally assign the paper byline to the broad ``title``
+    class.  Text alone cannot reliably distinguish ``John Smith and Jane Doe``
+    from a short Title Case paper title, so require both strict name-list syntax
+    and byline-like page geometry.  Real paper titles remain translatable even
+    when the older broad author heuristic happens to match them.
+    """
+
+    page_height = float(segment.page_height)
+    if (
+        page_height <= 0.0
+        or segment.size <= 0.0
+        or segment.size > page_height * 0.019
+        or segment.y0 < page_height * 0.48
+    ):
+        return False
+    compact = _FORMULA_RE.sub(" ", segment.text)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if (
+        not compact
+        or len(compact) > 240
+        or re.search(r"[:：;；!?！？]", compact)
+        or not looks_like_author_list(compact)
+        or _count_author_names(compact) < 2
+        or _author_name_coverage(compact) < 0.72
+    ):
+        return False
+    entries = [
+        entry.strip()
+        for entry in re.split(r"\s*(?:,|\band\b|&)\s*", compact)
+        if entry.strip()
+    ]
+    if not 2 <= len(entries) <= 20:
+        return False
+    for entry in entries:
+        tokens = entry.split()
+        if not 2 <= len(tokens) <= 5:
+            return False
+        if any(
+            _STRICT_BYLINE_NAME_TOKEN_RE.fullmatch(token) is None
+            for token in tokens
+        ):
+            return False
+    return True
+
+
 def _affiliation_boundary(text: str, keyword_start: int) -> int:
     prefix = text[:keyword_start]
     marker = re.search(
@@ -637,6 +724,12 @@ class DocumentTranslationPolicy:
         if not stripped:
             return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
 
+        if (
+            segment.region_kind == RUNNING_HEADER_REGION_KIND
+            or is_running_header_segment(segment)
+        ):
+            return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
+
         # A detector-confirmed caption or table note is semantic prose, not a
         # byline or bibliography block.  Route it directly to translation so
         # incidental Title Case phrases cannot trigger author-name heuristics.
@@ -668,6 +761,18 @@ class DocumentTranslationPolicy:
                         ),
                     ),
                 )
+
+            if protect_authors and _looks_like_detector_title_byline(segment):
+                return SegmentPlan(
+                    segment,
+                    (SegmentPart(ROLE_PRESERVE, text),),
+                )
+
+            # A layout-model-confirmed title is semantic prose.  Do not let
+            # the deliberately broad author-list heuristic reinterpret a
+            # long Title Case paper title (especially one containing “and”)
+            # as a byline.
+            return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))
 
         heading = _REFERENCE_HEADING_RE.fullmatch(stripped)
         if heading:

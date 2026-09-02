@@ -4,11 +4,14 @@ import unittest
 from unittest.mock import patch
 
 from pdf2zh.converter import (
+    Paragraph,
     TranslateConverter,
     _MATH_FONT_RE,
+    _collect_translatable_italic_runs,
     _formula_horizontal_geometry,
     _is_hidden_glyph_repertoire_probe,
     _merge_overlapping_split_math_islands,
+    _split_formula_prose_boundaries,
     _remove_absorbed_formula_base,
     _segment_contains_prose,
     _should_bridge_cross_class_inline_script,
@@ -19,6 +22,8 @@ from pdf2zh.converter import (
     _split_trailing_prose_openers,
     _split_trailing_prose_punctuation,
     _split_trailing_formula_prose_word,
+    _split_trailing_formula_prose_clause,
+    _split_trailing_runin_connector,
 )
 
 
@@ -228,6 +233,106 @@ class SplitMathIslandTests(unittest.TestCase):
 
 
 class FormulaTrailingProseTests(unittest.TestCase):
+    def test_roman_connector_is_released_from_italic_runin_heading(self) -> None:
+        heading = "Simultaneous extraction of multiple SEs:"
+        connector = "In"
+        run: list[FakeChar] = []
+        x = 0.0
+        for value in heading:
+            if value.isspace():
+                x += 3.0
+                continue
+            run.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    y0=100.0,
+                    y1=110.0,
+                    size=10.0,
+                    layout_class=2,
+                    fontname="Times-Italic",
+                )
+            )
+            x += 4.0
+        x += 2.0
+        for value in connector:
+            run.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    y0=100.0,
+                    y1=110.0,
+                    size=10.0,
+                    layout_class=2,
+                    fontname="Times-Roman",
+                )
+            )
+            x += 4.0
+
+        formula, prose, prose_chars = _split_trailing_runin_connector(
+            run,
+            paragraph_layout_class=2,
+        )
+
+        self.assertEqual("".join(char.get_text() for char in formula), heading.replace(" ", ""))
+        self.assertEqual(prose, " In")
+        self.assertEqual("".join(char.get_text() for char in prose_chars), connector)
+
+    def test_runin_connector_split_rejects_unlisted_or_unsafe_shapes(self) -> None:
+        def make_run(connector: str, *, heading_font: str = "Times-Italic"):
+            values = "Heading words:"
+            run: list[FakeChar] = []
+            x = 0.0
+            for value in values:
+                if value.isspace():
+                    x += 3.0
+                    continue
+                run.append(
+                    FakeChar(
+                        value,
+                        x0=x,
+                        x1=x + 4.0,
+                        y0=100.0,
+                        y1=110.0,
+                        size=10.0,
+                        layout_class=2,
+                        fontname=heading_font,
+                    )
+                )
+                x += 4.0
+            x += 2.0
+            for value in connector:
+                run.append(
+                    FakeChar(
+                        value,
+                        x0=x,
+                        x1=x + 4.0,
+                        y0=100.0,
+                        y1=110.0,
+                        size=10.0,
+                        layout_class=2,
+                        fontname="Times-Roman",
+                    )
+                )
+                x += 4.0
+            return run
+
+        for run, layout_class in (
+            (make_run("Because"), 2),
+            (make_run("The", heading_font="Times-Roman"), 2),
+            (make_run("The"), 0),
+        ):
+            with self.subTest(layout_class=layout_class):
+                self.assertEqual(
+                    _split_trailing_runin_connector(
+                        run,
+                        paragraph_layout_class=layout_class,
+                    ),
+                    (run, "", []),
+                )
+
     def test_vector_followed_by_denotes_is_returned_to_prose(self) -> None:
         chars = [
             FakeChar("r", x0=100, x1=105),
@@ -256,6 +361,233 @@ class FormulaTrailingProseTests(unittest.TestCase):
         self.assertEqual(prose, "is")
         self.assertEqual("".join(ch.get_text() for ch in prose_chars), "is")
 
+    def test_formula_closer_followed_by_copula_is_returned_to_prose(self) -> None:
+        chars = [
+            FakeChar("·", x0=100, x1=105, fontname="CMSY10"),
+            FakeChar(")", x0=105, x1=108, fontname="CMR10"),
+            FakeChar("i", x0=110, x1=113),
+            FakeChar("s", x0=113, x1=116),
+        ]
+
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(chars)
+
+        self.assertEqual("".join(ch.get_text() for ch in formula), "·)")
+        self.assertEqual(prose, " is")
+        self.assertEqual("".join(ch.get_text() for ch in prose_chars), "is")
+
+    def test_closed_connectors_and_arrow_legend_are_returned_to_prose(self) -> None:
+        cases = [
+            (
+                [
+                    FakeChar("N", x0=100, x1=105, fontname="CMMI10"),
+                    FakeChar("=", x0=105, x1=110, fontname="CMR10"),
+                    FakeChar("4", x0=110, x1=115, fontname="CMR10"),
+                    FakeChar(")", x0=115, x1=118, fontname="CMR10"),
+                    FakeChar("i", x0=120, x1=123),
+                    FakeChar("n", x0=123, x1=127),
+                ],
+                "N=4)",
+                " in",
+            ),
+            (
+                [
+                    FakeChar("x", x0=100, x1=105, fontname="CMMI10"),
+                    FakeChar(")", x0=105, x1=108, fontname="CMR10"),
+                    FakeChar("a", x0=110, x1=114),
+                    FakeChar("n", x0=114, x1=118),
+                    FakeChar("d", x0=118, x1=122),
+                ],
+                "x)",
+                " and",
+            ),
+            (
+                [
+                    FakeChar("↓", x0=100, x1=105, fontname="CMSY10"),
+                    *[
+                        FakeChar(
+                            letter,
+                            x0=108 + index * 4,
+                            x1=112 + index * 4,
+                        )
+                        for index, letter in enumerate("indicates")
+                    ],
+                ],
+                "↓",
+                " indicates",
+            ),
+        ]
+        for chars, formula_text, prose_text in cases:
+            with self.subTest(source="".join(ch.get_text() for ch in chars)):
+                formula, prose, prose_chars = _split_trailing_formula_prose_word(
+                    chars,
+                    has_prose_context=True,
+                )
+                self.assertEqual(
+                    "".join(ch.get_text() for ch in formula), formula_text
+                )
+                self.assertEqual(prose, prose_text)
+                self.assertEqual(
+                    "".join(ch.get_text() for ch in prose_chars),
+                    prose_text.strip(),
+                )
+
+    def test_trailing_word_split_preserves_class_zero_and_math_words(self) -> None:
+        protected = [
+            FakeChar("↓", fontname="CMSY10", layout_class=0),
+            *[FakeChar(letter, layout_class=0) for letter in "indicates"],
+        ]
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(
+            protected
+        )
+        self.assertEqual(formula, protected)
+        self.assertEqual((prose, prose_chars), ("", []))
+
+    def test_short_connectors_require_prose_context_and_safe_geometry(self) -> None:
+        formula_only = [
+            FakeChar("f", x0=0, x1=4, fontname="CMMI10"),
+            FakeChar("(", x0=4, x1=6, fontname="CMR10"),
+            FakeChar("x", x0=6, x1=10, fontname="CMMI10"),
+            FakeChar(")", x0=10, x1=12, fontname="CMR10"),
+            FakeChar("a", x0=14, x1=18),
+            FakeChar("n", x0=18, x1=22),
+            FakeChar("d", x0=22, x1=26),
+        ]
+        self.assertEqual(
+            _split_trailing_formula_prose_word(formula_only),
+            (formula_only, "", []),
+        )
+
+        unsafe_cases = []
+        for mutation in ("distant", "rotated", "small"):
+            chars = [
+                FakeChar("x", x0=0, x1=4, fontname="CMMI10"),
+                FakeChar(")", x0=4, x1=6, fontname="CMR10"),
+                FakeChar("i", x0=8, x1=11),
+                FakeChar("n", x0=11, x1=14),
+            ]
+            if mutation == "distant":
+                chars[2].x0, chars[2].x1 = 20, 23
+                chars[3].x0, chars[3].x1 = 23, 26
+            elif mutation == "rotated":
+                chars[2].matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+            else:
+                chars[2].size = chars[3].size = 6.0
+            unsafe_cases.append((mutation, chars))
+        for mutation, chars in unsafe_cases:
+            with self.subTest(mutation=mutation):
+                self.assertEqual(
+                    _split_trailing_formula_prose_word(
+                        chars,
+                        has_prose_context=True,
+                    ),
+                    (chars, "", []),
+                )
+
+        logical_class_zero = [
+            FakeChar("x", x0=0, x1=4, fontname="CMMI10"),
+            FakeChar(")", x0=4, x1=6, fontname="CMR10"),
+            FakeChar("i", x0=8, x1=11),
+            FakeChar("n", x0=11, x1=14),
+        ]
+        self.assertEqual(
+            _split_trailing_formula_prose_word(
+                logical_class_zero,
+                has_prose_context=True,
+                paragraph_layout_class=0,
+            ),
+            (logical_class_zero, "", []),
+        )
+
+        math_word = [
+            FakeChar("x", fontname="CMMI10"),
+            *[FakeChar(letter, fontname="CMMI10") for letter in "and"],
+        ]
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(
+            math_word
+        )
+        self.assertEqual(formula, math_word)
+        self.assertEqual((prose, prose_chars), ("", []))
+
+        mixed_font_sin = [
+            FakeChar("s", fontname="CMMI10"),
+            FakeChar("i", fontname="Times-Roman"),
+            FakeChar("n", fontname="Times-Roman"),
+        ]
+        formula, prose, prose_chars = _split_trailing_formula_prose_word(
+            mixed_font_sin
+        )
+        self.assertEqual(formula, mixed_font_sin)
+        self.assertEqual((prose, prose_chars), ("", []))
+
+    def test_closed_quoted_clause_is_split_after_italic_word(self) -> None:
+        chars = []
+        x = 0.0
+        for value in "sounds":
+            chars.append(
+                FakeChar(value, x0=x, x1=x + 4, fontname="Times-Italic")
+            )
+            x += 4
+        for value, gap in zip(
+            '.“Beam”refers',
+            [0, 2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+            strict=True,
+        ):
+            x += gap
+            chars.append(
+                FakeChar(value, x0=x, x1=x + 4, fontname="Times-Roman")
+            )
+            x += 4
+
+        formula, prose, prose_chars = _split_trailing_formula_prose_clause(chars)
+
+        self.assertEqual("".join(ch.get_text() for ch in formula), "sounds")
+        self.assertEqual(prose, '. “Beam” refers')
+        self.assertEqual(
+            "".join(ch.get_text() for ch in prose_chars),
+            '.“Beam”refers',
+        )
+
+        protected = list(chars)
+        for char in protected:
+            char._pdf2zh_layout_class = 0
+        self.assertEqual(
+            _split_trailing_formula_prose_clause(protected),
+            (protected, "", []),
+        )
+
+    def test_closed_quoted_clause_rejects_unsafe_geometry_and_shape(self) -> None:
+        def make_clause(
+            suffix: str = '.“Beam”refers',
+        ) -> list[FakeChar]:
+            result: list[FakeChar] = []
+            x = 0.0
+            for value in "sounds" + suffix:
+                fontname = (
+                    "Times-Italic" if len(result) < len("sounds") else "Times-Roman"
+                )
+                result.append(
+                    FakeChar(value, x0=x, x1=x + 4, fontname=fontname)
+                )
+                x += 4
+            return result
+
+        unsafe = {
+            "rotated": make_clause(),
+            "mixed_size": make_clause(),
+            "zero_size": make_clause(),
+            "unbalanced_quote": make_clause('.“Beam refers'),
+            "unknown_verb": make_clause('.“Beam”changes'),
+        }
+        unsafe["rotated"][-1].matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+        unsafe["mixed_size"][-1].size = 6.0
+        unsafe["zero_size"][-1].size = 0.0
+        for name, chars in unsafe.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _split_trailing_formula_prose_clause(chars),
+                    (chars, "", []),
+                )
+
     def test_math_function_and_arbitrary_formula_label_are_not_split(self) -> None:
         prefix = [FakeChar("∫", fontname="AdvP4C4E74")]
         for word in ("max", "energy"):
@@ -276,6 +608,548 @@ class FormulaTrailingProseTests(unittest.TestCase):
         original = list(segments)
         _merge_overlapping_split_math_islands(segments, formulas, [0, 0, 0], chars)
         self.assertEqual(segments, original)
+
+
+class FormulaProseBoundarySplitTests(unittest.TestCase):
+    @staticmethod
+    def _paragraph(*, layout_class: int = 4) -> Paragraph:
+        return Paragraph(
+            100.0,
+            0.0,
+            0.0,
+            300.0,
+            90.0,
+            110.0,
+            9.0,
+            False,
+            layout_class=layout_class,
+            region_kind="plain text",
+        )
+
+    @staticmethod
+    def _italic_phrase(text: str, *, x0: float = 0.0) -> list[FakeChar]:
+        result: list[FakeChar] = []
+        x = x0
+        for value in text:
+            if value == " ":
+                x += 2.0
+                continue
+            result.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    fontname="Times-Italic",
+                    layout_class=4,
+                )
+            )
+            x += 4.0
+        return result
+
+    def test_italic_descriptor_and_terminal_math_variable_are_split(self) -> None:
+        prefix = self._italic_phrase("of possible SE classes")
+        comma_x = prefix[-1].x1
+        comma = FakeChar(
+            ",",
+            x0=comma_x,
+            x1=comma_x + 2.0,
+            fontname="Times-Roman",
+            layout_class=4,
+        )
+        variable = FakeChar(
+            "N",
+            x0=comma.x1 + 2.0,
+            x1=comma.x1 + 8.0,
+            fontname="CMMI10",
+            layout_class=4,
+        )
+        segments = ["The first system uses {v0} [25] in experiments."]
+        formulas = [[*prefix, comma, variable]]
+        lines = [[]]
+        offsets = [0.0]
+        formula_paragraphs = [0]
+        paragraphs = [self._paragraph()]
+
+        _split_formula_prose_boundaries(
+            segments,
+            formulas,
+            lines,
+            offsets,
+            formula_paragraphs,
+            paragraphs,
+        )
+
+        self.assertEqual(
+            segments,
+            ["The first system uses {v0}, {v1} [25] in experiments."],
+        )
+        self.assertEqual(
+            "".join(ch.get_text() for ch in formulas[0]),
+            "ofpossibleSEclasses",
+        )
+        self.assertEqual("".join(ch.get_text() for ch in formulas[1]), "N")
+        self.assertEqual(
+            (
+                len(lines),
+                len(offsets),
+                len(formula_paragraphs),
+            ),
+            (len(formulas),) * 3,
+        )
+        self.assertEqual(segments[0].count("{v0}"), 1)
+        self.assertEqual(segments[0].count("{v1}"), 1)
+
+    def test_math_variable_and_quoted_italic_descriptor_are_split(self) -> None:
+        variable = FakeChar(
+            "N", x0=0.0, x1=6.0, fontname="CMMI10", layout_class=4
+        )
+        suffix = self._italic_phrase('“seen” SE classes', x0=9.0)
+        segments = ["limited to the {v0} encountered during training"]
+        formulas = [[variable, *suffix]]
+        lines = [[]]
+        offsets = [0.0]
+        formula_paragraphs = [0]
+        paragraphs = [self._paragraph()]
+
+        _split_formula_prose_boundaries(
+            segments,
+            formulas,
+            lines,
+            offsets,
+            formula_paragraphs,
+            paragraphs,
+        )
+
+        self.assertEqual(
+            segments,
+            ["limited to the {v0} {v1} encountered during training"],
+        )
+        self.assertEqual("".join(ch.get_text() for ch in formulas[0]), "N")
+        self.assertEqual(
+            "".join(ch.get_text() for ch in formulas[1]),
+            '“seen”SEclasses',
+        )
+        self.assertEqual(
+            (
+                len(lines),
+                len(offsets),
+                len(formula_paragraphs),
+            ),
+            (len(formulas),) * 3,
+        )
+        self.assertEqual(segments[0].count("{v0}"), 1)
+        self.assertEqual(segments[0].count("{v1}"), 1)
+
+    def test_italic_word_and_superscript_footnote_are_split_and_styled(self) -> None:
+        word = self._italic_phrase("samples")
+        footnote = FakeChar(
+            "2",
+            x0=word[-1].x1 + 0.2,
+            x1=word[-1].x1 + 3.4,
+            y0=-1.2,
+            y1=5.1,
+            size=6.3,
+            fontname="Times-Roman",
+            layout_class=4,
+        )
+        segments = ["derived from enrollment audio {v0}. With more data"]
+        formulas = [[*word, footnote]]
+        lines = [[]]
+        offsets = [0.0]
+        formula_paragraphs = [0]
+        paragraphs = [self._paragraph()]
+
+        _split_formula_prose_boundaries(
+            segments,
+            formulas,
+            lines,
+            offsets,
+            formula_paragraphs,
+            paragraphs,
+        )
+
+        self.assertEqual(
+            segments,
+            ["derived from enrollment audio {v0}{v1}. With more data"],
+        )
+        self.assertEqual("".join(ch.get_text() for ch in formulas[0]), "samples")
+        self.assertEqual("".join(ch.get_text() for ch in formulas[1]), "2")
+        self.assertAlmostEqual(offsets[1], -1.2)
+        self.assertEqual(
+            _collect_translatable_italic_runs(
+                formulas,
+                formula_paragraphs,
+                paragraphs,
+                segments,
+            ),
+            {0: "samples"},
+        )
+        self.assertEqual(
+            (len(lines), len(offsets), len(formula_paragraphs)),
+            (len(formulas),) * 3,
+        )
+
+    def test_superscript_footnote_split_rejects_unsafe_or_mathematical_shapes(self) -> None:
+        def make_formula(kind: str) -> list[FakeChar]:
+            word_text = "cm" if kind == "short_word" else "samples"
+            word = self._italic_phrase(word_text)
+            footnote = FakeChar(
+                "2",
+                x0=word[-1].x1 + 0.2,
+                x1=word[-1].x1 + 3.4,
+                y0=-1.2,
+                y1=5.1,
+                size=6.3,
+                fontname="Times-Roman",
+                layout_class=4,
+            )
+            if kind == "baseline":
+                footnote.y0, footnote.y1 = 0.0, 9.0
+            elif kind == "distant":
+                footnote.x0 += 10.0
+                footnote.x1 += 10.0
+            elif kind == "full_size":
+                footnote.size = 9.0
+            elif kind == "rotated":
+                footnote.matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+            elif kind == "class_zero":
+                footnote._pdf2zh_layout_class = 0
+            return [*word, footnote]
+
+        for kind in (
+            "short_word",
+            "baseline",
+            "distant",
+            "full_size",
+            "rotated",
+            "class_zero",
+        ):
+            with self.subTest(kind=kind):
+                formula = make_formula(kind)
+                segments = ["derived from {v0}. With more data"]
+                formulas = [formula]
+                lines = [[]]
+                offsets = [0.0]
+                formula_paragraphs = [0]
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    lines,
+                    offsets,
+                    formula_paragraphs,
+                    [self._paragraph()],
+                )
+                self.assertEqual(segments, ["derived from {v0}. With more data"])
+                self.assertEqual(formulas, [formula])
+                self.assertEqual(
+                    (len(lines), len(offsets), len(formula_paragraphs)),
+                    (1, 1, 1),
+                )
+
+    def test_math_variable_dimensional_suffix_is_released_to_prose(self) -> None:
+        variable = FakeChar(
+            "D", x0=0.0, x1=6.0, fontname="CMMI10", layout_class=4
+        )
+        suffix = []
+        x = 6.2
+        for value in "-dimensional":
+            suffix.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    fontname="Times-Roman",
+                    layout_class=4,
+                )
+            )
+            x += 4.0
+        segments = ["uses a {v0} target embedding vector"]
+        formulas = [[variable, *suffix]]
+
+        _split_formula_prose_boundaries(
+            segments,
+            formulas,
+            [[]],
+            [0.0],
+            [0],
+            [self._paragraph()],
+        )
+
+        self.assertEqual(segments, ["uses a {v0}-dimensional target embedding vector"])
+        self.assertEqual("".join(ch.get_text() for ch in formulas[0]), "D")
+
+    def test_dimensional_suffix_split_rejects_unsafe_or_unlisted_shapes(self) -> None:
+        for variable_text, suffix_text, context, mutation in (
+            ("D", "-dimensional", "uses {v0} target embedding", "missing_article"),
+            ("D", "-dimensional", "uses a {v0} target embedding", "ordinary_base"),
+            ("D", "-dimensional", "uses a {v0} target embedding", "distant"),
+            ("D", "-dimensional", "uses a {v0} target embedding", "rotated"),
+            ("D", "-dimensional", "uses a {v0} target embedding", "class_zero"),
+            ("N", "-body", "uses a {v0} target embedding", "unlisted_suffix"),
+            ("x", "-axis", "uses a {v0} target embedding", "unlisted_suffix"),
+        ):
+            with self.subTest(mutation=mutation, suffix=suffix_text):
+                variable = FakeChar(
+                    variable_text,
+                    x0=0.0,
+                    x1=6.0,
+                    fontname="CMMI10",
+                    layout_class=4,
+                )
+                suffix = []
+                x = 6.2
+                for value in suffix_text:
+                    suffix.append(
+                        FakeChar(
+                            value,
+                            x0=x,
+                            x1=x + 4.0,
+                            fontname="Times-Roman",
+                            layout_class=4,
+                        )
+                    )
+                    x += 4.0
+                if mutation == "ordinary_base":
+                    variable.fontname = "Times-Italic"
+                elif mutation == "distant":
+                    suffix[0].x0 += 10.0
+                    suffix[0].x1 += 10.0
+                elif mutation == "rotated":
+                    suffix[0].matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+                elif mutation == "class_zero":
+                    suffix[0]._pdf2zh_layout_class = 0
+                formula = [variable, *suffix]
+                segments = [context]
+                formulas = [formula]
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    [[]],
+                    [0.0],
+                    [0],
+                    [self._paragraph()],
+                )
+                self.assertEqual(segments, [context])
+                self.assertEqual(formulas, [formula])
+
+    def test_math_variable_ordinal_suffix_is_released_to_prose(self) -> None:
+        for variable_text, noun in (("n", "SE class"), ("t", "frame")):
+            with self.subTest(variable=variable_text):
+                variable = FakeChar(
+                    variable_text,
+                    x0=0.0,
+                    x1=5.0,
+                    fontname="CMMI10",
+                    layout_class=4,
+                )
+                suffix = [
+                    FakeChar(
+                        value,
+                        x0=5.1 + index * 4.0,
+                        x1=9.1 + index * 4.0,
+                        fontname="Times-Roman",
+                        layout_class=4,
+                    )
+                    for index, value in enumerate("-th")
+                ]
+                segments = [f"source signal from the {{v0}} {noun}"]
+                formulas = [[variable, *suffix]]
+
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    [[]],
+                    [0.0],
+                    [0],
+                    [self._paragraph()],
+                )
+
+                self.assertEqual(
+                    segments,
+                    [f"source signal from the {{v0}}-th {noun}"],
+                )
+                self.assertEqual(
+                    "".join(ch.get_text() for ch in formulas[0]),
+                    variable_text,
+                )
+
+    def test_ordinal_suffix_split_rejects_unsafe_or_nonprose_shapes(self) -> None:
+        cases = (
+            ("n", "-th", "compare {v0} values", "missing_ordinal_context"),
+            ("n", "-axis", "compare the {v0} direction", "unlisted_suffix"),
+            ("n", "-th", "compare the {v0} value", "ordinary_base"),
+            ("n", "-th", "compare the {v0} value", "distant"),
+            ("n", "-th", "compare the {v0} value", "rotated"),
+            ("n", "-th", "compare the {v0} value", "class_zero"),
+        )
+        for variable_text, suffix_text, context, mutation in cases:
+            with self.subTest(mutation=mutation):
+                variable = FakeChar(
+                    variable_text,
+                    x0=0.0,
+                    x1=5.0,
+                    fontname="CMMI10",
+                    layout_class=4,
+                )
+                suffix = [
+                    FakeChar(
+                        value,
+                        x0=5.1 + index * 4.0,
+                        x1=9.1 + index * 4.0,
+                        fontname="Times-Roman",
+                        layout_class=4,
+                    )
+                    for index, value in enumerate(suffix_text)
+                ]
+                if mutation == "ordinary_base":
+                    variable.fontname = "Times-Roman"
+                elif mutation == "distant":
+                    suffix[0].x0 += 10.0
+                    suffix[0].x1 += 10.0
+                elif mutation == "rotated":
+                    suffix[0].matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+                elif mutation == "class_zero":
+                    suffix[0]._pdf2zh_layout_class = 0
+                formula = [variable, *suffix]
+                segments = [context]
+                formulas = [formula]
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    [[]],
+                    [0.0],
+                    [0],
+                    [self._paragraph()],
+                )
+                self.assertEqual(segments, [context])
+                self.assertEqual(formulas, [formula])
+
+    def test_terminal_variable_split_rejects_unsafe_math_geometry(self) -> None:
+        def make_formula(kind: str) -> tuple[list[FakeChar], list[list[object]]]:
+            prefix = self._italic_phrase("of possible SE classes")
+            comma_x = prefix[-1].x1
+            comma = FakeChar(
+                ",",
+                x0=comma_x,
+                x1=comma_x + 2.0,
+                fontname="Times-Roman",
+                layout_class=4,
+            )
+            variable = FakeChar(
+                "N",
+                x0=comma.x1 + 2.0,
+                x1=comma.x1 + 8.0,
+                fontname="CMMI10",
+                layout_class=4,
+            )
+            lines: list[list[object]] = [[]]
+            if kind == "distant":
+                variable.x0 += 10.0
+                variable.x1 += 10.0
+            elif kind == "superscript":
+                variable.y0 += 3.0
+                variable.y1 += 3.0
+            elif kind == "small":
+                variable.size = 6.0
+            elif kind == "rotated":
+                variable.matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+            elif kind == "line_formula":
+                lines = [[object()]]
+            elif kind == "subscript":
+                return [*prefix, comma, variable, FakeChar("i")], lines
+            return [*prefix, comma, variable], lines
+
+        for kind in (
+            "distant",
+            "superscript",
+            "small",
+            "rotated",
+            "line_formula",
+            "subscript",
+        ):
+            with self.subTest(kind=kind):
+                formula, lines = make_formula(kind)
+                segments = ["ordinary prose {v0} remains"]
+                formulas = [formula]
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    lines,
+                    [0.0],
+                    [0],
+                    [self._paragraph()],
+                )
+                self.assertEqual(segments, ["ordinary prose {v0} remains"])
+                self.assertEqual(len(formulas), 1)
+
+    def test_quoted_suffix_requires_a_natural_language_tail(self) -> None:
+        for suffix_text in ('“seen” X', '“seen” SE'):
+            with self.subTest(suffix=suffix_text):
+                variable = FakeChar(
+                    "N",
+                    x0=0.0,
+                    x1=6.0,
+                    fontname="CMMI10",
+                    layout_class=4,
+                )
+                suffix = self._italic_phrase(suffix_text, x0=9.0)
+                segments = ["ordinary prose {v0} remains"]
+                formulas = [[variable, *suffix]]
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    [[]],
+                    [0.0],
+                    [0],
+                    [self._paragraph()],
+                )
+                self.assertEqual(segments, ["ordinary prose {v0} remains"])
+                self.assertEqual(len(formulas), 1)
+
+    def test_boundary_split_rejects_class_zero_short_and_nonmath_tails(self) -> None:
+        cases = [
+            (
+                [
+                    *self._italic_phrase("signal energy"),
+                    FakeChar(",", fontname="Times-Roman", layout_class=4),
+                    FakeChar("N", fontname="CMMI10", layout_class=4),
+                ],
+                self._paragraph(),
+            ),
+            (
+                [
+                    *self._italic_phrase("possible output signal"),
+                    FakeChar(",", fontname="Times-Roman", layout_class=4),
+                    FakeChar("N", fontname="Times-Italic", layout_class=4),
+                ],
+                self._paragraph(),
+            ),
+            (
+                [
+                    *self._italic_phrase("possible output signal"),
+                    FakeChar(",", fontname="Times-Roman", layout_class=0),
+                    FakeChar("N", fontname="CMMI10", layout_class=0),
+                ],
+                self._paragraph(),
+            ),
+            (
+                [
+                    *self._italic_phrase("possible output signal"),
+                    FakeChar(",", fontname="Times-Roman", layout_class=4),
+                    FakeChar("N", fontname="CMMI10", layout_class=4),
+                ],
+                self._paragraph(layout_class=0),
+            ),
+        ]
+        for formula, paragraph in cases:
+            with self.subTest(source="".join(ch.get_text() for ch in formula)):
+                segments = ["ordinary prose {v0} remains"]
+                formulas = [formula]
+                _split_formula_prose_boundaries(
+                    segments, formulas, [[]], [0.0], [0], [paragraph]
+                )
+                self.assertEqual(segments, ["ordinary prose {v0} remains"])
+                self.assertEqual(len(formulas), 1)
 
 
 def chars(text: str) -> list[FakeChar]:
@@ -598,7 +1472,12 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         converter.vchar = ""
         converter.translator = type("Translator", (), {"name": "google"})()
 
-        with patch("pdf2zh.converter.LTChar", FakeChar):
+        with (
+            patch("pdf2zh.converter.LTChar", FakeChar),
+            patch(
+                "pdf2zh.converter._split_formula_prose_boundaries"
+            ) as split_boundaries,
+        ):
             draft = converter.receive_layout(
                 FakePage([*prose, base, subscript_m, subscript_j, period]),
                 preview_only=True,
@@ -607,6 +1486,220 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         self.assertEqual(draft.sstk, ["value {v0}."])
         self.assertEqual(draft.formula_texts, ["φmj"])
         self.assertEqual(draft.varp, [0])
+        split_boundaries.assert_not_called()
+
+    def test_receive_layout_keeps_runin_heading_and_body_in_one_segment(
+        self,
+    ) -> None:
+        class FakePage(list):
+            pageid = 1
+            width = 300.0
+            height = 200.0
+
+        class FakeLayout:
+            shape = (200, 300)
+
+            def __getitem__(self, position: tuple[int, int]) -> int:
+                return 4
+
+        values: list[FakeChar] = []
+        x = 10.0
+        for value in "Extraction of classes:":
+            if value.isspace():
+                x += 3.0
+                continue
+            values.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    y0=100.0,
+                    y1=109.0,
+                    size=9.0,
+                    fontname="Times-Italic",
+                )
+            )
+            x += 4.0
+        x += 2.0
+        for value in "The":
+            values.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    y0=100.0,
+                    y1=109.0,
+                    size=9.0,
+                    fontname="Times-Roman",
+                )
+            )
+            x += 4.0
+        x += 5.0
+        for value in "number":
+            values.append(
+                FakeChar(
+                    value,
+                    x0=x,
+                    x1=x + 4.0,
+                    y0=100.0,
+                    y1=109.0,
+                    size=9.0,
+                    fontname="Times-Roman",
+                )
+            )
+            x += 4.0
+
+        converter = TranslateConverter.__new__(TranslateConverter)
+        converter.layout = {1: FakeLayout()}
+        converter.layout_region_types = {1: {4: "plain text"}}
+        converter.vfont = ""
+        converter.vchar = ""
+        converter.translator = type("Translator", (), {"name": "google"})()
+
+        with patch("pdf2zh.converter.LTChar", FakeChar):
+            draft = converter.receive_layout(
+                FakePage(values),
+                preview_only=True,
+            )
+
+        self.assertEqual(draft.sstk, ["{v0} The number"])
+        self.assertEqual(draft.formula_texts, ["Extractionofclasses:"])
+        self.assertEqual(draft.varp, [0])
+
+    def test_receive_layout_detaches_sentence_period_when_formula_closes_at_class_boundary(
+        self,
+    ) -> None:
+        class FakePage(list):
+            pageid = 1
+            width = 300.0
+            height = 200.0
+
+        class FakeLayout:
+            shape = (200, 300)
+
+            def __getitem__(self, position: tuple[int, int]) -> int:
+                _y, x = position
+                return 5 if x >= 90 else 4
+
+        prose = [
+            FakeChar(
+                letter,
+                x0=10.0 + 4.0 * index,
+                x1=14.0 + 4.0 * index,
+                y0=100.0,
+                y1=109.0,
+                size=9.0,
+            )
+            for index, letter in enumerate("where")
+        ]
+        variable = FakeChar(
+            "x",
+            x0=32.0,
+            x1=37.0,
+            y0=100.0,
+            y1=109.0,
+            size=9.0,
+            fontname="CMMI10",
+        )
+        period = FakeChar(
+            ".",
+            x0=37.1,
+            x1=39.0,
+            y0=100.0,
+            y1=109.0,
+            size=9.0,
+            fontname="Times-Roman",
+        )
+        next_paragraph = [
+            FakeChar(
+                letter,
+                x0=100.0 + 4.0 * index,
+                x1=104.0 + 4.0 * index,
+                y0=80.0,
+                y1=89.0,
+                size=9.0,
+            )
+            for index, letter in enumerate("Next")
+        ]
+        converter = TranslateConverter.__new__(TranslateConverter)
+        converter.layout = {1: FakeLayout()}
+        converter.layout_region_types = {
+            1: {4: "plain text", 5: "plain text"}
+        }
+        converter.vfont = ""
+        converter.vchar = ""
+        converter.translator = type("Translator", (), {"name": "google"})()
+
+        with patch("pdf2zh.converter.LTChar", FakeChar):
+            draft = converter.receive_layout(
+                FakePage([*prose, variable, period, *next_paragraph]),
+                preview_only=True,
+            )
+
+        self.assertEqual(draft.sstk, ["where {v0}.", "Next"])
+        self.assertEqual(draft.formula_texts, ["x"])
+        self.assertEqual(draft.varp, [0])
+
+    def test_receive_layout_keeps_period_in_formula_only_run_at_class_boundary(
+        self,
+    ) -> None:
+        class FakePage(list):
+            pageid = 1
+            width = 300.0
+            height = 200.0
+
+        class FakeLayout:
+            shape = (200, 300)
+
+            def __getitem__(self, position: tuple[int, int]) -> int:
+                _y, x = position
+                return 5 if x >= 90 else 4
+
+        formula = [
+            FakeChar(
+                "x",
+                x0=10.0,
+                x1=15.0,
+                y0=100.0,
+                y1=109.0,
+                size=9.0,
+                fontname="CMMI10",
+            ),
+            FakeChar(
+                ".",
+                x0=15.1,
+                x1=17.0,
+                y0=100.0,
+                y1=109.0,
+                size=9.0,
+                fontname="Times-Roman",
+            ),
+        ]
+        next_paragraph = FakeChar(
+            "N",
+            x0=100.0,
+            x1=105.0,
+            y0=80.0,
+            y1=89.0,
+            size=9.0,
+        )
+        converter = TranslateConverter.__new__(TranslateConverter)
+        converter.layout = {1: FakeLayout()}
+        converter.layout_region_types = {
+            1: {4: "plain text", 5: "plain text"}
+        }
+        converter.vfont = ""
+        converter.vchar = ""
+        converter.translator = type("Translator", (), {"name": "google"})()
+
+        with patch("pdf2zh.converter.LTChar", FakeChar):
+            draft = converter.receive_layout(
+                FakePage([*formula, next_paragraph]),
+                preview_only=True,
+            )
+
+        self.assertEqual(draft.sstk, ["{v0}", "N"])
+        self.assertEqual(draft.formula_texts, ["x."])
 
     def test_cross_class_script_bridge_rejects_footnote_and_new_paragraph(self) -> None:
         base = FakeChar("p", x0=100.0, x1=105.0, y0=100.0, y1=109.0)

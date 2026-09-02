@@ -45,6 +45,12 @@ _REFERENCE_VOLUME_PAGE_END_RE = re.compile(
     r"(?:[A-Za-z]?\d{2,}(?:\s*[-\u2013\u2014]\s*\d+)?|e\d+)\.?\s*$",
     re.IGNORECASE,
 )
+_REFERENCE_AUTHOR_NAME_RE = re.compile(
+    r"(?<![A-Za-z])(?:[A-Z]\.(?:\s*)?){1,4}"
+    r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+|"
+    r"(?<![A-Za-z])[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{2,},\s*"
+    r"(?:[A-Z]\.(?:\s*)?){1,4}"
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -139,11 +145,61 @@ def _looks_like_body_prose(segment: FlowSegment) -> bool:
         return False
     if len(_ENGLISH_WORD_RE.findall(text)) < 2:
         return False
-    if reference_entry_score(text) >= 3:
+    if _looks_like_reference_segment(text):
         return False
     if looks_like_author_list(text) or looks_like_affiliation(text):
         return False
     return True
+
+
+def _looks_like_reference_segment(text: str) -> bool:
+    """Reject bibliography prose only when its structure supports the score.
+
+    ``reference_entry_score`` deliberately combines several weak signals.  That
+    is useful for bibliography routing, but a score of three is not sufficient
+    by itself at a reading-flow boundary.  Ordinary prose can contain both
+    several commas and a section reference followed by a capitalized sentence
+    (for example, ``Section V-B. When ...``); the latter resembles an author
+    initial and surname to the scoring regex.
+
+    Keep the conservative exclusion for a leading numbered reference, a strong
+    score, or a scored fragment with a bibliography-style terminal.  This
+    preserves the independent reference-continuation path while allowing
+    ordinary multi-sentence body text to participate in column/page flow.
+    """
+
+    compact = text.strip()
+    markers = find_reference_markers(compact)
+    if any(not compact[: marker.start].strip() for marker in markers):
+        return True
+    score = reference_entry_score(compact)
+    if score >= 4:
+        return True
+    return score >= 3 and (
+        _has_reference_terminal(compact)
+        or _has_incomplete_reference_author_structure(compact)
+    )
+
+
+def _has_incomplete_reference_author_structure(text: str) -> bool:
+    """Recognize an unnumbered citation tail without mistaking body prose.
+
+    A reference marker can be emitted as its own PDF segment, leaving the
+    following author/title fragment apparently unnumbered and unfinished.  Two
+    author-name shapes are strong evidence; one is accepted only at the start
+    of a comma-rich fragment.  The latter deliberately does not match the
+    ``Section V-B. When ...`` body case that motivated the score-three
+    relaxation because its lone initial/surname-like token is embedded later.
+    """
+
+    matches = list(_REFERENCE_AUTHOR_NAME_RE.finditer(text))
+    if len(matches) >= 2:
+        return True
+    return bool(
+        matches
+        and not text[: matches[0].start()].strip()
+        and text.count(",") >= 2
+    )
 
 
 def _column_index(segment: FlowSegment) -> int | None:

@@ -469,6 +469,24 @@ class CodexContinuationTests(unittest.TestCase):
             with self.subTest(name=name):
                 self._assert_group_rejected(sources, targets)
 
+    def test_unchanged_short_styled_span_rejects_the_whole_group(self) -> None:
+        sources = [
+            (
+                f"Systems use {ITALIC_0_BEGIN}enrollment audio samples"
+                f"{ITALIC_0_END}"
+            ),
+            "to identify a target sound.",
+        ]
+        invalid_targets = [
+            (
+                f"系统使用{ITALIC_0_BEGIN}enrollment audio samples"
+                f"{ITALIC_0_END}"
+            ),
+            "来识别目标声音。",
+        ]
+
+        self._assert_group_rejected(sources, invalid_targets)
+
     def test_flow_tokens_crossing_or_loss_rejects_the_whole_group(self) -> None:
         sources = [f"The first clause{FLOW_0}", f"{FLOW_1}continues here."]
         cases = {
@@ -657,6 +675,53 @@ class CodexContinuationTests(unittest.TestCase):
         self.assertEqual(len(translator.cache.values), 1)
         cached_payload = json.loads(translator.cache.set_calls[0][1])
         self.assertEqual(cached_payload, {"translations": valid})
+
+    def test_extreme_cross_column_text_load_is_retried(self) -> None:
+        translator = translator_stub()
+        sources = [
+            "We define the TSE problem as the extraction of one",
+            (
+                "or multiple desired sounds from a mixture of various sound "
+                "events, given user-specified clues characterizing the target "
+                "sound-event classes."
+            ),
+        ]
+        overloaded = [
+            (
+                "我们将 TSE 问题定义为：给定用户指定的、表征目标声音事件类别的"
+                "线索，从多种声音事件的混合信号中提取一个"
+            ),
+            "或多个所需声音。",
+        ]
+        balanced = [
+            "我们将 TSE 问题定义为",
+            (
+                "给定用户指定的、表征目标声音事件类别的线索，从多种声音事件的"
+                "混合信号中提取一个或多个所需声音。"
+            ),
+        ]
+        attempts = iter((overloaded, balanced))
+        calls = 0
+
+        def request(texts, normalized_contexts, join_kind, **kwargs):
+            nonlocal calls
+            calls += 1
+            return list(next(attempts))
+
+        translator._run_continuation_request = request
+
+        result = translator.translate_continuation_fragments(
+            sources,
+            join_kind="column:normal",
+        )
+
+        self.assertEqual(result, balanced)
+        self.assertEqual(calls, 2)
+        self.assertEqual(len(translator.cache.set_calls), 1)
+        self.assertEqual(
+            json.loads(translator.cache.set_calls[0][1]),
+            {"translations": balanced},
+        )
 
 
 if __name__ == "__main__":

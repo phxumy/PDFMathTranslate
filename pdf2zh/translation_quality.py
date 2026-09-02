@@ -45,22 +45,32 @@ _SOFTWARE_PRODUCT_SUFFIXES = (
     "works",
 )
 _SOURCE_CROSS_REFERENCE_RE = re.compile(
-    r"\b(?P<label>fig(?:ure)?s?|eq(?:uation)?s?|refs?|references?)\.?(?![A-Za-z])"
+    r"\b(?P<label>figures?|figs?\.?|tables?|tbls?\.?|"
+    r"equations?|eqs?\.?|references?|refs?\.?)(?![A-Za-z])"
     r"\s*(?:[（(]\s*)?"
-    r"(?P<identifier>\{\{v\d+\}\}|\{v\d+\}|[A-Za-z]?\d+(?:\.\d+)?[A-Za-z]?)"
+    r"(?P<identifier>\{\{v\d+\}\}|\{v\d+\}|(?-i:[IVXLCDM]+)|"
+    r"[A-Za-z]?\d+(?:\.\d+)?[A-Za-z]?)(?![A-Za-z0-9])"
     r"(?:\s*[）)])?",
     re.IGNORECASE,
 )
 _CROSS_REFERENCE_TERMINAL_RE = re.compile(r"^[\s\u00a0]*[。．.!?！？]")
 _TARGET_CROSS_REFERENCE_LABELS = {
     "figure": r"图",
+    "table": r"表",
     "equation": r"(?:方程|公式|(?<![模方形公算等样])式)",
     "reference": r"(?:参考文献|文献)",
 }
 _TARGET_CROSS_REFERENCE_SAFE_TAILS = {
     "figure": r"(?:所示|的结果)?",
+    "table": r"(?:所示|中)?",
     "equation": r"(?:所示|中|可见)?",
     "reference": r"(?:中报道|中所述|所述)?",
+}
+_SOURCE_CROSS_REFERENCE_LABELS = {
+    "figure": r"fig(?:ure)?s?",
+    "table": r"(?:tables?|tbls?)",
+    "equation": r"eq(?:uation)?s?",
+    "reference": r"(?:refs?|references?)",
 }
 _SCIENTIFIC_UNIT_SYMBOLS = frozenset(
     {
@@ -314,6 +324,8 @@ def normalize_scientific_cross_reference_placement(
         kind = (
             "figure"
             if raw_label.startswith("fig")
+            else "table"
+            if raw_label.startswith(("tab", "tbl"))
             else "equation"
             if raw_label.startswith("eq")
             else "reference"
@@ -332,6 +344,11 @@ def normalize_scientific_cross_reference_placement(
     normalized = target
     consumed: dict[tuple[str, str], int] = {}
     for kind, identifier, source_is_terminal in references:
+        normalized = _normalize_duplicate_cross_reference_labels(
+            normalized,
+            kind,
+            identifier,
+        )
         key = (kind, identifier.casefold())
         used = consumed.get(key, 0)
         correct = _target_cross_reference_pattern(kind, identifier)
@@ -386,7 +403,10 @@ def _target_identifier_pattern(identifier: str) -> str:
     return (
         rf"(?<![A-Za-z0-9.])(?:"
         rf"[（(]\s*{escaped}\s*[）)]|{escaped}(?!\s*[）)])"
-        rf")(?![A-Za-z0-9.])"
+        # A sentence/caption-final ASCII full stop is punctuation, not part of
+        # the identifier.  Still reject decimal/version continuations such as
+        # ``1.2`` so a shorter identifier cannot match their prefix.
+        rf")(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))"
     )
 
 
@@ -395,6 +415,27 @@ def _target_cross_reference_pattern(kind: str, identifier: str) -> re.Pattern[st
         rf"(?:{_TARGET_CROSS_REFERENCE_LABELS[kind]})"
         rf"[\s\u00a0]*{_target_identifier_pattern(identifier)}"
     )
+
+
+def _normalize_duplicate_cross_reference_labels(
+    target: str,
+    kind: str,
+    identifier: str,
+) -> str:
+    """Collapse one bilingual or duplicated label for an explicit source ref."""
+
+    target_label = _TARGET_CROSS_REFERENCE_LABELS[kind]
+    identifier_pattern = _target_identifier_pattern(identifier)
+    bilingual = re.compile(
+        rf"(?i)(?<![A-Za-z])(?:{_SOURCE_CROSS_REFERENCE_LABELS[kind]})"
+        rf"\.?(?![A-Za-z])\s*(?=(?:{target_label})\s*{identifier_pattern})"
+    )
+    normalized = bilingual.sub("", target, count=1)
+    duplicated = re.compile(
+        rf"(?P<label>{target_label})\s*(?:{target_label})"
+        rf"(?=\s*{identifier_pattern})"
+    )
+    return duplicated.sub(lambda match: match.group("label"), normalized, count=1)
 
 
 def _repair_one_misplaced_cross_reference(

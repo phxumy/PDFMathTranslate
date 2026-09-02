@@ -125,14 +125,79 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
     def test_correct_cross_references_are_unchanged(self) -> None:
         cases = (
             ("See Fig. 5.", "见图5。"),
+            (
+                "Fig. 1. Schematic diagram of a target extraction system.",
+                "图 1. 目标提取系统示意图。",
+            ),
             ("Equation (6) gives the rate.", "方程（6）给出该速率。"),
             ("See reference {v20}.", "见参考文献{v20}。"),
+            ("See Table VI for the results.", "结果见表 VI。"),
         )
         for source, target in cases:
             with self.subTest(target=target):
                 self.assertEqual(
                     normalize_scientific_cross_reference_placement(source, target),
                     target,
+                )
+
+    def test_lowercase_words_after_table_are_not_roman_identifiers(self) -> None:
+        cases = (
+            ("Table mixing results are summarized here.", "此处汇总混合结果。"),
+            ("Table is useful for comparison.", "该表便于比较。"),
+            ("Table data remain available.", "表格数据仍然可用。"),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+
+    def test_full_reference_word_does_not_cross_a_sentence_boundary(self) -> None:
+        source = (
+            "We report the averaged results in the table. "
+            "{v5} and {v6} are the attenuation values."
+        )
+        target = "表中报告平均结果。{v5}和{v6}为衰减值。"
+
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(source, target),
+            target,
+        )
+
+    def test_abbreviated_reference_labels_may_precede_placeholders(self) -> None:
+        cases = (
+            ("See Fig. {v5} for the curve.", "曲线见图{v5}。"),
+            ("According to Eq. {v6}, the rate falls.", "根据式{v6}，速率下降。"),
+            ("See Ref. {v7} for details.", "详见参考文献{v7}。"),
+            ("Tbl. {v8} lists the values.", "表{v8}列出了这些数值。"),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+
+    def test_figure_number_does_not_match_decimal_prefix(self) -> None:
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                "See Fig. 1 for the layout.",
+                "布局见图 1.2。",
+            )
+        )
+
+    def test_duplicate_and_bilingual_reference_labels_are_collapsed(self) -> None:
+        cases = (
+            ("Fig. 4 shows the result.", "图图 4 展示了结果。", "图 4 展示了结果。"),
+            ("Fig. 4 shows the result.", "Fig. 图 4 展示了结果。", "图 4 展示了结果。"),
+            ("Table VI lists the result.", "Table 表 VI 列出了结果。", "表 VI 列出了结果。"),
+        )
+        for source, target, expected in cases:
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    expected,
                 )
 
     def test_unbalanced_equation_reference_parentheses_are_balanced(self) -> None:

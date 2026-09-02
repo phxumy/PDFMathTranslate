@@ -26,6 +26,46 @@ def translator_stub() -> CodexTranslator:
 
 
 class CodexReferenceTranslationTests(unittest.TestCase):
+    def test_curly_quoted_title_uses_deterministic_complete_span(self) -> None:
+        translator = translator_stub()
+        title = (
+            "Audio set: An ontology and human-labeled dataset for audio events"
+        )
+        entry = (
+            f'[57] J. F. Gemmeke et al., “{title},” in {{v47}}., '
+            "2017, pp. 776–780."
+        )
+        seen_titles: list[str] = []
+
+        def translate_exact(titles: list[str]) -> list[str]:
+            seen_titles.extend(titles)
+            return ["音频集：用于音频事件的本体与人工标注数据集"]
+
+        translator._run_exact_reference_title_batch = translate_exact
+
+        def unexpected_discovery(entries: list[str]):
+            self.fail(f"quoted title should not use boundary discovery: {entries}")
+
+        translator._run_discovered_reference_title_batch = unexpected_discovery
+
+        result = translator.translate_reference_entries([entry])[0]
+
+        self.assertEqual(seen_titles, [title])
+        self.assertEqual(
+            result,
+            '[57] J. F. Gemmeke et al., “音频集：用于音频事件的本体与人工标注数据集,” '
+            "in {v47}., 2017, pp. 776–780.",
+        )
+        self.assertEqual(len(translator.cache.values), 1)
+
+    def test_curly_quote_extractor_excludes_delimiter_punctuation(self) -> None:
+        self.assertEqual(
+            CodexTranslator._quoted_reference_title_spans(
+                '[1] A. Smith, “Main title: Complete subtitle,” in Journal.'
+            ),
+            ("Main title: Complete subtitle",),
+        )
+
     def test_named_product_with_translated_explanation_is_cached(self) -> None:
         translator = translator_stub()
         title = (

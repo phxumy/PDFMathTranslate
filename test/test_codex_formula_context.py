@@ -627,6 +627,47 @@ class CodexFormulaContextTests(unittest.TestCase):
             )
         )
 
+    def test_wordlike_formula_cluster_restores_source_boundary_space(self) -> None:
+        translator = translator_stub()
+        source = "We introduce {v7}{v8}, a TSE model."
+        target = "我们引入一种 TSE 模型{v7}{v8}。"
+        context = translator._normalize_formula_context(
+            source,
+            {"{v7}": "Sound-", "{v8}": "Beam"},
+        )
+
+        self.assertEqual(
+            translator._accepted_contextual_translation(
+                source,
+                target,
+                context,
+            ),
+            "我们引入一种 TSE 模型 {v7}{v8}。",
+        )
+
+    def test_formula_spacing_repair_ignores_math_and_source_adjacency(self) -> None:
+        translator = translator_stub()
+        cases = (
+            ("The value {v0} is fixed.", "值{v0}固定。", {"{v0}": "x^S"}),
+            ("target{v0} class", "目标{v0} 类别", {"{v0}": "FSD50K"}),
+            ("Class {v0} is active.", "类别{v0}处于活动状态。", {"{v0}": "N"}),
+            ("Use {v0} samples.", "使用{v0}个样本。", {"{v0}": "1234"}),
+        )
+        for source, target, raw_context in cases:
+            with self.subTest(source=source):
+                context = translator._normalize_formula_context(
+                    source,
+                    raw_context,
+                )
+                self.assertEqual(
+                    translator._accepted_contextual_translation(
+                        source,
+                        target,
+                        context,
+                    ),
+                    target,
+                )
+
     def test_formula_context_path_repairs_reference_placeholder_placement(
         self,
     ) -> None:
@@ -827,10 +868,11 @@ class ConverterFormulaContextTests(unittest.TestCase):
             readonly_formula_contexts={2: "g_{12}"},
         )[0]
 
-        self.assertEqual(result, source)
+        plain_source = "The device is tuned in situ while {v2} remains fixed."
+        self.assertEqual(result, plain_source)
         self.assertEqual(
             translator.ordinary_calls,
-            [([source], [{"{v2}": "g_{12}"}])],
+            [([plain_source], [{"{v2}": "g_{12}"}])],
         )
 
 

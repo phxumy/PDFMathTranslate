@@ -153,6 +153,37 @@ class LayoutOverlapTests(unittest.TestCase):
         self.assertEqual(layout[4, 2], 3)
         self.assertEqual(layout[6, 4], 0)
 
+    def test_weak_duplicate_formula_does_not_erase_stronger_title(self) -> None:
+        layout, region_types = _build_layout_mask(
+            _FakeLayout(
+                [
+                    _FakeBox(0, (2, 2, 8, 4), confidence=0.80),
+                    _FakeBox(1, (2, 2, 8, 4), confidence=0.26),
+                ],
+                {0: "title", 1: "isolate_formula"},
+            ),
+            10,
+            10,
+        )
+
+        self.assertEqual(region_types, {2: "title", 3: "isolate_formula"})
+        self.assertTrue(np.all(layout[6:8, 2:8] == 2))
+
+    def test_stronger_duplicate_formula_still_preserves_content(self) -> None:
+        layout, _ = _build_layout_mask(
+            _FakeLayout(
+                [
+                    _FakeBox(0, (2, 2, 8, 4), confidence=0.60),
+                    _FakeBox(1, (2, 2, 8, 4), confidence=0.90),
+                ],
+                {0: "title", 1: "isolate_formula"},
+            ),
+            10,
+            10,
+        )
+
+        self.assertTrue(np.all(layout[6:8, 2:8] == 0))
+
 
 if __name__ == "__main__":
     unittest.main()

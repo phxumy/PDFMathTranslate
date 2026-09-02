@@ -9,6 +9,7 @@ from pdf2zh.translation_policy import (
     ROLE_PRESERVE,
     ROLE_REFERENCE,
     ROLE_TRANSLATE,
+    RUNNING_HEADER_REGION_KIND,
     SourceSegment,
     apply_exact_replacements,
     find_reference_markers,
@@ -79,6 +80,142 @@ class TitleBadgeTests(unittest.TestCase):
             [(ROLE_TRANSLATE, source)],
         )
 
+    def test_detector_confirmed_long_title_bypasses_author_heuristics(self) -> None:
+        source = (
+            "SoundBeam: Target Sound Extraction Conditioned on Sound-Class "
+            "Labels and Enrollment Clues for Increased Performance and "
+            "Continuous Learning"
+        )
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                page_width=612.0,
+                region_kind="title",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_TRANSLATE, source)],
+        )
+
+    def test_short_upper_page_byline_mislabeled_as_title_is_preserved(self) -> None:
+        source = "John Smith and Jane Doe"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                y0=610.0,
+                y1=624.0,
+                size=11.0,
+                page_width=612.0,
+                page_height=792.0,
+                region_kind="title",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_PRESERVE, source)],
+        )
+
+    def test_short_title_case_paper_title_is_still_translated(self) -> None:
+        source = "Deep Learning and Neural Networks"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                y0=610.0,
+                y1=642.0,
+                size=20.0,
+                page_width=612.0,
+                page_height=792.0,
+                region_kind="title",
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_TRANSLATE, source)],
+        )
+
+
+class RunningHeaderTests(unittest.TestCase):
+    def test_top_margin_short_line_is_preserved(self) -> None:
+        source = "IEEE/ACM TRANSACTIONS ON AUDIO, SPEECH, AND LANGUAGE PROCESSING"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                y0=753.18,
+                y1=760.15,
+                size=6.97,
+                page_width=594.0,
+                page_height=792.0,
+            )
+        )
+
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_PRESERVE, source)],
+        )
+
+    def test_explicit_running_header_kind_is_preserved(self) -> None:
+        source = "A short running title"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                region_kind=RUNNING_HEADER_REGION_KIND,
+            )
+        )
+
+        self.assertEqual([part.role for part in plan.parts], [ROLE_PRESERVE])
+
+    def test_top_title_and_caption_are_not_reclassified(self) -> None:
+        for kind in ("title", "figure_caption", "table_caption"):
+            with self.subTest(kind=kind):
+                source = "A semantic region that should be translated"
+                plan = DocumentTranslationPolicy().plan_segment(
+                    SourceSegment(
+                        index=0,
+                        text=source,
+                        y0=753.0,
+                        y1=761.0,
+                        size=7.0,
+                        page_width=594.0,
+                        page_height=792.0,
+                        region_kind=kind,
+                    )
+                )
+                self.assertEqual(
+                    [part.role for part in plan.parts],
+                    [ROLE_TRANSLATE],
+                )
+
+    def test_body_and_bottom_note_are_not_running_headers(self) -> None:
+        cases = ((719.0, 729.0), (49.0, 66.0))
+        for y0, y1 in cases:
+            with self.subTest(y0=y0):
+                source = "This ordinary scientific sentence requires translation."
+                plan = DocumentTranslationPolicy().plan_segment(
+                    SourceSegment(
+                        index=0,
+                        text=source,
+                        y0=y0,
+                        y1=y1,
+                        size=9.96,
+                        page_width=594.0,
+                        page_height=792.0,
+                        region_kind="plain text",
+                    )
+                )
+                self.assertEqual(
+                    [part.role for part in plan.parts],
+                    [ROLE_TRANSLATE],
+                )
+
 
 class NamedProseSectionTests(unittest.TestCase):
     def test_acknowledgement_name_list_is_translated_as_prose(self) -> None:
@@ -95,6 +232,7 @@ class NamedProseSectionTests(unittest.TestCase):
             [(part.role, part.text) for part in paragraph.parts],
             [(ROLE_TRANSLATE, source)],
         )
+
 
 class ReferenceMarkerTests(unittest.TestCase):
     def test_square_bracket_formula_and_supplement_markers(self) -> None:

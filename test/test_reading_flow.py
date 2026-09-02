@@ -102,6 +102,112 @@ class ReadingFlowDetectionTests(unittest.TestCase):
         self.assertEqual(len(edges), 1)
         self.assertEqual(edges[0].kind, "column")
 
+    def test_body_with_section_abbreviation_continues_across_columns(
+        self,
+    ) -> None:
+        """A section label followed by prose must not look like an author."""
+
+        left = segment(
+            11,
+            10,
+            "The results confirm that models trained without IS cannot detect "
+            "inactive classes well. In particular, the enrollment-based models "
+            "select the closest sound in the mixture, producing 0 dB. When using "
+            "IS, which adds 10 % of inactive SE classes to the",
+            column=0,
+            y0=49.6,
+            y1=143.2,
+        )
+        caption = segment(
+            11,
+            11,
+            "Fig. 5. ROC curves for inactive event detection using TSE models.",
+            column=1,
+            y0=514.4,
+            y1=531.4,
+            kind="figure_caption",
+        )
+        right = segment(
+            11,
+            12,
+            "training data as discussed in Section V-B, all models detect "
+            "inactive classes better with {v12} values below -20 dB.",
+            column=1,
+            y0=451.8,
+            y1=485.6,
+        )
+
+        edges = detect_page_edges([left, caption, right])
+
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].left, left.ref)
+        self.assertEqual(edges[0].right, right.ref)
+        self.assertEqual(edges[0].kind, "column")
+        groups = build_continuation_groups(
+            edges,
+            {item.ref: item.text for item in (left, caption, right)},
+        )
+        self.assertEqual(len(groups), 1)
+        left_span, right_span = groups[0].fragments
+        self.assertTrue(
+            left.text[left_span.start : left_span.end].endswith("to the")
+        )
+        self.assertEqual(
+            right.text[right_span.start : right_span.end],
+            right.text,
+        )
+        self.assertIn("{v12}", right.text[right_span.start : right_span.end])
+
+    def test_numbered_reference_is_not_joined_as_body_across_columns(
+        self,
+    ) -> None:
+        reference_tail = segment(
+            11,
+            20,
+            '[17] A. Author and B. Writer, "An unfinished article title',
+            column=0,
+            y0=49.6,
+            y1=143.2,
+        )
+        reference_head = segment(
+            11,
+            21,
+            'continued in another column," Journal Name, 2020.',
+            column=1,
+            y0=451.8,
+            y1=485.6,
+        )
+
+        self.assertEqual(
+            detect_page_edges([reference_tail, reference_head]),
+            [],
+        )
+
+    def test_unnumbered_incomplete_reference_tail_is_not_joined_as_body(
+        self,
+    ) -> None:
+        reference_tail = segment(
+            11,
+            20,
+            'A. Author, B. Writer, "An unfinished article title',
+            column=0,
+            y0=49.6,
+            y1=143.2,
+        )
+        reference_head = segment(
+            11,
+            21,
+            'continued in another column," Journal Name, 2020.',
+            column=1,
+            y0=451.8,
+            y1=485.6,
+        )
+
+        self.assertEqual(
+            detect_page_edges([reference_tail, reference_head]),
+            [],
+        )
+
     def test_next_page_float_caption_is_skipped_for_body_continuation(self) -> None:
         previous = [
             segment(

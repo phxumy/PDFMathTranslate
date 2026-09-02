@@ -7,7 +7,10 @@ from pdf2zh.converter import (
     PageLayoutDraft,
     Paragraph,
     TranslateConverter,
+    _classify_running_header_regions,
 )
+from pdf2zh.reading_flow import detect_cross_page_edge
+from pdf2zh.translation_policy import RUNNING_HEADER_REGION_KIND
 
 
 class FakeContinuationTranslator:
@@ -139,6 +142,52 @@ def yan_chain() -> tuple[PageLayoutDraft, PageLayoutDraft, PageLayoutDraft]:
 
 
 class ConverterContinuationTests(unittest.TestCase):
+    def test_running_header_is_preserved_and_excluded_from_page_flow(self) -> None:
+        previous = draft(
+            0,
+            ["The preceding discussion continues on the next physical page"],
+            [paragraph(0, column=1, y0=74.0, y1=111.0)],
+        )
+        header = Paragraph(
+            760.15,
+            38.0,
+            38.0,
+            556.0,
+            753.18,
+            760.15,
+            6.97,
+            False,
+            page_id=1,
+            layout_class=1,
+        )
+        following = draft(
+            1,
+            [
+                "IEEE journal running header for this page",
+                "and is completed by this ordinary body paragraph.",
+            ],
+            [header, paragraph(1, column=0, y0=488.0, y1=742.0)],
+        )
+
+        classified = _classify_running_header_regions(
+            following.sstk,
+            following.pstk,
+            page_width=following.width,
+            page_height=following.height,
+        )
+        previous_flow = TranslateConverter._draft_flow_segments(previous)
+        following_flow = TranslateConverter._draft_flow_segments(following)
+        edge = detect_cross_page_edge(previous_flow, following_flow)
+
+        self.assertEqual(classified, (0,))
+        self.assertEqual(
+            following.pstk[0].region_kind,
+            RUNNING_HEADER_REGION_KIND,
+        )
+        self.assertIsNotNone(edge)
+        assert edge is not None
+        self.assertEqual(edge.right.segment_index, 1)
+
     def test_yan_long_chain_uses_three_nonoverlapping_boundary_groups(self) -> None:
         translator = FakeContinuationTranslator()
         converter = converter_with(translator)
