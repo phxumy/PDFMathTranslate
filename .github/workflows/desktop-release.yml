@@ -132,7 +132,10 @@ jobs:
           $codexUrl = "https://github.com/openai/codex/releases/download/rust-v$env:CODEX_VERSION/codex-package-x86_64-pc-windows-msvc.tar.gz"
           Invoke-WebRequest -Uri $codexUrl -OutFile $codexArchive
           Assert-Sha256 $codexArchive $env:CODEX_SHA256
-          $codexRoot = Join-Path $releaseRoot "codex-cli"
+          # The official package contains bin/, codex-path/, and codex-resources/.
+          # Keep those siblings together under the portable target-triple folder
+          # that pdf2zh's Codex resolver and Login-Codex.cmd expect.
+          $codexRoot = Join-Path $releaseRoot "codex-cli\x86_64-pc-windows-msvc"
           New-Item -Path $codexRoot -ItemType Directory -Force | Out-Null
           tar -xzf $codexArchive -C $codexRoot
           if ($LASTEXITCODE -ne 0) {
@@ -193,6 +196,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           $releaseRoot = Join-Path $env:GITHUB_WORKSPACE "release-staging\$env:RELEASE_DIRECTORY"
           $codex = Join-Path $releaseRoot "codex-cli\x86_64-pc-windows-msvc\bin\codex.exe"
+          if (-not (Test-Path $codex -PathType Leaf)) {
+              throw "Bundled Codex CLI executable is missing from its portable path: $codex"
+          }
 
           $requiredTopLevel = @(
               "PDFMathTranslate-Codex.exe",
