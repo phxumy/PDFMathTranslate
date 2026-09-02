@@ -77,18 +77,32 @@ Codex CLI and the signed-in account.
 | GPT-5.6 Sol | `gpt-5.6-sol` | Flagship model for complex reasoning and high-quality work. The moving alias `gpt-5.6` currently routes to Sol. |
 | GPT-5.6 Terra | `gpt-5.6-terra` | Balanced intelligence and cost for everyday work. |
 | GPT-5.6 Luna | `gpt-5.6-luna` | Fast, cost-efficient model for repeatable or high-volume work such as translation. |
+| GPT-5.5 | `gpt-5.5` | Previous-generation model for coding and general work; still listed by the current Codex client catalog. |
+| GPT-5.4 | `gpt-5.4` | Legacy model still visible in some client catalogs. Official Codex guidance says it retired for ChatGPT sign-in on August 31, 2026. |
+| GPT-5.4 Mini | `gpt-5.4-mini` | Legacy smaller model still visible in some client catalogs. Official Codex guidance says it retired for ChatGPT sign-in on August 31, 2026. |
+| GPT-5.3 Codex Spark | `gpt-5.3-codex-spark` | Ultra-fast coding model listed by the current Codex client catalog. This is not the deprecated `gpt-5.3-codex` ID. |
 
 For example, `gpt-5.6-luna` with `CODEX_REASONING_EFFORT=max` requests **Luna
 with Max reasoning**. The lower-case suffix is the correct spelling. Do not enter
 only `luna`, `terra`, or `sol`: those short labels are not documented model IDs,
 and this fork does not expand them or silently fall back to another model.
 
+The model picker and the local model catalog can include legacy entries during
+client or service rollouts. The server still checks the signed-in account for
+every request. If an ID is misspelled, retired, or unavailable to that account,
+Codex CLI fails the request; the translator may retry the same ID and can
+eventually show an error or preserve the source text, but it never switches to
+another model automatically. For ChatGPT-authenticated Codex, OpenAI recommends
+replacing `gpt-5.4` with `gpt-5.6-terra` and `gpt-5.4-mini` with
+`gpt-5.6-luna`. API-key-authenticated Codex has separate model availability.
+
 This release accepts reasoning values `none`, `low`, `medium`, `high`, `xhigh`,
 and `max`; it does not accept `ultra` in the PDF translation backend. Model
 availability still depends on the signed-in plan, workspace policy, region, and
 OpenAI rollout. See the [official OpenAI model catalog](https://developers.openai.com/api/docs/models/gpt),
 [GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/latest-model),
-and [Codex availability notes](https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/).
+the [official Codex models guide](https://learn.chatgpt.com/docs/models), and
+[Codex availability notes](https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/).
 This program invokes Codex CLI; it does not turn a ChatGPT subscription into an
 OpenAI API key, and direct API usage is billed separately.
 

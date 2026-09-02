@@ -85,12 +85,23 @@ pdf2zh -i
 | GPT-5.6 Sol | `gpt-5.6-sol` | 旗舰模型；`gpt-5.6` 当前是指向 Sol 的滚动别名。 |
 | GPT-5.6 Terra | `gpt-5.6-terra` | 智能和成本均衡。 |
 | GPT-5.6 Luna | `gpt-5.6-luna` | 快速、经济，适合翻译等高吞吐任务。 |
+| GPT-5.5 | `gpt-5.5` | 上一代通用模型，当前客户端模型目录仍列出。 |
+| GPT-5.4 | `gpt-5.4` | 当前部分客户端仍显示；官方称其 ChatGPT 登录方式已于 2026-08-31 退役。 |
+| GPT-5.4 Mini | `gpt-5.4-mini` | 当前部分客户端仍显示；官方称其 ChatGPT 登录方式已于 2026-08-31 退役。 |
+| GPT-5.3 Codex Spark | `gpt-5.3-codex-spark` | 极速编程模型；不是已弃用的 `gpt-5.3-codex`。 |
 
 模型 ID 会作为 `codex exec --model` 的参数原样传入。`gpt-5.6-luna` 中的小写
 `luna` 是正确写法；只写 `luna` 并不是官方模型 ID。本 fork 不会改写模型名称或在
 模型无效时静默回退。留空则由 Codex CLI 和当前登录账户选择默认模型。模型可用范围
-取决于套餐、工作区、地区和发布状态，请同时查看 [OpenAI 官方模型目录](https://developers.openai.com/api/docs/models/gpt)
-和 [Codex 可用范围说明](https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/)。
+取决于套餐、工作区、地区和发布状态，请同时查看 [OpenAI 官方模型目录](https://developers.openai.com/api/docs/models/gpt)、
+[Codex 官方模型说明](https://learn.chatgpt.com/docs/models)和
+[Codex 可用范围说明](https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/)。
+
+模型 ID 拼错、已经退役或当前账户无权使用时，Codex CLI 会让请求失败。翻译器可能
+使用相同 ID 重试，最终在界面报错或保留源文，但不会偷偷改用另一模型。官方已建议
+ChatGPT 登录用户用 `gpt-5.6-terra` 代替 `gpt-5.4`、用 `gpt-5.6-luna` 代替
+`gpt-5.4-mini`。菜单在灰度更新期间仍可能暂时列出旧条目；API Key 登录不受这项
+ChatGPT 登录退役规则影响。
 
 本后端支持 `none`、`low`、`medium`、`high`、`xhigh`、`max` 六种推理强度；
 `ultra` 不是当前 PDF 翻译后端可填写的值。例如 `gpt-5.6-luna` 与 `max` 的组合表示
