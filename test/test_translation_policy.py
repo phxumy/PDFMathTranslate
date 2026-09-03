@@ -13,6 +13,7 @@ from pdf2zh.translation_policy import (
     SourceSegment,
     apply_exact_replacements,
     find_reference_markers,
+    looks_like_reference_author_block,
     restore_affiliation_breaks,
     split_author_affiliation,
     split_numbered_reference_region,
@@ -300,6 +301,22 @@ class ReferenceMarkerTests(unittest.TestCase):
 
 
 class ReferencePlanningTests(unittest.TestCase):
+    def test_reference_author_block_accepts_undotted_middle_initials(self) -> None:
+        accepted = (
+            "David A Sprecher and Sorin Draghici.",
+            "Jonathan W Siegel.",
+            "J Biddle and S Das Sarma.",
+            "Ronald A DeVore, George Kyriazis, Dany Leviatan, and Vladimir M Tikhomirov.",
+        )
+        for value in accepted:
+            with self.subTest(value=value):
+                self.assertTrue(looks_like_reference_author_block(value))
+        self.assertFalse(
+            looks_like_reference_author_block(
+                "Representation properties of networks and learning systems."
+            )
+        )
+
     def test_methods_enumeration_is_not_a_reference_region(self) -> None:
         source = (
             "(1) Nearest-neighbour qubits separated by a coupler. "
@@ -431,6 +448,35 @@ class ReferencePlanningTests(unittest.TestCase):
 
         self.assertEqual(policy.last_reference_number, 58)
         self.assertEqual(sum(part.role == ROLE_REFERENCE for part in plan.parts), 2)
+
+    def test_italic_formula_metadata_keeps_a_late_reference_page_structured(
+        self,
+    ) -> None:
+        policy = DocumentTranslationPolicy()
+        policy.last_reference_number = 53
+        source = (
+            "[54] S. John. Strong localization of photons. {v0}. "
+            "[55] Y. Lahini and R. Pugatch. Observation of a transition. {v1}. "
+            "[56] S. Vaidya and M. Rechtsman. Reentrant delocalization. {v2}."
+        )
+        formula_texts = (
+            "Physicalreviewletters,58(23):2486,1987",
+            "Physicalreviewletters,103(1):013901,2009",
+            "PhysicalReviewResearch,5(3):033170,2023",
+        )
+
+        plan = policy.plan_segment(
+            segment(source),
+            formula_texts=formula_texts,
+        )
+
+        self.assertEqual(
+            [part.role for part in plan.parts],
+            [ROLE_REFERENCE, ROLE_REFERENCE, ROLE_REFERENCE],
+        )
+        self.assertTrue(plan.parts[1].break_before)
+        self.assertTrue(plan.parts[2].break_before)
+        self.assertEqual(policy.last_reference_number, 56)
 
     def test_heading_and_single_entry_can_share_one_segment(self) -> None:
         source = (

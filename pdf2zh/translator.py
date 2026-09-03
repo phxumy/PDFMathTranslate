@@ -39,7 +39,11 @@ from pdf2zh.translation_quality import (
     normalize_cjk_structural_repetitions,
     normalize_scientific_cross_reference_placement,
 )
-from pdf2zh.translation_policy import ExactReplacement, apply_exact_replacements
+from pdf2zh.translation_policy import (
+    ExactReplacement,
+    apply_exact_replacements,
+    looks_like_reference_author_block,
+)
 
 
 from tenacity import retry, retry_if_exception_type
@@ -1104,10 +1108,11 @@ class CodexTranslator(BaseTranslator):
         "translate-prose-italic-and-preserve-style-v2;"
         "readonly-safe-inline-formula-context-v1;"
         "cross-column-page-continuation-v1;"
-        "english-residue-gate-v5;cjk-compat-ideographs-v1"
+        "english-residue-gate-v5;cjk-compat-ideographs-v1;"
+        "scientific-crossrefs-v2;theorem-italic-v1;reference-structure-v6"
     )
-    REFERENCE_CACHE_PREFIX = "pdf2zh:reference-work-title-only:v4\n"
-    FORMULA_CONTEXT_CACHE_PREFIX = "pdf2zh:readonly-inline-formula:v2\n"
+    REFERENCE_CACHE_PREFIX = "pdf2zh:reference-work-title-only:v6\n"
+    FORMULA_CONTEXT_CACHE_PREFIX = "pdf2zh:readonly-inline-formula:v3\n"
     STYLED_CACHE_PREFIX = "pdf2zh:styled-italic:v4\n"
     CONTINUATION_CACHE_PREFIX = "pdf2zh:continuation-fragments:v4\n"
     REFERENCE_CONTINUATION_CACHE_PREFIX = "pdf2zh:reference-continuation-title:v2\n"
@@ -1835,7 +1840,10 @@ class CodexTranslator(BaseTranslator):
             "than part of the title. Returned title spans must not overlap.\n"
             f"- Each `translated_title` must contain only the {self.lang_out} "
             "translation of its `source_title`. Preserve formulas, symbols, product "
-            "names, and placeholder tokens such as {v0} and {{v0}} exactly.\n"
+            "names, and placeholder tokens such as {v0} and {{v0}} exactly. For "
+            "Chinese output, translate ordinary scientific terminology completely; "
+            "retain Latin text only for proper/eponym names, acronyms, identifiers, "
+            "or conventional product names.\n"
             "- A token such as [[PDF2ZH_REF_BOUNDARY_0]] is an opaque physical-page "
             "boundary inside one entry. If a work title crosses it, both the exact "
             "`source_title` and its `translated_title` must include that token "
@@ -1863,6 +1871,9 @@ class CodexTranslator(BaseTranslator):
             f"{self.lang_out}. Do not shorten a title or omit a subtitle after a "
             "colon. Preserve formulas, symbols, product names, personal names, and "
             "placeholder tokens such as {v0} and {{v0}} exactly and in source order. "
+            "For Chinese output, translate ordinary scientific terminology completely; "
+            "retain Latin text only for proper/eponym names, acronyms, identifiers, "
+            "or conventional product names. "
             "Return only each translated title, without quotation marks, bibliography "
             "metadata, commentary, or code fences.\n\n"
             f"There are exactly {len(titles)} titles. Return exactly {len(titles)} "
@@ -3260,6 +3271,93 @@ class CodexTranslator(BaseTranslator):
             spans.append(title)
         return tuple(spans)
 
+    @classmethod
+    def _styled_reference_title_spans(cls, entry: str) -> tuple[str, ...]:
+        """Return exact title text exposed by reference-specific italic tags."""
+
+        pattern = re.compile(
+            r"\[\[PDF2ZH_ITALIC_(\d+)_BEGIN\]\]"
+            r"(.+?)"
+            r"\[\[PDF2ZH_ITALIC_\1_END\]\]",
+            re.DOTALL,
+        )
+        spans: list[str] = []
+        for match in pattern.finditer(entry):
+            title = match.group(2)
+            if (
+                not title.strip()
+                or title != title.strip()
+                or len(re.findall(r"[A-Za-z]+", title)) < 2
+                or entry.count(title) != 1
+            ):
+                return ()
+            spans.append(title)
+        return tuple(spans)
+
+    @classmethod
+    def _structured_reference_title_spans(cls, entry: str) -> tuple[str, ...]:
+        """Find a common author/title/metadata boundary without model guessing.
+
+        The deterministic path is intentionally narrower than the structured
+        model fallback.  It requires a numbered entry, a complete author block,
+        and either protected venue metadata after terminal punctuation or a bare
+        terminal publication year.  Multi-sentence or unusual citations remain
+        on the existing discovery path.
+        """
+
+        label = re.match(
+            r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[Ss]?\d+[.)．）])\s*",
+            entry,
+        )
+        if label is None:
+            return ()
+        author_end: int | None = None
+        for period in re.finditer(r"\.", entry[label.end() :]):
+            candidate_end = label.end() + period.end()
+            if looks_like_reference_author_block(entry[:candidate_end]):
+                author_end = candidate_end
+                break
+        if author_end is None:
+            return ()
+        title_start = author_end
+        while title_start < len(entry) and entry[title_start].isspace():
+            title_start += 1
+        if title_start >= len(entry) or entry.startswith(
+            cls.ITALIC_TAG_PREFIX, title_start
+        ):
+            return ()
+
+        tail = entry[title_start:]
+        boundaries: list[int] = []
+        protected_metadata = re.search(
+            r"(?P<punct>[.!?])\s+(?:In\s+)?"
+            r"(?=(?:\{\{?v\d+\}?\}|\[\[PDF2ZH_ITALIC_\d+_BEGIN\]\]))",
+            tail,
+        )
+        if protected_metadata is not None:
+            boundaries.append(protected_metadata.start("punct"))
+        bare_year = re.search(
+            r"(?P<punct>[.!?,])\s+(?=(?:19|20)\d{2}\b)",
+            tail,
+        )
+        if bare_year is not None:
+            boundaries.append(bare_year.start("punct"))
+        if not boundaries:
+            return ()
+        title = tail[: min(boundaries)].strip()
+        if (
+            len(re.findall(r"[A-Za-z]+", title)) < 2
+            or entry.count(title) != 1
+            or re.search(r"[.!?]\s+[A-Za-z]", title) is not None
+            or re.search(
+                r"https?://|\b(?:doi|isbn|issn|arxiv)\b|10\.\d{4,9}/",
+                title,
+                re.IGNORECASE,
+            )
+        ):
+            return ()
+        return (title,)
+
     def _run_exact_reference_title_batch(self, titles: list[str]) -> list[str | None]:
         prompt_text = self._build_exact_reference_title_prompt(titles)
         try:
@@ -3307,6 +3405,23 @@ class CodexTranslator(BaseTranslator):
                 entries[:midpoint]
             ) + self._run_discovered_reference_title_batch(entries[midpoint:])
 
+    def _accepted_exact_reference_title(
+        self,
+        source_title: str,
+        translated_title: object,
+    ) -> str | None:
+        if not isinstance(translated_title, str):
+            return None
+        normalized = self._normalize_translation_output(translated_title.strip())
+        if not self._validate_formula_translation(source_title, normalized):
+            return None
+        if self._checks_english_residue() and self._reference_title_has_unsafe_residue(
+            source_title,
+            normalized,
+        ):
+            return None
+        return normalized
+
     def _run_reference_title_batch(
         self, entries: list[str]
     ) -> list[list[ExactReplacement] | None]:
@@ -3316,16 +3431,51 @@ class CodexTranslator(BaseTranslator):
         exact_items: list[tuple[int, str]] = []
         discovery_items: list[tuple[int, str]] = []
         for index, entry in enumerate(entries):
-            quoted_titles = self._quoted_reference_title_spans(entry)
-            if quoted_titles:
-                exact_items.extend((index, title) for title in quoted_titles)
+            exact_titles = self._quoted_reference_title_spans(entry)
+            if not exact_titles:
+                exact_titles = self._styled_reference_title_spans(entry)
+            if not exact_titles:
+                exact_titles = self._structured_reference_title_spans(entry)
+            if exact_titles:
+                exact_items.extend((index, title) for title in exact_titles)
             else:
                 discovery_items.append((index, entry))
 
         if exact_items:
-            translated_titles = self._run_exact_reference_title_batch(
-                [title for _, title in exact_items]
-            )
+            source_titles = [title for _, title in exact_items]
+            translated_titles = self._run_exact_reference_title_batch(source_titles)
+            accepted_titles = [
+                self._accepted_exact_reference_title(source_title, translated_title)
+                for source_title, translated_title in zip(
+                    source_titles,
+                    translated_titles,
+                    strict=True,
+                )
+            ]
+            fallback_indices = [
+                index
+                for index, translated_title in enumerate(accepted_titles)
+                if translated_title is None
+            ]
+            if fallback_indices:
+                fallback_sources = [source_titles[index] for index in fallback_indices]
+                try:
+                    fallback_titles = self._run_batch_translation(
+                        fallback_sources,
+                        require_complete_translation=True,
+                    )
+                except RuntimeError:
+                    fallback_titles = [None] * len(fallback_sources)
+                for index, fallback_title in zip(
+                    fallback_indices,
+                    fallback_titles,
+                    strict=True,
+                ):
+                    accepted_titles[index] = self._accepted_exact_reference_title(
+                        source_titles[index],
+                        fallback_title,
+                    )
+            translated_titles = accepted_titles
             grouped: dict[int, list[ExactReplacement]] = {}
             failed_entries: set[int] = set()
             for (entry_index, source_title), translated_title in zip(
@@ -3978,6 +4128,8 @@ class CodexTranslator(BaseTranslator):
             "materials",
             "nanotechnol",
             "nature",
+            "neural",
+            "networks",
             "phys",
             "physical",
             "physics",
@@ -4086,10 +4238,60 @@ class CodexTranslator(BaseTranslator):
             translated_title,
         ):
             return False
-        return not cls._reference_preserves_lowercase_qubit_family_name(
-            source_title,
+        return not (
+            cls._reference_preserves_lowercase_qubit_family_name(
+                source_title,
+                translated_title,
+            )
+            or cls._reference_preserves_single_eponym_name(
+                source_title,
+                translated_title,
+            )
+        )
+
+    @staticmethod
+    def _reference_preserves_single_eponym_name(
+        source_title: str,
+        translated_title: str,
+    ) -> bool:
+        """Allow one Latin eponym only in an explicit scientific name phrase."""
+
+        target_words = re.findall(
+            r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’\-–][A-Za-zÀ-ÖØ-öø-ÿ]+)*",
             translated_title,
         )
+        if (
+            len(target_words) != 1
+            or re.search(
+                r"[\u3400-\u4dbf\u4e00-\u9fff]",
+                translated_title,
+            )
+            is None
+        ):
+            return False
+        eponym = target_words[0]
+
+        def normalize_name(value: str) -> str:
+            return re.sub(r"[‐‑‒–—]", "-", value.casefold())
+
+        folded = normalize_name(eponym)
+        source_words = re.findall(
+            r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’\-–][A-Za-zÀ-ÖØ-öø-ÿ]+)*",
+            source_title,
+        )
+        matching_source_words = [
+            word for word in source_words if normalize_name(word) == folded
+        ]
+        if len(matching_source_words) != 1:
+            return False
+        source_eponym = matching_source_words[0]
+        source_context = re.compile(
+            rf"(?<![A-Za-z]){re.escape(source_eponym)}\s+"
+            r"(?:locali[sz]ation|models?|theorems?|representations?|"
+            r"(?:neural\s+)?networks?)\b",
+            re.IGNORECASE,
+        )
+        return source_context.search(source_title) is not None
 
     @staticmethod
     def _reference_prefix_is_author_et_al(prefix: str) -> bool:
@@ -4165,6 +4367,27 @@ class CodexTranslator(BaseTranslator):
         ):
             return True
 
+        protected_venue = re.match(
+            r"^(?P<venue>[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*"
+            r"(?:\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*){0,5})\s+"
+            r"\{\{?v\d+\}?\}",
+            remaining,
+        )
+        if protected_venue is not None and cls._reference_venue_name_is_plausible(
+            protected_venue.group("venue")
+        ):
+            return True
+
+        paged_venue = re.match(
+            r"^(?P<venue>.+?),\s*(?:pages?|pp?\.?)\s+\d",
+            remaining,
+            re.IGNORECASE,
+        )
+        if paged_venue is not None and cls._reference_venue_name_is_plausible(
+            paged_venue.group("venue")
+        ):
+            return True
+
         volume = re.match(
             r"^(?P<venue>.+?)\s+\d{1,4}[A-Za-z]?\s*[,;(]",
             remaining,
@@ -4199,8 +4422,10 @@ class CodexTranslator(BaseTranslator):
             preceding = prefix_boundary[:-1].rstrip()
             if not any(preceding.endswith(peer) for peer in peer_source_titles):
                 return False
-        if prefix_boundary.endswith(".") and not cls._reference_prefix_is_author_et_al(
-            prefix_boundary
+        if (
+            prefix_boundary.endswith(".")
+            and not cls._reference_prefix_is_author_et_al(prefix_boundary)
+            and not looks_like_reference_author_block(prefix_boundary)
         ):
             preceding_clause = re.split(
                 r"[,.;]",

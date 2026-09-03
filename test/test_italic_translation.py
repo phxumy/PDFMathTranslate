@@ -8,9 +8,13 @@ from pdf2zh.converter import (
     Paragraph,
     TranslateConverter,
     _collect_translatable_italic_runs,
+    _collect_reference_title_italic_runs,
     _gen_target_text_op,
     _has_inline_prose_context,
     _is_high_confidence_prose_italic,
+    _split_formula_prose_boundaries,
+    _split_punctuation_only_formula_run,
+    _split_trailing_prose_openers,
     _tag_translatable_italic_formulas,
 )
 from pdf2zh.translation_policy import DocumentTranslationPolicy
@@ -115,6 +119,113 @@ def converter_with(translator) -> TranslateConverter:
 
 
 class ItalicClassifierTests(unittest.TestCase):
+    def test_theorem_prose_is_split_from_embedded_math_atoms(self) -> None:
+        formulas = [
+            fake_mixed_run(
+                [
+                    ("Let ", "TimesNewRoman-Italic"),
+                    ("x=(x1,x2)", "CMMI10"),
+                    (". Suppose that a function", "TimesNewRoman-Italic"),
+                ]
+            ),
+            fake_mixed_run(
+                [
+                    ("f(x)", "CMMI10"),
+                    (" admits a representation", "TimesNewRoman-Italic"),
+                ]
+            ),
+            fake_mixed_run(
+                [
+                    ("as in Eq. ", "TimesNewRoman-Italic"),
+                    ("(2.7)", "CMR10"),
+                    (", where each one of the ", "TimesNewRoman-Italic"),
+                    ("Φ", "CMR10"),
+                    ("l,i,j", "CMMI10"),
+                    (" are ", "TimesNewRoman-Italic"),
+                    ("(k+1)", "CMR10"),
+                    (
+                        "-times continuously differentiable. such that for any",
+                        "TimesNewRoman-Italic",
+                    ),
+                ]
+            ),
+            fake_mixed_run(
+                [
+                    ("≤m≤k", "CMSY10"),
+                    (", we have the bound", "TimesNewRoman-Italic"),
+                ]
+            ),
+            fake_run("Proof."),
+        ]
+        segments = [
+            "Theorem 2.1 (Approximation theory). {v0} {v1}",
+            "{v2}",
+            "0 {v3}",
+            "{v4}",
+        ]
+        formula_paragraphs = [0, 0, 1, 2, 3]
+        paragraphs = [paragraph(region_kind="plain text") for _ in range(4)]
+
+        _split_formula_prose_boundaries(
+            segments,
+            formulas,
+            [[], [], [], [], []],
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            formula_paragraphs,
+            paragraphs,
+        )
+        self.assertEqual("".join(char.get_text() for char in formulas[0]), "x=(x1,x2)")
+        self.assertEqual("".join(char.get_text() for char in formulas[1]), "f(x)")
+        released = " ".join(segments)
+        self.assertIn("Let {v0}. Suppose that a function", released)
+        self.assertIn("{v1} admits a representation", released)
+        self.assertIn("as in Eq.", released)
+        self.assertIn("are", released)
+        self.assertIn("Proof.", released)
+        self.assertTrue(paragraphs[1].brk)
+        self.assertIn("such that for any 0", segments[1])
+        self.assertEqual(segments[2], "")
+
+    def test_reference_specific_italic_title_does_not_release_a_venue(self) -> None:
+        runs = [
+            fake_run("Neural networks: a comprehensive foundation"),
+            fake_run("Physical review letters"),
+        ]
+        segments = [
+            "[1] Simon Haykin. {v0}. Prentice Hall PTR, 1994. "
+            "[2] S. John. Strong localization of photons. {v1}, 58(23), 1987."
+        ]
+
+        candidates = _collect_reference_title_italic_runs(
+            runs,
+            [0, 0],
+            [paragraph()],
+            segments,
+        )
+
+        self.assertEqual(
+            candidates,
+            {0: "Neural networks: a comprehensive foundation"},
+        )
+
+    def test_prose_parenthetical_and_closing_delimiter_are_released(self) -> None:
+        mixed = fake_mixed_run(
+            [("ϕ", "CMMI10"), ("(agreeing", "TimesNewRoman-Regular")]
+        )
+        formula, suffix = _split_trailing_prose_openers(mixed)
+        self.assertEqual("".join(char.get_text() for char in formula), "ϕ")
+        self.assertEqual(suffix, "(agreeing")
+
+        closing = fake_run(")", fontname="TimesNewRoman-Regular")
+        formula, suffix, released = _split_punctuation_only_formula_run(
+            closing,
+            has_prose_context=True,
+            paragraph_layout_class=1,
+        )
+        self.assertEqual(formula, [])
+        self.assertEqual(suffix, ")")
+        self.assertEqual(released, closing)
+
     def test_inline_natural_language_is_reconstructed_and_released(self) -> None:
         self.assertEqual(
             _is_high_confidence_prose_italic(fake_run("in situ"), 10.0),
@@ -125,6 +236,16 @@ class ItalicClassifierTests(unittest.TestCase):
             "direct",
         )
         self.assertTrue(_has_inline_prose_context("tuned {v12} by", 12))
+        self.assertEqual(
+            _is_high_confidence_prose_italic(
+                fake_run(
+                    "approximation theory",
+                    fontname="NimbusRomNo9L-ReguItal",
+                ),
+                10.0,
+            ),
+            "approximation theory",
+        )
 
     def test_math_names_products_and_protected_regions_are_not_released(self) -> None:
         self.assertIsNone(_is_high_confidence_prose_italic(fake_run("sin"), 10.0))

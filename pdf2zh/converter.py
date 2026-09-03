@@ -61,6 +61,7 @@ from pdf2zh.translation_policy import (
     SourceSegment,
     formula_cache_signature,
     is_running_header_segment,
+    looks_like_reference_author_block,
     restore_affiliation_breaks,
 )
 from pdf2zh.reading_flow import (
@@ -87,7 +88,10 @@ FLOW_TOKEN_RE = re.compile(r"\[\[PDF2ZH_FLOW_(\d+)\]\]")
 _MAX_READONLY_FORMULA_GLYPHS = 24
 _MAX_READONLY_FORMULA_CODEPOINTS = 48
 _FORCED_STYLED_PROSE_ATTR = "_pdf2zh_forced_styled_prose"
-_PROSE_ITALIC_FONT_RE = re.compile(r"(?:italic|oblique|slanted)", re.IGNORECASE)
+_PROSE_ITALIC_FONT_RE = re.compile(
+    r"(?:italic|oblique|slanted|ital$)",
+    re.IGNORECASE,
+)
 _PROSE_BOLD_FONT_RE = re.compile(r"(?:bold|demi|semibold)", re.IGNORECASE)
 _MATH_FONT_RE = re.compile(
     r"(?:^CM(?:I|MI|SY|EX)|RMTMI|MTSY|MTEX|Math|Symbol|Sym$|TeX|Euler|"
@@ -175,7 +179,7 @@ def _split_trailing_prose_openers(
     pairs = {"(": ")", "[": "]", "（": "）", "［": "］"}
     joined = "".join(char.get_text() for char in chars)
     parenthetical = re.search(
-        r"([\(\[（［])(see|cf|where|with|for)$",
+        r"([\(\[（［])(see|cf|where|with|for|agreeing)$",
         joined,
         re.IGNORECASE,
     )
@@ -476,6 +480,47 @@ def _split_trailing_prose_punctuation(
         chars[:split_at],
         "".join(char.get_text() for char in chars[split_at:]),
     )
+
+
+def _split_punctuation_only_formula_run(
+    chars: list[LTChar],
+    *,
+    has_prose_context: bool,
+    paragraph_layout_class: int | None,
+) -> tuple[list[LTChar], str, list[LTChar]]:
+    """Release a closing delimiter that was isolated as a formula run.
+
+    A PDF can emit the closing parenthesis of ``Eq. (2.1)`` in a separate font
+    run.  Treating that one glyph as ``{vN}`` hides the balanced scientific
+    reference from the translation validator.  Only punctuation-only closing
+    runs beside established prose are released; display formulas, mathematical
+    glyphs, class-0 regions, and opening delimiters remain protected.
+    """
+
+    if (
+        not chars
+        or not has_prose_context
+        or paragraph_layout_class == 0
+        or any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0
+            or _MATH_FONT_RE.search(_formula_font_name(char)) is not None
+            for char in chars
+        )
+    ):
+        return chars, "", []
+    text = "".join(char.get_text() for char in chars)
+    if re.fullmatch(r"[\)\]\}）］】]+", text) is None:
+        return chars, "", []
+    if any(
+        _is_non_horizontal_text_matrix(
+            getattr(char, "_pdf2zh_source_text_state", None).matrix
+            if getattr(char, "_pdf2zh_source_text_state", None) is not None
+            else char.matrix
+        )
+        for char in chars
+    ):
+        return chars, "", []
+    return [], text, chars
 
 
 def _segment_contains_prose(text: str) -> bool:
@@ -1032,6 +1077,108 @@ def _split_formula_prose_boundaries(
             and abs(_char_baseline(left) - _char_baseline(right)) <= 0.15 * em
         )
 
+    formula_text_by_paragraph: dict[int, list[str]] = {}
+    for value, paragraph_id in zip(formulas, formula_paragraphs, strict=True):
+        formula_text_by_paragraph.setdefault(paragraph_id, []).append(
+            "".join(char.get_text() for char in value)
+        )
+    theorem_paragraph_ids: set[int] = set()
+    in_theorem = False
+    theorem_segments = 0
+    theorem_cue = re.compile(
+        r"\b(?:Theorem|Lemma|Proposition|Corollary|Definition|Assumption)"
+        r"(?:\s+[A-Z]?\d+(?:\.\d+)*)?\b",
+        re.IGNORECASE,
+    )
+    for paragraph_id, segment in enumerate(segments):
+        opaque_text = " ".join(formula_text_by_paragraph.get(paragraph_id, ()))
+        if theorem_cue.search(segment):
+            in_theorem = True
+            theorem_segments = 0
+        if not in_theorem:
+            continue
+        if theorem_segments and paragraphs[paragraph_id].region_kind == "title":
+            in_theorem = False
+            continue
+        theorem_paragraph_ids.add(paragraph_id)
+        theorem_segments += 1
+        if re.search(r"\bProof\s*[.:]", segment + " " + opaque_text, re.IGNORECASE):
+            in_theorem = False
+        elif theorem_segments >= 16:
+            in_theorem = False
+
+    def split_theorem_run(
+        chars: list[LTChar],
+        paragraph_id: int,
+    ) -> list[tuple[bool, list[LTChar], str]] | None:
+        """Split theorem-statement italic prose from protected math atoms."""
+
+        if paragraph_id not in theorem_paragraph_ids or not chars:
+            return None
+        if any(
+            getattr(char, "_pdf2zh_layout_class", 0) == 0
+            or _is_non_horizontal_text_matrix(
+                getattr(char, "_pdf2zh_source_text_state", None).matrix
+                if getattr(char, "_pdf2zh_source_text_state", None) is not None
+                else char.matrix
+            )
+            for char in chars
+        ):
+            return None
+        groups: list[tuple[bool, list[LTChar]]] = []
+        for char in chars:
+            is_prose = _is_prose_italic_font(char.fontname)
+            if groups and groups[-1][0] == is_prose:
+                groups[-1][1].append(char)
+            else:
+                groups.append((is_prose, [char]))
+        if not any(is_prose for is_prose, _ in groups):
+            return None
+        if len(groups) > 1 and not any(
+            _MATH_FONT_RE.search(_formula_font_name(char)) is not None
+            for is_prose, group in groups
+            if not is_prose
+            for char in group
+        ):
+            return None
+        atoms: list[tuple[bool, list[LTChar], str]] = []
+        for is_prose, group in groups:
+            text = _reconstruct_italic_run(group) if is_prose else ""
+            if is_prose and text and any(char.isalpha() for char in text):
+                if any(
+                    not (
+                        char.isalpha() or char.isspace() or char in "-‐‑–—'’.,;:!?()[]"
+                    )
+                    for char in text
+                ):
+                    return None
+                atoms.append((True, group, text))
+            else:
+                atoms.append((False, group, text))
+        return atoms
+
+    def boundary_separator(
+        left: list[LTChar],
+        right: list[LTChar],
+        paragraph_size: float,
+    ) -> str:
+        if not left or not right:
+            return ""
+        right_text = right[0].get_text()
+        if right_text and right_text[0] in ".,;:!?)]}）］】":
+            return ""
+        gap = float(right[0].x0) - float(left[-1].x1)
+        em = max(float(left[-1].size), float(right[0].size), paragraph_size, 1.0)
+        left_text = left[-1].get_text()
+        if gap > 0.12 * em or (
+            left_text
+            and right_text
+            and (left_text[-1].isalnum() or left_text[-1] in ")]）］")
+            and right_text[0].isalnum()
+        ):
+            return " "
+        return ""
+
     def has_natural_word_after_quote(text: str) -> bool:
         match = re.fullmatch(
             r"[\u201c\"](?:[A-Za-z][A-Za-z'-]*)[\u201d\"]\s+(.+)",
@@ -1145,12 +1292,24 @@ def _split_formula_prose_boundaries(
         ):
             continue
         chars = formulas[formula_id]
+        marker = marker_for(formula_id)
+        if len(marker.findall(segments[paragraph_id])) != 1:
+            continue
+        _, closing_delimiters, _ = _split_punctuation_only_formula_run(
+            chars,
+            has_prose_context=_segment_contains_prose(segments[paragraph_id]),
+            paragraph_layout_class=int(paragraph.layout_class),
+        )
+        if closing_delimiters:
+            segments[paragraph_id] = marker.sub(
+                closing_delimiters,
+                segments[paragraph_id],
+                count=1,
+            )
+            continue
         if len(chars) < 4 or any(
             getattr(char, "_pdf2zh_layout_class", None) == 0 for char in chars
         ):
-            continue
-        marker = marker_for(formula_id)
-        if len(marker.findall(segments[paragraph_id])) != 1:
             continue
         offset = formula_offsets[formula_id]
         paragraph_size = float(paragraph.size)
@@ -1159,6 +1318,52 @@ def _split_formula_prose_boundaries(
             continue
         left_context = segments[paragraph_id][: marker_match.start()].rstrip()
         right_context = segments[paragraph_id][marker_match.end() :].lstrip()
+
+        theorem_atoms = split_theorem_run(chars, paragraph_id)
+        if theorem_atoms is not None:
+            if len(theorem_atoms) == 1 and theorem_atoms[0][0]:
+                segments[paragraph_id] = marker.sub(
+                    theorem_atoms[0][2],
+                    segments[paragraph_id],
+                    count=1,
+                )
+                continue
+            paragraph.brk = True
+            replacement_parts: list[str] = []
+            previous_group: list[LTChar] | None = None
+            previous_is_prose = False
+            used_original_formula = False
+            for is_prose, group, prose_text in theorem_atoms:
+                if previous_group is not None and (
+                    previous_is_prose or is_prose or bool(prose_text)
+                ):
+                    replacement_parts.append(
+                        boundary_separator(
+                            previous_group,
+                            group,
+                            paragraph_size,
+                        )
+                    )
+                if is_prose:
+                    replacement_parts.append(prose_text)
+                elif prose_text:
+                    replacement_parts.append(prose_text)
+                else:
+                    if used_original_formula:
+                        math_id = append_formula(group, paragraph_id, offset)
+                    else:
+                        formulas[formula_id] = group
+                        math_id = formula_id
+                        used_original_formula = True
+                    replacement_parts.append(f"{{v{math_id}}}")
+                previous_group = group
+                previous_is_prose = is_prose or bool(prose_text)
+            segments[paragraph_id] = marker.sub(
+                "".join(replacement_parts),
+                segments[paragraph_id],
+                count=1,
+            )
+            continue
 
         footnote_split = split_superscript_footnote(chars, paragraph_size)
         if footnote_split is not None and _segment_contains_prose(
@@ -1276,6 +1481,32 @@ def _split_formula_prose_boundaries(
                 segments[paragraph_id],
                 count=1,
             )
+    # A theorem sentence can be physically split immediately before its
+    # quantified range: ``... such that for any`` + ``0 <= m <= k ...``.  Merge
+    # the narrow numeric fragment back into the preceding prose paragraph.  The
+    # original one-line geometry is too small for a translated CJK sentence and
+    # otherwise forces unreadable uniform scaling.
+    trailing_quantifier = re.compile(r"\b(such\s+that\s+for\s+any)\s*$", re.IGNORECASE)
+    for paragraph_id in sorted(theorem_paragraph_ids):
+        next_id = paragraph_id + 1
+        if next_id not in theorem_paragraph_ids or next_id >= len(segments):
+            continue
+        match = trailing_quantifier.search(segments[paragraph_id])
+        if (
+            match is None
+            or re.match(
+                r"\s*(?:\d|\{\s*v\d+\s*\})",
+                segments[next_id],
+                re.IGNORECASE,
+            )
+            is None
+        ):
+            continue
+        segments[paragraph_id] = (
+            segments[paragraph_id].rstrip() + " " + segments[next_id].lstrip()
+        )
+        segments[next_id] = ""
+        paragraphs[paragraph_id].brk = True
 
 
 def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
@@ -1445,7 +1676,15 @@ def _reconstruct_italic_run(chars: list[LTChar]) -> str:
             if previous_value and not previous_value.isspace():
                 gap = float(char.x0) - float(previous.x1)
                 em = max(float(char.size), float(previous.size), 1.0)
-                if gap > 0.12 * em:
+                line_reset = (
+                    abs(_char_baseline(char) - _char_baseline(previous)) > 0.30 * em
+                    or float(char.x0) < float(previous.x0) - 0.50 * em
+                )
+                if gap > 0.12 * em or (
+                    line_reset
+                    and previous_value[-1] not in "-‐‑–—"
+                    and value[0].isalnum()
+                ):
                     pieces.append(" ")
         pieces.append(value)
         previous = char
@@ -1520,7 +1759,13 @@ def _is_high_confidence_prose_italic(
     ):
         return None
     letters = [char for char in text if char.isalpha()]
-    if len(letters) < (2 if parenthetical_connector else 4):
+    forced_short_prose = bool(
+        len(letters) >= 2
+        and any(getattr(char, _FORCED_STYLED_PROSE_ATTR, False) for char in visible)
+    )
+    if len(letters) < (2 if parenthetical_connector else 4) and not (
+        forced_short_prose
+    ):
         return None
     words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
     if not words:
@@ -1660,6 +1905,88 @@ def _collect_translatable_italic_runs(
             or _has_inline_prose_context(segments[paragraph_id], formula_id, text)
         ):
             candidates[formula_id] = text
+    return candidates
+
+
+def _collect_reference_title_italic_runs(
+    formula_runs: list[list[LTChar]],
+    formula_paragraphs: list[int],
+    paragraphs: list["Paragraph"],
+    segments: list[str],
+) -> dict[int, str]:
+    """Recover italic book/report titles hidden behind formula placeholders.
+
+    Bibliographies often italicize both work titles and journal metadata.  Only
+    release a run when it immediately follows a complete numbered-reference
+    author block.  Venue runs follow an already visible title and therefore do
+    not satisfy that boundary.  Numeric/identifier-bearing runs remain protected.
+    """
+
+    candidates: dict[int, str] = {}
+    label_pattern = re.compile(
+        r"(?:^|\s)(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[Ss]?\d+[.)．）])\s*"
+    )
+    for formula_id, (chars, paragraph_id) in enumerate(
+        zip(formula_runs, formula_paragraphs, strict=True)
+    ):
+        if not 0 <= paragraph_id < len(paragraphs):
+            continue
+        segment = segments[paragraph_id]
+        marker = re.compile(rf"\{{\s*v\s*{formula_id}\s*\}}", re.IGNORECASE)
+        match = marker.search(segment)
+        if match is None or len(marker.findall(segment)) != 1:
+            continue
+        preceding_labels = tuple(label_pattern.finditer(segment[: match.start()]))
+        if not preceding_labels:
+            continue
+        entry_start = preceding_labels[-1].start()
+        entry_prefix = segment[entry_start : match.start()]
+        author_end: int | None = None
+        for period in re.finditer(r"\.", entry_prefix):
+            if looks_like_reference_author_block(entry_prefix[: period.end()]):
+                author_end = period.end()
+                break
+        if author_end is None or entry_prefix[author_end:].strip():
+            continue
+        visible = [char for char in chars if char.get_text()]
+        if not visible or any(
+            getattr(char, "_pdf2zh_layout_class", 0) == 0
+            or not _is_prose_italic_font(char.fontname)
+            for char in visible
+        ):
+            continue
+        text = _reconstruct_italic_run(chars)
+        words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
+        if (
+            len(words) < 2
+            or len(text) > 240
+            or re.search(
+                r"\b(?:doi|isbn|issn|arxiv|vol(?:ume)?|pages?)\b|"
+                r"(?:19|20)\d{2}|10\.\d{4,9}/",
+                text,
+                re.IGNORECASE,
+            )
+        ):
+            continue
+        if any(
+            _is_non_horizontal_text_matrix(
+                getattr(char, "_pdf2zh_source_text_state", None).matrix
+                if getattr(char, "_pdf2zh_source_text_state", None) is not None
+                else char.matrix
+            )
+            for char in visible
+        ):
+            continue
+        sizes = [float(char.size) for char in visible]
+        paragraph_size = float(paragraphs[paragraph_id].size)
+        if (
+            min(sizes) <= 0
+            or max(sizes) / min(sizes) > 1.08
+            or paragraph_size <= 0
+            or not 0.88 <= float(np.median(sizes)) / paragraph_size <= 1.12
+        ):
+            continue
+        candidates[formula_id] = text
     return candidates
 
 
@@ -2745,6 +3072,7 @@ class TranslateConverter(PDFConverterEx):
         page_height: float = 0.0,
         italic_candidates: dict[int, str] | None = None,
         readonly_formula_contexts: dict[int, str] | None = None,
+        reference_title_italic_candidates: dict[int, str] | None = None,
     ) -> list[str]:
         if len(sstk) != len(pstk):
             raise ValueError(
@@ -2822,8 +3150,12 @@ class TranslateConverter(PDFConverterEx):
                             )
                         )
                 elif part.role == ROLE_REFERENCE:
+                    reference_text, _ = _tag_translatable_italic_formulas(
+                        part.text,
+                        reference_title_italic_candidates or {},
+                    )
                     reference_locations.append((plan_index, part_index))
-                    reference_texts.append(part.text)
+                    reference_texts.append(reference_text)
                     reference_cache_contexts.append(
                         formula_cache_signature(part.text, formula_texts)
                     )
@@ -3492,6 +3824,20 @@ class TranslateConverter(PDFConverterEx):
                                 )
                                 prose_suffix = runin_connector + prose_suffix
                                 continues_runin_prose = True
+                        (
+                            formula_chars,
+                            closing_delimiters,
+                            closing_delimiter_chars,
+                        ) = _split_punctuation_only_formula_run(
+                            formula_chars,
+                            has_prose_context=_segment_contains_prose(sstk[-1]),
+                            paragraph_layout_class=int(pstk[-1].layout_class),
+                        )
+                        if closing_delimiters:
+                            paragraph_text_chars[-1].extend(
+                                closing_delimiter_chars
+                            )
+                            prose_suffix = closing_delimiters + prose_suffix
                         if _segment_contains_prose(sstk[-1]):
                             before_punctuation_split = formula_chars
                             formula_chars, punctuation = (
@@ -3639,6 +3985,18 @@ class TranslateConverter(PDFConverterEx):
             prose_suffix = ""
             (
                 formula_chars,
+                closing_delimiters,
+                closing_delimiter_chars,
+            ) = _split_punctuation_only_formula_run(
+                formula_chars,
+                has_prose_context=_segment_contains_prose(sstk[-1]),
+                paragraph_layout_class=int(pstk[-1].layout_class),
+            )
+            if closing_delimiters:
+                paragraph_text_chars[-1].extend(closing_delimiter_chars)
+                prose_suffix = closing_delimiters
+            (
+                formula_chars,
                 prose_clause,
                 prose_clause_chars,
             ) = _split_trailing_formula_prose_clause(
@@ -3647,7 +4005,7 @@ class TranslateConverter(PDFConverterEx):
             )
             if prose_clause:
                 paragraph_text_chars[-1].extend(prose_clause_chars)
-                prose_suffix = prose_clause
+                prose_suffix = prose_clause + prose_suffix
             if _segment_contains_prose(sstk[-1]):
                 before_punctuation_split = formula_chars
                 formula_chars, punctuation_suffix = (
@@ -3717,8 +4075,18 @@ class TranslateConverter(PDFConverterEx):
             if getattr(self.translator, "name", "") == "codex" and not self.vfont
             else {}
         )
+        reference_title_italic_candidates = (
+            _collect_reference_title_italic_runs(var, varp, pstk, sstk)
+            if getattr(self.translator, "name", "") == "codex" and not self.vfont
+            else {}
+        )
         if italic_candidates:
             log.debug("Translatable italic formula runs: %s", italic_candidates)
+        if reference_title_italic_candidates:
+            log.debug(
+                "Translatable italic reference titles: %s",
+                reference_title_italic_candidates,
+            )
         readonly_formula_contexts = (
             _collect_readonly_formula_contexts(
                 var,
@@ -3779,6 +4147,7 @@ class TranslateConverter(PDFConverterEx):
             page_height=ltpage.height,
             italic_candidates=italic_candidates,
             readonly_formula_contexts=readonly_formula_contexts,
+            reference_title_italic_candidates=reference_title_italic_candidates,
         )
         if replacement_map:
             news = self._restore_fragment_overrides(news, replacement_map)

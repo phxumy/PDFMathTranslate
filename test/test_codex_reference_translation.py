@@ -26,6 +26,112 @@ def translator_stub() -> CodexTranslator:
 
 
 class CodexReferenceTranslationTests(unittest.TestCase):
+    def test_structured_author_title_placeholder_uses_exact_title_batch(self) -> None:
+        translator = translator_stub()
+        title = "Multilayer feedforward networks are universal approximators"
+        entry = (
+            "[3] Kurt Hornik, Maxwell Stinchcombe, and Halbert White. "
+            f"{title}. {{v3}}."
+        )
+        seen_titles: list[str] = []
+
+        def translate_exact(titles: list[str]) -> list[str]:
+            seen_titles.extend(titles)
+            return ["多层前馈网络是通用逼近器"]
+
+        translator._run_exact_reference_title_batch = translate_exact
+        translator._run_discovered_reference_title_batch = lambda entries: self.fail(
+            f"structured title should not use discovery: {entries}"
+        )
+
+        result = translator.translate_reference_entries([entry])[0]
+
+        self.assertEqual(seen_titles, [title])
+        self.assertIn("多层前馈网络是通用逼近器", result)
+        self.assertIn("{v3}", result)
+
+    def test_reference_specific_italic_tag_uses_exact_title_batch(self) -> None:
+        translator = translator_stub()
+        title = "A practical guide to splines"
+        entry = (
+            "[23] Carl De Boor. "
+            "[[PDF2ZH_ITALIC_7_BEGIN]]"
+            f"{title}"
+            "[[PDF2ZH_ITALIC_7_END]], volume 27. Springer, 1978."
+        )
+        seen_titles: list[str] = []
+
+        def translate_exact(titles: list[str]) -> list[str]:
+            seen_titles.extend(titles)
+            return ["样条实用指南"]
+
+        translator._run_exact_reference_title_batch = translate_exact
+        translator._run_discovered_reference_title_batch = lambda entries: self.fail(
+            f"styled title should not use discovery: {entries}"
+        )
+
+        result = translator.translate_reference_entries([entry])[0]
+
+        self.assertEqual(seen_titles, [title])
+        self.assertIn(
+            "[[PDF2ZH_ITALIC_7_BEGIN]]样条实用指南" "[[PDF2ZH_ITALIC_7_END]]",
+            result,
+        )
+
+    def test_single_eponym_in_scientific_name_phrase_may_be_preserved(self) -> None:
+        cases = (
+            (
+                "Interactions and mobility edges: Observing the generalized aubry-andré model",
+                "相互作用与迁移率边：广义 aubry-andré 模型的观测",
+            ),
+            (
+                "An exactly solvable model of anderson localization",
+                "一个可精确求解的 Anderson 局域化模型",
+            ),
+            (
+                "The kolmogorov–arnold representation theorem revisited",
+                "重访 Kolmogorov-Arnold 表示定理",
+            ),
+            (
+                "On the kolmogorov neural networks",
+                "论 Kolmogorov 神经网络",
+            ),
+        )
+        for title, translated in cases:
+            with self.subTest(title=title):
+                translator = translator_stub()
+                entry = f"[1] A. Smith. {title}. Nature 1, 10 (2020)."
+                translator._run_reference_title_batch = lambda entries: [
+                    [ExactReplacement(title, translated)]
+                ]
+                self.assertIn(
+                    translated,
+                    translator.translate_reference_entries([entry])[0],
+                )
+
+    def test_incomplete_exact_title_uses_complete_translation_fallback(self) -> None:
+        translator = translator_stub()
+        title = "Exact new mobility edges between critical and localized states"
+        entry = f"[65] X. Zhou. {title}. {{v14}}, 131(17):176401, 2023."
+        translator._run_exact_reference_title_batch = lambda titles: [
+            "临界态与局域态之间新的精确 mobility edges"
+        ]
+        fallback_calls: list[tuple[list[str], bool]] = []
+
+        def translate_complete(titles, *, require_complete_translation=False):
+            fallback_calls.append((list(titles), require_complete_translation))
+            return ["临界态与局域态之间新的精确迁移率边"]
+
+        translator._run_batch_translation = translate_complete
+        translator._run_discovered_reference_title_batch = lambda entries: self.fail(
+            f"deterministic title should not use discovery: {entries}"
+        )
+
+        result = translator.translate_reference_entries([entry])[0]
+
+        self.assertIn("临界态与局域态之间新的精确迁移率边", result)
+        self.assertEqual(fallback_calls, [([title], True)])
+
     def test_curly_quoted_title_uses_deterministic_complete_span(self) -> None:
         translator = translator_stub()
         title = "Audio set: An ontology and human-labeled dataset for audio events"
@@ -338,6 +444,42 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         self.assertIn("无需悬桥的阴影蒸发法结制备", result)
         self.assertEqual(len(translator.cache.values), 1)
+
+    def test_split_neural_networks_venue_is_a_safe_metadata_tail(self) -> None:
+        cases = (
+            (
+                "[67] J. Schmidt-Hieber. The representation theorem revisited. "
+                "Neural {v17}.",
+                "The representation theorem revisited",
+            ),
+            (
+                "[68] A. Ismayilova and V. Ismailov. On the networks. "
+                "Neural Net-works, page 106333, 2024.",
+                "On the networks",
+            ),
+        )
+        for entry, title in cases:
+            with self.subTest(entry=entry):
+                translator = translator_stub()
+                translator._run_reference_title_batch = lambda entries, title=title: [
+                    [ExactReplacement(title, "关于这些网络")]
+                ]
+                self.assertIn(
+                    "关于这些网络",
+                    translator.translate_reference_entries([entry])[0],
+                )
+
+    def test_structured_title_never_absorbs_a_visible_venue_before_year(self) -> None:
+        entry = (
+            "[68] A. Ismayilova and V. Ismailov. "
+            "On the kolmogorov neural networks. "
+            "Neural Net-works, page 106333, 2024."
+        )
+
+        self.assertEqual(
+            CodexTranslator._structured_reference_title_spans(entry),
+            (),
+        )
 
     def test_arbitrary_single_word_title_tail_is_not_a_venue(self) -> None:
         translator = translator_stub()

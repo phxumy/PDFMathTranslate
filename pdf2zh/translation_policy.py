@@ -331,6 +331,31 @@ def reference_entry_score(text: str) -> int:
     return score
 
 
+def _reference_scoring_text(
+    text: str,
+    formula_texts: Sequence[str],
+) -> str:
+    """Expose protected bibliography metadata only to the structure scorer.
+
+    PDF reference lists frequently typeset the journal, volume, pages, and year
+    in italic faces.  The converter correctly protects those glyphs as ``{vN}``,
+    but scoring the opaque marker alone can make a later reference page look like
+    ordinary numbered prose.  Reconstructing the value here is read-only: the
+    original entry and formula placeholders still flow unchanged to translation
+    and rendering.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        try:
+            index = int(_compact_digits(match.group(1)))
+            value = formula_texts[index]
+        except (IndexError, TypeError, ValueError):
+            return match.group(0)
+        return f" {value} "
+
+    return _FORMULA_RE.sub(replace, text)
+
+
 def _sequence_from(
     markers: Sequence[ReferenceMarker], start_index: int
 ) -> tuple[ReferenceMarker, ...]:
@@ -365,11 +390,13 @@ def _reference_sequence_is_confident(
     expected_number: int | None,
     expected_prefix: str,
     end: int,
+    scores: Sequence[int] | None = None,
 ) -> bool:
     if not markers:
         return False
     entries = _entry_texts(text, markers, end)
-    scores = [reference_entry_score(entry) for entry in entries]
+    if scores is None:
+        scores = [reference_entry_score(entry) for entry in entries]
     strong_entries = sum(score >= 3 for score in scores)
     first = markers[0]
     expected_match = (
@@ -429,7 +456,10 @@ def split_numbered_reference_region(
             continue
         end = _reference_region_end(text, sequence[-1])
         entries = _entry_texts(text, sequence, end)
-        entry_scores = [reference_entry_score(entry) for entry in entries]
+        entry_scores = [
+            reference_entry_score(_reference_scoring_text(entry, formula_texts))
+            for entry in entries
+        ]
         citation_score = sum(entry_scores)
         strong_entries = sum(score >= 3 for score in entry_scores)
         expected_bonus = int(
@@ -444,6 +474,7 @@ def split_numbered_reference_region(
             expected_number=expected_number,
             expected_prefix=expected_prefix,
             end=end,
+            scores=entry_scores,
         ):
             continue
         # Prefer the expected continuation, then actual citation evidence.  A
@@ -506,6 +537,94 @@ def looks_like_author_list(text: str) -> bool:
         and _author_name_coverage(compact) >= 0.55
         and bool(re.search(r",|\band\b|&", compact))
     )
+
+
+def looks_like_reference_author_block(text: str) -> bool:
+    """Recognize a complete author prefix before a bibliography work title.
+
+    ``looks_like_author_list`` deliberately requires multiple people because it
+    is also used on unconstrained page prose.  At the start of an already
+    numbered reference entry, a single author such as ``P. Petersen`` or
+    ``Simon Haykin`` is equally valid.  This helper keeps that broader rule
+    scoped to the reference-title boundary checks.
+    """
+
+    compact = _FORMULA_RE.sub("", text)
+    compact = re.sub(
+        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[Ss]?\d+[.)．）])\s*",
+        "",
+        compact,
+    )
+    compact = re.sub(r"\s+", " ", compact).strip()
+    compact = compact.rstrip(". ")
+    if not compact or re.search(r"[:：;；!?！？]", compact):
+        return False
+    if looks_like_author_list(compact):
+        return True
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", compact)
+    if bool(
+        1 <= _count_author_names(compact) <= 2
+        and 1 <= len(words) <= 8
+        and _author_name_coverage(compact) >= 0.60
+        and not re.search(r"\b(?:19|20)\d{2}\b", compact)
+    ):
+        return True
+
+    # Many machine-learning bibliographies omit dots from middle initials
+    # (``David A Sprecher``) or join them (``JH Pixley``).  Accept that syntax
+    # only inside this already-numbered reference boundary.
+    particles = {
+        "al",
+        "da",
+        "de",
+        "del",
+        "der",
+        "di",
+        "dos",
+        "du",
+        "et",
+        "la",
+        "le",
+        "van",
+        "von",
+    }
+
+    def name_token(token: str) -> bool:
+        stripped = token.strip(".()[]{}")
+        if not stripped:
+            return False
+        if stripped.casefold() in particles:
+            return True
+        letters = "".join(char for char in stripped if char.isalpha())
+        if not letters or any(
+            not (char.isalpha() or char in "-'’.") for char in stripped
+        ):
+            return False
+        if letters.isupper() and len(letters) <= 4:
+            return True
+        return stripped[0].isupper()
+
+    names = [
+        value.strip()
+        for value in re.split(r"\s*(?:,|\band\b|&)\s*", compact)
+        if value.strip()
+    ]
+    if not 1 <= len(names) <= 40:
+        return False
+    proper_names = 0
+    for name in names:
+        tokens = name.split()
+        if (
+            name.casefold() == "et al"
+            or not 2 <= len(tokens) <= 7
+            or any(not name_token(token) for token in tokens)
+        ):
+            if name.casefold() == "et al":
+                continue
+            return False
+        if any(token.strip(".()[]{}").casefold() not in particles for token in tokens):
+            proper_names += 1
+    return proper_names >= 1
 
 
 _STRICT_BYLINE_NAME_TOKEN_RE = re.compile(

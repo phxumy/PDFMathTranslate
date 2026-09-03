@@ -139,6 +139,38 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
                     target,
                 )
 
+    def test_appendix_figure_identifiers_keep_their_complete_suffix(self) -> None:
+        cases = (
+            (
+                "The result is shown in Figure C.1.",
+                "结果如图 C.1 所示。",
+            ),
+            (
+                "Figure D.3 and Figure D.2 show the networks.",
+                "图 D.3 和图 D.2 展示了这些网络。",
+            ),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(
+                        source,
+                        target,
+                    ),
+                    target,
+                )
+
+    def test_preserved_english_reference_label_is_normalized_not_rejected(
+        self,
+    ) -> None:
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(
+                "A KAN layer Eq. (2.5) looks simple.",
+                "KAN 层 Eq. (2.5) 看起来很简单。",
+            ),
+            "KAN 层 式 (2.5) 看起来很简单。",
+        )
+
     def test_lowercase_words_after_table_are_not_roman_identifiers(self) -> None:
         cases = (
             ("Table mixing results are summarized here.", "此处汇总混合结果。"),

@@ -44,12 +44,17 @@ _SOFTWARE_PRODUCT_SUFFIXES = (
     "ware",
     "works",
 )
+_SOURCE_CROSS_REFERENCE_IDENTIFIER = (
+    r"\{\{v\d+\}\}|\{v\d+\}|"
+    r"[A-Za-z]\.\d+(?:\.\d+)*[A-Za-z]?|"
+    r"[A-Za-z]?\d+(?:\.\d+)*[A-Za-z]?|"
+    r"(?-i:[IVXLCDM]+)"
+)
 _SOURCE_CROSS_REFERENCE_RE = re.compile(
     r"\b(?P<label>figures?|figs?\.?|tables?|tbls?\.?|"
     r"equations?|eqs?\.?|references?|refs?\.?)(?![A-Za-z])"
     r"\s*(?:[（(]\s*)?"
-    r"(?P<identifier>\{\{v\d+\}\}|\{v\d+\}|(?-i:[IVXLCDM]+)|"
-    r"[A-Za-z]?\d+(?:\.\d+)?[A-Za-z]?)(?![A-Za-z0-9])"
+    rf"(?P<identifier>{_SOURCE_CROSS_REFERENCE_IDENTIFIER})(?![A-Za-z0-9])"
     r"(?:\s*[）)])?",
     re.IGNORECASE,
 )
@@ -59,6 +64,12 @@ _TARGET_CROSS_REFERENCE_LABELS = {
     "table": r"表",
     "equation": r"(?:方程|公式|(?<![模方形公算等样])式)",
     "reference": r"(?:参考文献|文献)",
+}
+_TARGET_CROSS_REFERENCE_CANONICAL_LABELS = {
+    "figure": "图",
+    "table": "表",
+    "equation": "式",
+    "reference": "参考文献",
 }
 _TARGET_CROSS_REFERENCE_SAFE_TAILS = {
     "figure": r"(?:所示|的结果)?",
@@ -349,6 +360,11 @@ def normalize_scientific_cross_reference_placement(
             kind,
             identifier,
         )
+        normalized = _normalize_english_cross_reference_label(
+            normalized,
+            kind,
+            identifier,
+        )
         key = (kind, identifier.casefold())
         used = consumed.get(key, 0)
         correct = _target_cross_reference_pattern(kind, identifier)
@@ -437,6 +453,33 @@ def _normalize_duplicate_cross_reference_labels(
         rf"(?=\s*{identifier_pattern})"
     )
     return duplicated.sub(lambda match: match.group("label"), normalized, count=1)
+
+
+def _normalize_english_cross_reference_label(
+    target: str,
+    kind: str,
+    identifier: str,
+) -> str:
+    """Translate an otherwise correctly placed English reference label locally.
+
+    A complete Chinese sentence that preserves ``Eq. (2.5)`` or ``Figure C.1``
+    is safe and useful; rejecting it caused the caller to discard the whole
+    translation and restore the English source paragraph.  The source document
+    already proves the reference kind and identifier, so replacing only that
+    adjacent label is deterministic.
+    """
+
+    source_label = _SOURCE_CROSS_REFERENCE_LABELS[kind]
+    identifier_pattern = _target_identifier_pattern(identifier)
+    pattern = re.compile(
+        rf"(?i)(?<![A-Za-z])(?P<label>{source_label})\.?(?![A-Za-z])"
+        rf"(?P<space>[\s\u00a0]*)(?P<identifier>{identifier_pattern})"
+    )
+    canonical = _TARGET_CROSS_REFERENCE_CANONICAL_LABELS[kind]
+    return pattern.sub(
+        lambda match: canonical + match.group("space") + match.group("identifier"),
+        target,
+    )
 
 
 def _repair_one_misplaced_cross_reference(
