@@ -966,7 +966,7 @@ class TestCodexTranslator(unittest.TestCase):
     def test_gui_service_map_includes_codex(self):
         gui_source = Path("pdf2zh/gui.py").read_text(encoding="utf-8")
         self.assertIn('"Codex": CodexTranslator', gui_source)
-        self.assertIn('gr.update(value="1", interactive=True)', gui_source)
+        self.assertIn('gr.update(value="4", interactive=True)', gui_source)
         self.assertNotIn("effective concurrency fixed to 1", gui_source)
 
 

@@ -861,9 +861,7 @@ with gr.Blocks(
                 threads = gr.Textbox(
                     label="number of threads",
                     interactive=True,
-                    value=(
-                        "1" if service_map[enabled_services[0]].name == "codex" else "4"
-                    ),
+                    value="4",
                 )
                 skip_subset_fonts = gr.Checkbox(
                     label="Skip font subsetting", interactive=True, value=False
@@ -914,7 +912,7 @@ with gr.Blocks(
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
                     (
-                        gr.update(value="1", interactive=True)
+                        gr.update(value="4", interactive=True)
                         if translator.name == "codex"
                         else gr.update(interactive=True)
                     ),
