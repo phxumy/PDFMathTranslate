@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import io
+import html
+import json
 from types import SimpleNamespace
 
 import numpy as np
 import pymupdf
 import pytest
+import requests
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfinterp import PDFResourceManager
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
 
 from pdf2zh.converter import PDFConverterEx, TranslateConverter
+from pdf2zh.cache import TranslationCache
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import detect_scan_background, horizontal_fit_scale
 
@@ -57,17 +61,29 @@ def rgb(page):
     return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
 
 
-def translate_locally(doc, replacement):
+def translate_locally(doc, replacement, *, engine=None):
     page = doc[0]
     scan = detect_scan_background(page, rgb(page))
     manager = PDFResourceManager()
-    converter = TranslateConverter.__new__(TranslateConverter)
-    PDFConverterEx.__init__(converter, manager)
-    converter.translator = SimpleNamespace(name="local-test", lang_out="en")
-    converter.vfont = ""
-    converter.vchar = ""
-    converter.noto_name = "noto"
-    converter.noto = pymupdf.Font("helv")
+    if engine is None:
+        converter = TranslateConverter.__new__(TranslateConverter)
+        PDFConverterEx.__init__(converter, manager)
+        converter.translator = SimpleNamespace(name="local-test", lang_out="en")
+        converter.vfont = ""
+        converter.vchar = ""
+        converter.noto_name = "noto"
+        converter.noto = pymupdf.Font("helv")
+    else:
+        converter = TranslateConverter(
+            manager,
+            service=engine,
+            lang_in="zh",
+            lang_out="en",
+            thread=1,
+            noto_name="noto",
+            noto=pymupdf.Font("helv"),
+            ignore_cache=True,
+        )
     mask = np.full((200, 240), 2.0)
     mask[165:] = 0
     converter.layout = {0: mask}
@@ -79,7 +95,8 @@ def translate_locally(doc, replacement):
         captured.extend(segments)
         return [segment.replace("SOURCE", replacement) for segment in segments]
 
-    converter._translate_planned_segments = translate
+    if engine is None:
+        converter._translate_planned_segments = translate
     patches = {}
     interpreter = PDFPageInterpreterEx(manager, converter, patches)
     parser = PDFParser(io.BytesIO(doc.tobytes()))
@@ -151,3 +168,53 @@ def test_only_real_missing_superscript_ink_becomes_a_movable_formula(reference_i
         # The old citation is removed from the scan and replayed at its new
         # inline position, rather than disappearing or remaining underneath.
         assert rgb(doc[0])[68:74, 78:94].mean() > 250
+
+
+@pytest.mark.parametrize("engine", ["google", "bing"])
+def test_scan_cleanup_uses_the_same_real_translation_pipeline_for_http_engines(
+    monkeypatch, engine
+):
+    """Exercise policy, batching, engine parsing and rendering; stub only HTTP."""
+    requests_seen = []
+
+    def offline_request(_session, method, url, **kwargs):
+        requests_seen.append((method, url, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response.url = url
+        if url.endswith("/translator"):
+            payload = (
+                '{"ig":"offline-ig"} <div data-iid="offline-iid">'
+                'params_AbusePreventionHelper = [12345,"offline-token",'
+            )
+        else:
+            source = (
+                kwargs["params"]["q"] if engine == "google" else kwargs["data"]["text"]
+            )
+            target = source.replace("SOURCE", "A much longer translated phrase")
+            payload = (
+                f'<div class="result-container">{html.escape(target)}</div>'
+                if engine == "google"
+                else json.dumps([{"translations": [{"text": target}]}])
+            )
+        response._content = payload.encode("utf-8")
+        response.encoding = "utf-8"
+        return response
+
+    monkeypatch.setattr(requests.Session, "request", offline_request)
+    monkeypatch.setattr(TranslationCache, "set", lambda *_args: None)
+    doc = make_source()
+    before = rgb(doc[0]).copy()
+    operations, _ = translate_locally(doc, "unused", engine=engine)
+    after = rgb(doc[0])
+
+    assert requests_seen
+    assert any("SOURCE" in str(kwargs) for _, _, kwargs in requests_seen)
+    assert all("HEADER" not in str(kwargs) for _, _, kwargs in requests_seen)
+    assert "q 1 g" in operations
+    assert "re W n" in operations  # opaque reference uses the original scan
+    assert "A much longer translated phrase" in doc[0].get_text()
+    assert "SOURCE" not in doc[0].get_text()
+    assert np.array_equal(before[:35], after[:35])  # protected OCR stays hidden
+    assert np.array_equal(before[105:170, 140:220], after[105:170, 140:220])
+    assert after[71:75, 20:65].mean() > 250  # source scan ink was erased
