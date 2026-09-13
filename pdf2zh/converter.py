@@ -29,6 +29,7 @@ from pdf2zh.line_breaking import (
     normalize_protected_literals,
 )
 from pdf2zh.scanned_pdf import (
+    english_scan_sections_to_preserve,
     horizontal_fit_scale,
     is_hidden_ocr,
     recover_scan_gap_fragments,
@@ -69,6 +70,8 @@ from pdf2zh.translation_policy import (
     RUNNING_HEADER_REGION_KIND,
     DocumentTranslationPolicy,
     SourceSegment,
+    SegmentPart,
+    SegmentPlan,
     formula_cache_signature,
     is_running_header_segment,
     looks_like_reference_author_block,
@@ -3171,6 +3174,12 @@ class TranslateConverter(PDFConverterEx):
                 f"paragraph text/property count mismatch: {len(sstk)} != {len(pstk)}"
             )
 
+        already_english = english_scan_sections_to_preserve(
+            sstk,
+            scanned=bool(pstk) and pstk[0].page_id in getattr(self, "scan_backgrounds", {}),
+            source_language=getattr(self.translator, "lang_in", ""),
+            target_language=getattr(self.translator, "lang_out", ""),
+        )
         plans = []
         for segment_index, (text, paragraph) in enumerate(
             zip(sstk, pstk, strict=True)
@@ -3188,6 +3197,9 @@ class TranslateConverter(PDFConverterEx):
                 break_offsets=tuple(paragraph.break_offsets),
                 region_kind=paragraph.region_kind,
             )
+            if segment_index in already_english:
+                plans.append(SegmentPlan(source, (SegmentPart(ROLE_PRESERVE, text),)))
+                continue
             plans.append(
                 self.translation_policy.plan_segment(
                     source,

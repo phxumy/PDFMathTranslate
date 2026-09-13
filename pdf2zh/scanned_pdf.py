@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 import numpy as np
@@ -279,3 +280,55 @@ def horizontal_fit_scale(
     width = source_right - source_left
     extent = target_right - source_left
     return min(1.0, width / extent) if width > 0 and extent > 0 else 1.0
+
+
+def english_scan_sections_to_preserve(
+    texts: list[str],
+    *,
+    scanned: bool,
+    source_language: str,
+    target_language: str,
+) -> set[int]:
+    """Preserve an explicitly labelled English abstract in a Chinese scan.
+
+    This is a narrow bilingual-journal rule, not general language detection.
+    Keywords qualify only beside a positively identified English abstract on
+    the same page; unlabelled Latin text still follows normal translation.
+    """
+    if (
+        not scanned
+        or source_language.lower().replace("_", "-").split("-")[0] != "zh"
+        or target_language.lower().replace("_", "-").split("-")[0] != "en"
+    ):
+        return set()
+
+    def ascii_letters_only(value: str) -> bool:
+        letters = [char for char in value if char.isalpha()]
+        return len(letters) >= 20 and all(char.isascii() for char in letters)
+
+    english_function_words = {
+        "the",
+        "of",
+        "and",
+        "in",
+        "to",
+        "we",
+        "this",
+        "is",
+        "with",
+    }
+    abstracts = {
+        index
+        for index, text in enumerate(texts)
+        if re.match(r"\s*Abstract\s*[:：]", text, re.IGNORECASE)
+        and ascii_letters_only(text)
+        and len(set(re.findall(r"[a-z]+", text.lower())) & english_function_words) >= 3
+    }
+    if not abstracts:
+        return set()
+    return abstracts | {
+        index
+        for index, text in enumerate(texts)
+        if re.match(r"\s*Key\s*words\s*[:：]", text, re.IGNORECASE)
+        and ascii_letters_only(text)
+    }

@@ -20,6 +20,7 @@ from pdf2zh.cache import TranslationCache
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import (
     detect_scan_background,
+    english_scan_sections_to_preserve,
     horizontal_fit_scale,
     prepare_scan_background,
 )
@@ -279,3 +280,91 @@ def test_scan_fragment_white_background_does_not_erase_existing_target_content(
         assert tuple(pixel) == (255, 0, 0)
     else:
         assert tuple(pixel) == (255, 255, 255)
+
+
+ENGLISH_ABSTRACT = (
+    "Abstract: We examine the history of capitalism and its development in China."
+)
+ENGLISH_KEYWORDS = "Key words: modernization; national capitalism; industrialization"
+
+
+@pytest.mark.parametrize(
+    "texts, scanned, source_language, target_language, expected",
+    [
+        ([ENGLISH_ABSTRACT, ENGLISH_KEYWORDS], True, "zh-CN", "en", {0, 1}),
+        ([ENGLISH_ABSTRACT, ENGLISH_KEYWORDS], False, "zh", "en", set()),
+        ([ENGLISH_ABSTRACT, ENGLISH_KEYWORDS], True, "en", "zh", set()),
+        ([ENGLISH_ABSTRACT, ENGLISH_KEYWORDS], True, "fr", "en", set()),
+        (
+            [ENGLISH_ABSTRACT.removeprefix("Abstract: "), ENGLISH_KEYWORDS],
+            True,
+            "zh",
+            "en",
+            set(),
+        ),
+        (
+            [
+                "Abstract: Cette recherche examine les relations entre le capitalisme et la modernisation.",
+                ENGLISH_KEYWORDS,
+            ],
+            True,
+            "zh",
+            "en",
+            set(),
+        ),
+        (
+            [
+                "Abstract: We examine the history of capitalism and its development in 中国。",
+                ENGLISH_KEYWORDS,
+            ],
+            True,
+            "zh",
+            "en",
+            set(),
+        ),
+        ([ENGLISH_KEYWORDS], True, "zh", "en", set()),
+        (
+            [ENGLISH_ABSTRACT, "Key words: modernization; 民族资本主义"],
+            True,
+            "zh",
+            "en",
+            {0},
+        ),
+    ],
+)
+def test_existing_english_scan_sections_are_preserved_only_for_explicit_bilingual_blocks(
+    texts, scanned, source_language, target_language, expected
+):
+    assert (
+        english_scan_sections_to_preserve(
+            texts,
+            scanned=scanned,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        == expected
+    )
+
+
+def test_real_scan_pipeline_keeps_existing_english_abstract_pixels_without_http(
+    monkeypatch,
+):
+    requests_seen = []
+
+    def offline_request(*args, **kwargs):
+        requests_seen.append((args, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = (
+            b'<div class="result-container">Unexpected translation</div>'
+        )
+        return response
+
+    monkeypatch.setattr(requests.Session, "request", offline_request)
+    monkeypatch.setattr(TranslationCache, "set", lambda *_args: None)
+    doc = make_source(body_text=ENGLISH_ABSTRACT)
+    before = rgb(doc[0]).copy()
+    operations, _ = translate_locally(doc, "unused", engine="google")
+    assert not requests_seen
+    assert "q 1 g" not in operations
+    assert np.array_equal(before, rgb(doc[0]))
