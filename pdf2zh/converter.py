@@ -252,10 +252,7 @@ def _release_chemical_direction_qualifiers(
             ),
             source[marker_end:],
         )
-        if (
-            re.match(r"\s+(?:left|right)\b[^()\r\n]{0,160}\)", following)
-            is None
-        ):
+        if re.match(r"\s+(?:left|right)\b[^()\r\n]{0,160}\)", following) is None:
             continue
         split_at = match.start("suffix")
         prefix, suffix = chars[:split_at], chars[split_at:]
@@ -278,9 +275,7 @@ def _release_chemical_direction_qualifiers(
         baseline_chars = [char for char in prefix if float(char.size) >= em * 0.9]
         if not baseline_chars:
             continue
-        baseline = float(
-            np.median([_char_baseline(char) for char in baseline_chars])
-        )
+        baseline = float(np.median([_char_baseline(char) for char in baseline_chars]))
         if any(abs(_char_baseline(char) - baseline) > em * 0.15 for char in suffix):
             continue
         gap = float(suffix[0].x0) - max(float(char.x1) for char in prefix)
