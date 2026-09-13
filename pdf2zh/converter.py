@@ -215,6 +215,84 @@ def _split_trailing_prose_openers(
     )
 
 
+def _release_chemical_direction_qualifiers(
+    texts: list[str],
+    formulas: list[list[LTChar]],
+    formula_paragraphs: list[int],
+    paragraph_text_chars: list[list[LTChar]],
+) -> None:
+    """Return a chemical formula's spaced ``(upper left, ...)`` to prose.
+
+    The generic bracket continuation can swallow the first ordinary word after
+    a chemical subscript.  Release only a known positional phrase proven by the
+    surrounding paragraph, a subscripted chemical-shaped prefix, and a visible
+    word-space before its ordinary-font parenthesis.  Mathematical function
+    arguments, adjacent parentheses and protected diagram labels stay opaque.
+    """
+    pattern = re.compile(
+        r"^(?P<formula>\d*(?:[A-Z][a-z]?\d*){2,})"
+        r"(?P<suffix>\((?:upper|lower|top|bottom))$"
+    )
+    for index, chars in enumerate(formulas):
+        match = pattern.fullmatch("".join(char.get_text() for char in chars))
+        if match is None or any(len(char.get_text()) != 1 for char in chars):
+            continue
+        paragraph_id = formula_paragraphs[index]
+        marker = f"{{v{index}}}"
+        source = texts[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        marker_end = source.index(marker) + len(marker)
+        following = re.sub(
+            r"\{v(\d+)\}",
+            lambda item: (
+                "".join(char.get_text() for char in formulas[int(item.group(1))])
+                if int(item.group(1)) < len(formulas)
+                else item.group(0)
+            ),
+            source[marker_end:],
+        )
+        if (
+            re.match(r"\s+(?:left|right)\b[^()\r\n]{0,160}\)", following)
+            is None
+        ):
+            continue
+        split_at = match.start("suffix")
+        prefix, suffix = chars[:split_at], chars[split_at:]
+        em = float(suffix[0].size)
+        if em <= 0 or not any(float(char.size) < em * 0.8 for char in prefix):
+            continue
+        if any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0
+            or _is_non_horizontal_text_matrix(char.matrix)
+            for char in chars
+        ):
+            continue
+        if any(
+            _MATH_FONT_RE.search(_formula_font_name(char))
+            or _PROSE_ITALIC_FONT_RE.search(_formula_font_name(char))
+            or abs(float(char.size) - em) > em * 0.1
+            for char in suffix
+        ):
+            continue
+        baseline_chars = [char for char in prefix if float(char.size) >= em * 0.9]
+        if not baseline_chars:
+            continue
+        baseline = float(
+            np.median([_char_baseline(char) for char in baseline_chars])
+        )
+        if any(abs(_char_baseline(char) - baseline) > em * 0.15 for char in suffix):
+            continue
+        gap = float(suffix[0].x0) - max(float(char.x1) for char in prefix)
+        if not em * 0.12 < gap <= em * 0.5:
+            continue
+        formulas[index] = prefix
+        texts[paragraph_id] = source.replace(
+            marker, marker + " " + match.group("suffix"), 1
+        )
+        paragraph_text_chars[paragraph_id].extend(suffix)
+
+
 _PROSE_SENTENCE_PUNCTUATION = frozenset(".,;:!?，。；：！？")
 _FORMULA_TRAILING_PROSE_WORDS = frozenset(
     {
@@ -4069,6 +4147,12 @@ class TranslateConverter(PDFConverterEx):
                 varp.append(len(sstk) - 1)
             sstk[-1] += prose_suffix
         _merge_overlapping_split_math_islands(
+            sstk,
+            var,
+            varp,
+            paragraph_text_chars,
+        )
+        _release_chemical_direction_qualifiers(
             sstk,
             var,
             varp,
