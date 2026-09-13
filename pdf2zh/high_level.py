@@ -27,6 +27,7 @@ from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.font_cmap import prepare_pdf_text_font
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
+from pdf2zh.scanned_pdf import detect_scan_background
 
 from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
@@ -295,6 +296,7 @@ def translate_patch(
         ignore_cache,
     )
     device.layout_region_types = layout_region_types
+    device.scan_backgrounds = {}
 
     assert device is not None
     obj_patch = {}
@@ -320,6 +322,9 @@ def translate_patch(
             image = np.frombuffer(pix.samples, np.uint8).reshape(
                 pix.height, pix.width, 3
             )[:, :, ::-1]
+            scan_background = detect_scan_background(doc_zh[page.pageno], image)
+            if scan_background is not None:
+                device.scan_backgrounds[page.pageno] = scan_background
             page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
             # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
             box, page_region_types = _build_layout_mask(

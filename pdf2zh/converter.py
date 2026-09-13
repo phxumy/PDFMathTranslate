@@ -27,6 +27,13 @@ from pdf2zh.line_breaking import (
     iter_protected_literals,
     normalize_protected_literals,
 )
+from pdf2zh.scanned_pdf import (
+    horizontal_fit_scale,
+    is_hidden_ocr,
+    recover_scan_gap_fragments,
+    scan_line_mask_ops,
+    scan_text_bounds,
+)
 from pdf2zh.translator import (
     AnythingLLMTranslator,
     ArgosTranslator,
@@ -2586,10 +2593,19 @@ class PDFConverterEx(PDFConverter):
             scaling=float(scaling),
             rise=float(rise),
         )
+        item._pdf2zh_source_render_mode = getattr(self, "_source_render_mode", 0)
         self.cur_item.add(item)
         item.cid = cid  # hack 插入原字符编码
         item.font = font  # hack 插入原字符字体
         return item.adv
+
+    def render_string(self, textstate, seq, ncs, graphicstate) -> None:
+        previous = getattr(self, "_source_render_mode", 0)
+        self._source_render_mode = textstate.render
+        try:
+            return super().render_string(textstate, seq, ncs, graphicstate)
+        finally:
+            self._source_render_mode = previous
 
 
 class Paragraph:
@@ -3580,6 +3596,9 @@ class TranslateConverter(PDFConverterEx):
         overrides: list[FragmentOverride] | None = None,
     ):
         # 段落
+        scan_background = getattr(self, "scan_backgrounds", {}).get(ltpage.pageid)
+        if scan_background is not None:
+            recover_scan_gap_fragments(ltpage, scan_background, self.layout[ltpage.pageid])
         sstk: list[str] = []            # 段落文字栈
         paragraph_text_chars: list[list[LTChar]] = []
         pstk: list[Paragraph] = []      # 段落属性栈
@@ -3724,6 +3743,7 @@ class TranslateConverter(PDFConverterEx):
                 # 判定当前字符是否属于公式
                 if (                                                                                        # 判定当前字符是否属于公式
                     cls == 0                                                                                # 1. 类别为保留区域
+                    or getattr(child, "_pdf2zh_scan_fragment", False)
                     or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79)  # 2. 角标字体，有 0.76 的角标和 0.799 的大写，这里用 0.79 取中，同时考虑首字母放大的情况
                     or vflag(child.fontname, child.get_text())                                              # 3. 公式字体
                     or (child.matrix[0] == 0 and child.matrix[3] == 0)                                      # 4. 垂直字体
@@ -4272,11 +4292,28 @@ class TranslateConverter(PDFConverterEx):
         default_line_height = LANG_LINEHEIGHT_MAP.get(self.translator.lang_out.lower(), 1.1) # 小语种默认1.1
         _x, _y = 0, 0
         ops_list = []
+        scan_background = getattr(self, "scan_backgrounds", {}).get(ltpage.pageid)
+        scan_masks: list[str] = []
 
         def gen_op_line(x, y, xlen, ylen, linewidth):
             return f"ET q 1 0 0 1 {x:f} {y:f} cm [] 0 d 0 J {linewidth:f} w 0 0 m {xlen:f} {ylen:f} l S Q BT "
 
         for id, new in enumerate(news):
+            source_chars = list(paragraph_text_chars[id])
+            for formula_chars, paragraph_id in zip(var, varp):
+                if paragraph_id == id:
+                    source_chars.extend(formula_chars)
+            scanned_paragraph = (
+                scan_background is not None
+                and bool(source_chars)
+                and all(is_hidden_ocr(char) for char in source_chars)
+            )
+            if scanned_paragraph:
+                if "".join(new.split()) == "".join(source_sstk[id].split()):
+                    # The scan already contains protected headers, page numbers,
+                    # and untranslated text. Its hidden OCR must stay hidden.
+                    continue
+                scan_masks.append(scan_line_mask_ops(source_chars, scan_background))
             x: float = pstk[id].x                       # 段落初始横坐标
             y: float = pstk[id].y                       # 段落初始纵坐标
             x0: float = pstk[id].x0                     # 段落左边界
@@ -4291,6 +4328,7 @@ class TranslateConverter(PDFConverterEx):
             fcur_ = fcur
             ptr = 0
             italic_active = False
+            target_right = x0
             log.debug(f"< {y} {x} {x0} {x1} {size} {brk} > {sstk[id]} | {new}")
 
             if pstk[id].region_kind == "title" and self.translator.lang_out.lower() in {
@@ -4431,6 +4469,7 @@ class TranslateConverter(PDFConverterEx):
                 visual_end = x + adv + (
                     ITALIC_SHEAR * size if italic_active and not vy_regex else 0.0
                 )
+                target_right = max(target_right, visual_end)
                 right_limit = x1 + (
                     size
                     if not vy_regex and ch in CJK_PROHIBITED_LINE_START
@@ -4462,7 +4501,20 @@ class TranslateConverter(PDFConverterEx):
                     # still required; otherwise a subscript becomes a detached
                     # baseline glyph merely because translation changed wrapping.
                     fix = varf[vid]
+                    if scanned_paragraph and all(is_hidden_ocr(char) for char in var[vid]):
+                        # OCR fonts are often unembedded or have unusable glyph
+                        # codes. Move the exact original scan fragment instead.
+                        bounds = scan_text_bounds(var[vid], scan_background)
+                        ops_vals.append({
+                            "type": OpType.SCANNED_FRAGMENT,
+                            "bounds": bounds,
+                            "x": x + bounds[0] - vx0[vid],
+                            "dy": fix + bounds[1] - var[vid][0].y0,
+                            "lidx": lidx,
+                        })
                     for vch in var[vid]:  # 排版公式字符
+                        if scanned_paragraph and is_hidden_ocr(vch):
+                            continue
                         vc = chr(vch.cid)
                         source_state = getattr(
                             vch,
@@ -4543,6 +4595,15 @@ class TranslateConverter(PDFConverterEx):
             )
             line_height = vertical_fit.line_height
             render_scale = vertical_fit.render_scale
+            if not brk:
+                render_scale = min(
+                    render_scale,
+                    horizontal_fit_scale(
+                        source_left=x0,
+                        source_right=x1,
+                        target_right=target_right,
+                    ),
+                )
             toc_entry = None
             if pstk[id].region_kind == "toc_entry":
                 toc_entry = toc_layout.entries[pstk[id].layout_class - toc_class_start]
@@ -4583,6 +4644,14 @@ class TranslateConverter(PDFConverterEx):
                     ))
                 elif vals["type"] == OpType.PRESERVED_TEXT:
                     ops_list.append(_gen_preserved_text_op(vals["font"], vals["state"], vals["rtxt"]))
+                elif vals["type"] == OpType.SCANNED_FRAGMENT:
+                    ops_list.append(scan_background.fragment_ops(
+                        vals["bounds"],
+                        x0 + (vals["x"] - x0) * render_scale,
+                        vals["dy"] * render_scale + y
+                        - vals["lidx"] * size * render_scale * line_height,
+                        render_scale,
+                    ))
                 elif vals["type"] == OpType.LINE:
                     ops_list.append(gen_op_line(
                         x0 + (vals["x"] - x0) * render_scale,
@@ -4606,11 +4675,12 @@ class TranslateConverter(PDFConverterEx):
             if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
                 ops_list.append(gen_op_line(l.pts[0][0], l.pts[0][1], l.pts[1][0] - l.pts[0][0], l.pts[1][1] - l.pts[0][1], l.linewidth))
 
-        ops = f"BT {''.join(ops_list)}ET "
+        ops = f"{''.join(scan_masks)}BT {''.join(ops_list)}ET "
         return ops
 
 
 class OpType(Enum):
     TEXT = "text"
     PRESERVED_TEXT = "preserved_text"
+    SCANNED_FRAGMENT = "scanned_fragment"
     LINE = "line"
