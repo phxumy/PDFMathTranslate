@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import re
+import html
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
+import pytest
 from pdfminer.layout import LTPage
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 
@@ -14,6 +17,7 @@ from pdf2zh.translation_policy import (
     ROLE_TRANSLATE,
     SourceSegment,
 )
+from pdf2zh.translator import BingTranslator, GoogleTranslator
 
 
 class Font:
@@ -181,3 +185,85 @@ def test_render_short_labels_with_fixed_destinations_and_regenerated_leaders():
     assert "/F1 10.000000 Tf 1 0 0 1 520.000000 660.000000 Tm" in operations
     leader_starts = re.findall(r"\[0 2\.500000\] 0 d ([\d.]+) [\d.]+ m", operations)
     assert [float(start) for start in leader_starts] == [87.5, 87.5, 87.5]
+
+
+@pytest.mark.parametrize("backend", [GoogleTranslator, BingTranslator])
+def test_generic_translator_http_path_keeps_contents_rows_and_formula_geometry(backend):
+    # Exercise the complete shared converter -> planner -> translate() ->
+    # provider do_translate() -> renderer path. Only HTTP and cache I/O are
+    # stubbed; this must never depend on a Codex-specific batch implementation.
+    value = converter()
+    seed(value)
+    entry(value, "3 Energy x", "30", 640)
+    for char in value.cur_item:
+        if char.get_text() == "x":
+            char.fontname = "CMI10"
+
+    translator = backend.__new__(backend)
+    translator.lang_in = "en"
+    translator.lang_out = "en"
+    translator.ignore_cache = True
+    translator.cache = Mock()
+    translator.headers = {}
+    translator.endpoint = "https://stub.invalid/translator"
+    translator.session = Mock()
+    translator.translate_batch = Mock(
+        side_effect=AssertionError("generic path must use translate")
+    )
+    requests = []
+
+    def translated(source):
+        requests.append(source)
+        formulas = re.findall(r"\{v\d+\}", source)
+        return "Short" + (" " + "".join(formulas) if formulas else "")
+
+    def get(_url, **kwargs):
+        if backend is GoogleTranslator:
+            result = translated(kwargs["params"]["q"])
+            return SimpleNamespace(
+                status_code=200,
+                text=f'class="result-container">{html.escape(result)}<',
+                raise_for_status=lambda: None,
+            )
+        return SimpleNamespace(
+            url=translator.endpoint,
+            text='"ig":"stub-ig" data-iid="stub-iid" params_AbusePreventionHelper = [123,"stub-token",',
+            raise_for_status=lambda: None,
+        )
+
+    def post(_url, **kwargs):
+        result = translated(kwargs["data"]["text"])
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: [{"translations": [{"text": result}]}],
+        )
+
+    translator.session.get.side_effect = get
+    translator.session.post.side_effect = post
+    value.translator = translator
+    value.thread = 4
+    value.translation_policy = DocumentTranslationPolicy()
+    operations = value.receive_layout(value.cur_item)
+
+    assert len(requests) == 5  # Heading plus four independent entries.
+    assert {source for source in requests if not source.startswith("3 Energy")} == {
+        "Table of contents",
+        "Abstract",
+        "1 Introduction",
+        "2 Methods",
+    }
+    formula_source = next(
+        source for source in requests if source.startswith("3 Energy")
+    )
+    assert re.fullmatch(r"3 Energy \{v\d+\}", formula_source)
+    assert all("..." not in source for source in requests)
+    assert not {"2", "11", "20", "30"}.intersection(requests)
+    translator.translate_batch.assert_not_called()
+    assert operations.count("[0 2.500000] 0 d") == 4
+    # Original page digits and the protected x glyph remain source-font
+    # operations; the destination remains in its original right column.
+    assert "/F1 10.000000 Tf 1 0 0 1 520.000000 640.000000 Tm [<33>]" in operations
+    assert "/F1 10.000000 Tf 1 0 0 1 525.000000 640.000000 Tm [<30>]" in operations
+    assert re.search(
+        r"/F1 10\.000000 Tf 1 0 0 1 [\d.]+ 640\.000000 Tm \[<78>\]", operations
+    )
