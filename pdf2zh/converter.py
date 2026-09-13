@@ -3,6 +3,7 @@ import logging
 import math
 import re
 import unicodedata
+from builtins import id as object_id
 from dataclasses import dataclass
 from enum import Enum
 from string import Template
@@ -17,6 +18,7 @@ from pdfminer.utils import Matrix, apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, wait_fixed, stop_after_attempt
 
+from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
     CJK_PROHIBITED_LINE_START,
@@ -3599,6 +3601,19 @@ class TranslateConverter(PDFConverterEx):
         xt_cls: int = -1                # 上一个字符所属段落，保证无论第一个字符属于哪个类别都可以触发新段落
         vmax: float = ltpage.width / 4  # 行内公式最大宽度
         ops: str = ""                   # 渲染结果
+        toc_layout = detect_toc_layout(ltpage)
+        region_types = dict(
+            getattr(self, "layout_region_types", {}).get(ltpage.pageid, {})
+        )
+        toc_class_start = max(region_types, default=1) + 1
+        if toc_layout.entries:
+            toc_class_start = max(
+                toc_class_start, int(np.max(self.layout[ltpage.pageid])) + 1
+            )
+            region_types.update({
+                toc_class_start + index: "toc_entry"
+                for index in range(len(toc_layout.entries))
+            })
 
         def vflag(font: str, char: str):    # 匹配公式（和角标）字体
             if isinstance(font, bytes):     # 不一定能 decode，直接转 str
@@ -3640,6 +3655,8 @@ class TranslateConverter(PDFConverterEx):
         # A. 原文档解析
         for child in ltpage:
             if isinstance(child, LTChar):
+                if object_id(child) in toc_layout.omitted_chars:
+                    continue
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
                 # ltpage.height 可能是 fig 里面的高度，这里统一用 layout.shape
@@ -3647,12 +3664,13 @@ class TranslateConverter(PDFConverterEx):
                 # 读取当前字符在 layout 中的类别
                 cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
                 cls = layout[cy, cx]
+                toc_entry_index = toc_layout.entry_by_char.get(object_id(child))
+                if toc_entry_index is not None:
+                    cls = toc_class_start + toc_entry_index
+                elif object_id(child) in toc_layout.page_number_chars:
+                    cls = 0
                 actual_cls = int(cls)
                 child._pdf2zh_layout_class = actual_cls
-                region_types = getattr(self, "layout_region_types", {}).get(
-                    ltpage.pageid,
-                    {},
-                )
                 candidate_region_kind = region_types.get(actual_cls, "")
                 previous_actual_cls = int(
                     getattr(xt, "_pdf2zh_layout_class", xt_cls)
@@ -3929,14 +3947,7 @@ class TranslateConverter(PDFConverterEx):
                                 False,
                                 page_id=ltpage.pageid,
                                 layout_class=int(cls),
-                                region_kind=getattr(
-                                    self,
-                                    "layout_region_types",
-                                    {},
-                                ).get(
-                                    ltpage.pageid,
-                                    {},
-                                ).get(int(cls), ""),
+                                region_kind=region_types.get(int(cls), ""),
                             )
                         )
                 if not cur_v:                                               # 文字入栈
@@ -4038,6 +4049,28 @@ class TranslateConverter(PDFConverterEx):
             varp,
             paragraph_text_chars,
         )
+        for paragraph in pstk:
+            if paragraph.region_kind == "toc_entry":
+                entry = toc_layout.entries[paragraph.layout_class - toc_class_start]
+                paragraph.x1 = entry.x1
+                paragraph.y0 = entry.y0
+                paragraph.y1 = entry.y1
+                paragraph.brk = True
+        # Occasionally the source itself wraps a destination number onto the
+        # next line at the left margin.  Keep that baseline while restoring the
+        # page-number column established by the surrounding contents rows.
+        toc_numbers = {
+            object_id(char): entry
+            for entry in toc_layout.entries
+            for char in entry.page_number
+        }
+        for formula, paragraph_id in zip(var, varp):
+            if formula and all(object_id(char) in toc_numbers for char in formula):
+                entry = toc_numbers[object_id(formula[0])]
+                shift = entry.page_right - max(char.x1 for char in entry.page_number)
+                pstk[paragraph_id].x += shift
+                pstk[paragraph_id].x0 += shift
+                pstk[paragraph_id].x1 += shift
         if getattr(self.translator, "name", "") == "codex" and not self.vfont:
             _split_formula_prose_boundaries(
                 sstk,
@@ -4510,6 +4543,16 @@ class TranslateConverter(PDFConverterEx):
             )
             line_height = vertical_fit.line_height
             render_scale = vertical_fit.render_scale
+            toc_entry = None
+            if pstk[id].region_kind == "toc_entry":
+                toc_entry = toc_layout.entries[pstk[id].layout_class - toc_class_start]
+                # Align the final translated line with the preserved destination
+                # page, including entries whose source title spans several lines.
+                y = (
+                    sum(char.y0 for char in toc_entry.page_number)
+                    / len(toc_entry.page_number)
+                    + lidx * size * render_scale * line_height
+                )
             if not vertical_fit.contained:
                 log.warning(
                     "Unable to fit target paragraph %s: invalid geometry "
@@ -4550,6 +4593,14 @@ class TranslateConverter(PDFConverterEx):
                         vals["ylen"] * render_scale,
                         vals["linewidth"] * render_scale,
                     ))
+
+            if toc_entry is not None:
+                ops_list.append(toc_leader_op(
+                    toc_entry,
+                    x0 + (x - x0) * render_scale,
+                    y - lidx * size * render_scale * line_height,
+                    size * render_scale,
+                ))
 
         for l in lstk:  # 排版全局线条
             if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景

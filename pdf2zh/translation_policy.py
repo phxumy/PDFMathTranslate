@@ -834,10 +834,13 @@ class DocumentTranslationPolicy:
         ):
             return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
 
-        # A detector-confirmed caption or table note is semantic prose, not a
-        # byline or bibliography block.  Route it directly to translation so
-        # incidental Title Case phrases cannot trigger author-name heuristics.
-        if segment.region_kind in _TRANSLATABLE_CAPTION_REGION_KINDS:
+        # Captions, table notes and recovered contents entries are semantic
+        # prose.  Incidental Title Case phrases must not trigger author-name
+        # heuristics; "References" in a contents row is not a bibliography.
+        if (
+            segment.region_kind in _TRANSLATABLE_CAPTION_REGION_KINDS
+            or segment.region_kind == "toc_entry"
+        ):
             return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))
 
         if segment.region_kind == "title":
