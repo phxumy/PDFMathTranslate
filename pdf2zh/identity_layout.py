@@ -8,7 +8,6 @@ from pdfminer.layout import LTChar, LTPage
 
 from pdf2zh.toc_layout import _lines
 
-
 _ORCID = re.compile(r"(?:https?://)?orcid\.org/\d{4}-\d{4}-\d{4}-\d{3}[\dX]", re.I)
 
 
@@ -30,7 +29,7 @@ def orcid_list_chars(page: LTPage) -> set[LTChar]:
         match = _ORCID.search(text)
         if match is None:
             continue
-        prefix, suffix = text[:match.start()].strip(), text[match.end():].strip()
+        prefix, suffix = text[: match.start()].strip(), text[match.end() :].strip()
         if len(prefix) > 75 or suffix or re.search(r"[,;:!?]", prefix):
             continue
         if len(prefix.split()) > 7:

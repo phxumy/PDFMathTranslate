@@ -57,5 +57,3 @@ def test_extended_latin_characters_use_unicode_fallback_not_glyph_zero():
     assert "/pdf2zh_latin " in ops
     assert f"[<{glyphs}>] TJ" in ops
     assert "0000" not in glyphs
-
-

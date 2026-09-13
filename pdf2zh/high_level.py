@@ -270,14 +270,14 @@ def translate_patch(
     service: str = "",
     noto_name: str = "",
     noto: Font = None,
-    latin: Font = None,
-    latin_name: str = LATIN_NAME,
     callback: object = None,
     cancellation_event: asyncio.Event = None,
     model: OnnxModel = None,
     envs: Dict = None,
     prompt: Template = None,
     ignore_cache: bool = False,
+    latin: Font = None,
+    latin_name: str = LATIN_NAME,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
