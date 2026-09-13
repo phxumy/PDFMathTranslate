@@ -27,7 +27,7 @@ from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.font_cmap import prepare_pdf_text_font
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
-from pdf2zh.scanned_pdf import detect_scan_background
+from pdf2zh.scanned_pdf import prepare_scan_background
 
 from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
@@ -322,7 +322,7 @@ def translate_patch(
             image = np.frombuffer(pix.samples, np.uint8).reshape(
                 pix.height, pix.width, 3
             )[:, :, ::-1]
-            scan_background = detect_scan_background(doc_zh[page.pageno], image)
+            scan_background = prepare_scan_background(doc_zh[page.pageno], image)
             if scan_background is not None:
                 device.scan_backgrounds[page.pageno] = scan_background
             page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import html
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,7 +18,11 @@ from pdfminer.pdfparser import PDFParser
 from pdf2zh.converter import PDFConverterEx, TranslateConverter
 from pdf2zh.cache import TranslationCache
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
-from pdf2zh.scanned_pdf import detect_scan_background, horizontal_fit_scale
+from pdf2zh.scanned_pdf import (
+    detect_scan_background,
+    horizontal_fit_scale,
+    prepare_scan_background,
+)
 
 
 def make_source(
@@ -27,12 +32,16 @@ def make_source(
     colour=False,
     omitted_reference=False,
     reference_ink=True,
+    body_text="SOURCE",
+    scan_baseline_offset=0,
 ):
     artwork = pymupdf.open()
     art = artwork.new_page(width=240, height=200)
     art.draw_rect(art.rect, fill=(1, 0.7, 0.7) if colour else (1, 1, 1))
     art.insert_text((20, 25), "HEADER", fontsize=10)
-    art.insert_text((20, 80), "SOURCE", fontsize=12)
+    art.insert_text((20, 80 + scan_baseline_offset), body_text, fontsize=12)
+    if scan_baseline_offset:
+        art.draw_line((20, 89), (100, 89), width=0.5)
     if omitted_reference:
         if reference_ink:
             art.insert_text((78, 73), "184-218", fontsize=5)
@@ -47,7 +56,7 @@ def make_source(
             page.rect, stream=art.get_pixmap(matrix=pymupdf.Matrix(3, 3)).tobytes("png")
         )
     page.insert_text((20, 25), "HEADER", fontsize=10, render_mode=3 if hidden else 0)
-    page.insert_text((20, 80), "SOURCE", fontsize=12, render_mode=3 if hidden else 0)
+    page.insert_text((20, 80), body_text, fontsize=12, render_mode=3 if hidden else 0)
     if omitted_reference:
         page.insert_text((110, 80), "NEXT", fontsize=12, render_mode=3 if hidden else 0)
     else:
@@ -63,7 +72,7 @@ def rgb(page):
 
 def translate_locally(doc, replacement, *, engine=None):
     page = doc[0]
-    scan = detect_scan_background(page, rgb(page))
+    scan = prepare_scan_background(page, rgb(page))
     manager = PDFResourceManager()
     if engine is None:
         converter = TranslateConverter.__new__(TranslateConverter)
@@ -93,7 +102,10 @@ def translate_locally(doc, replacement, *, engine=None):
 
     def translate(segments, paragraphs, *args, **kwargs):
         captured.extend(segments)
-        return [segment.replace("SOURCE", replacement) for segment in segments]
+        return [
+            segment.replace("SOURCE", replacement).replace("grouping", replacement)
+            for segment in segments
+        ]
 
     if engine is None:
         converter._translate_planned_segments = translate
@@ -233,3 +245,37 @@ def test_scan_cleanup_uses_the_same_real_translation_pipeline_for_http_engines(
     assert np.array_equal(before[:35], after[:35])  # protected OCR stays hidden
     assert np.array_equal(before[105:170, 140:220], after[105:170, 140:220])
     assert after[71:75, 20:65].mean() > 250  # source scan ink was erased
+
+
+def test_scan_ink_below_inaccurate_ocr_baseline_is_removed_without_erasing_a_rule():
+    doc = make_source(body_text="grouping", scan_baseline_offset=2)
+    before = rgb(doc[0]).copy()
+    translate_locally(doc, "A translated sentence with more words")
+    after = rgb(doc[0])
+    assert before[83:86, 20:60].mean() < 252
+    assert after[83:86, 20:60].mean() > 254
+    assert np.array_equal(before[88:91, 20:100], after[88:91, 20:100])
+
+
+@pytest.mark.parametrize("multiply", [False, True])
+def test_scan_fragment_white_background_does_not_erase_existing_target_content(
+    multiply,
+):
+    doc = make_source()
+    page = doc[0]
+    scan = prepare_scan_background(page, rgb(page))
+    assert scan is not None
+    if not multiply:
+        scan = replace(scan, blend_state=None)
+    page.draw_rect((135, 100, 195, 125), color=(1, 0, 0), fill=(1, 0, 0))
+    old = b" ".join(doc.xref_stream(xref) for xref in page.get_contents())
+    operations = scan.fragment_ops((20, 116, 64, 132), 140, 80, 1.0)
+    xref = doc.get_new_xref()
+    doc.update_object(xref, "<<>>")
+    doc.update_stream(xref, old + b" BT " + operations.encode() + b" ET")
+    page.set_contents(xref)
+    pixel = rgb(page)[118, 141]
+    if multiply:
+        assert tuple(pixel) == (255, 0, 0)
+    else:
+        assert tuple(pixel) == (255, 255, 255)

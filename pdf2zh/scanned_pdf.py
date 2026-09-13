@@ -17,6 +17,7 @@ class ScanBackground:
     width: float
     height: float
     preview: np.ndarray | None = field(default=None, repr=False, compare=False)
+    blend_state: str | None = None
 
     def fragment_ops(
         self,
@@ -28,8 +29,9 @@ class ScanBackground:
         """Replay a clipped piece of the existing image, without resampling it."""
         x0, y0, x1, y1 = bounds
         matrix = " ".join(f"{value:f}" for value in self.image_matrix)
+        blend = f"/{self.blend_state} gs " if self.blend_state else ""
         return (
-            f"ET q {scale:f} 0 0 {scale:f} "
+            f"ET q {blend}{scale:f} 0 0 {scale:f} "
             f"{target_x - x0 * scale:f} {target_y - y0 * scale:f} cm "
             f"{x0:f} {y0:f} {x1 - x0:f} {y1 - y0:f} re W n "
             f"{matrix} cm /{self.image_name} Do Q BT "
@@ -77,6 +79,40 @@ def detect_scan_background(page: Any, rgb_image: np.ndarray) -> ScanBackground |
             rgb_image,
         )
     return None
+
+
+def prepare_scan_background(page: Any, rgb_image: np.ndarray) -> ScanBackground | None:
+    """Register fragment-only Multiply blending after scan detection succeeds."""
+    background = detect_scan_background(page, rgb_image)
+    if background is None:
+        return None
+    doc = page.parent
+    resource_xref = page.xref
+    prefix = "Resources/"
+    kind, value = doc.xref_get_key(page.xref, "Resources")
+    if kind == "xref":
+        resource_xref = int(value.split()[0])
+        prefix = ""
+    kind, value = doc.xref_get_key(resource_xref, prefix + "ExtGState")
+    if kind == "xref":
+        resource_xref = int(value.split()[0])
+        prefix = ""
+    else:
+        prefix += "ExtGState/"
+    name = "PDF2ZHScanMultiply"
+    suffix = 0
+    while doc.xref_get_key(resource_xref, prefix + name)[0] != "null":
+        suffix += 1
+        name = f"PDF2ZHScanMultiply{suffix}"
+    doc.xref_set_key(resource_xref, prefix + name, "<< /BM /Multiply >>")
+    return ScanBackground(
+        background.image_name,
+        background.image_matrix,
+        background.width,
+        background.height,
+        background.preview,
+        name,
+    )
 
 
 def is_hidden_ocr(char: Any) -> bool:
@@ -198,6 +234,38 @@ def scan_line_mask_ops(chars: list[Any], background: ScanBackground) -> str:
             run.append(char)
         if run:
             bounds.append(scan_text_bounds(run, background))
+    # LTChar deliberately has no font descent in pdf2zh. Follow connected ink
+    # below each compact line until paper resumes, without sweeping across the
+    # whitespace separating it from a caption rule or the following line.
+    if background.preview is not None:
+        image = background.preview
+        sx, sy = image.shape[1] / background.width, image.shape[0] / background.height
+        em = max((float(char.size) for char in chars), default=0.0)
+        expanded = []
+        for x0, y0, x1, y1 in bounds:
+            left, right = max(0, int(x0 * sx)), min(
+                image.shape[1], int(np.ceil(x1 * sx))
+            )
+            top = max(0, int((background.height - y1) * sy))
+            bottom = min(image.shape[0], int(np.ceil((background.height - y0) * sy)))
+            limit = min(
+                image.shape[0], int(np.ceil((background.height - y0 + 0.5 * em) * sy))
+            )
+            dark = (image[top:limit, left:right, :3].min(axis=2) < 170).any(axis=1)
+            initial_ink = np.flatnonzero(dark[: bottom - top])
+            if len(initial_ink):
+                last = int(initial_ink[-1])
+                gap = 0
+                for row in range(last + 1, len(dark)):
+                    if dark[row]:
+                        last, gap = row, 0
+                    else:
+                        gap += 1
+                        if gap == 2:
+                            break
+                y0 = min(y0, background.height - (top + last + 1.5) / sy)
+            expanded.append((x0, max(0.0, y0), x1, y1))
+        bounds = expanded
     rectangles = " ".join(
         f"{x0:f} {y0:f} {x1 - x0:f} {y1 - y0:f} re f" for x0, y0, x1, y1 in bounds
     )
