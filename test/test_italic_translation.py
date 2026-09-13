@@ -9,6 +9,7 @@ from pdf2zh.converter import (
     TranslateConverter,
     _collect_translatable_italic_runs,
     _collect_reference_title_italic_runs,
+    _join_reference_title_styles,
     _gen_target_text_op,
     _has_inline_prose_context,
     _is_high_confidence_prose_italic,
@@ -190,6 +191,47 @@ class ItalicClassifierTests(unittest.TestCase):
                 segments, [run], [0], [paragraph(region_kind="title")]
             )
             self.assertEqual(segments, ["{v0}"])
+
+    def test_comma_delimited_book_title_continues_across_formula_runs(self):
+        candidates = _collect_reference_title_italic_runs(
+            [fake_run("Conformal Mapping: Methods and"), fake_run("Applications")],
+            [0, 0],
+            [paragraph()],
+            ["[10] R. Schinzinger and P. A. A. Laura, {v0} {v1}. Dover, 2003."],
+        )
+        tagged, _ = _tag_translatable_italic_formulas("{v0} {v1}", candidates)
+        self.assertEqual(
+            _join_reference_title_styles(tagged),
+            "[[PDF2ZH_ITALIC_0_BEGIN]]Conformal Mapping: Methods and Applications[[PDF2ZH_ITALIC_0_END]]",
+        )
+
+    def test_author_year_journal_and_venue_after_long_author_list_are_protected(self):
+        for segment in (
+            "[16] Rahamim J, Behrle T and Leek P J 2017 {v0} 110 222602.",
+            "[71] Manzil Zaheer, Satwik Kottur, Siamak Ravanbakhsh, and Alexander J Smola. Deep sets. {v0}, 30, 2017.",
+        ):
+            self.assertEqual(
+                _collect_reference_title_italic_runs(
+                    [fake_run("Appl. Phys. Lett")], [0], [paragraph()], [segment]
+                ),
+                {},
+            )
+
+    def test_roman_series_suffix_does_not_hide_italic_book_title(self):
+        candidates = _collect_reference_title_italic_runs(
+            [
+                fake_mixed_run(
+                    [
+                        ("Electromagnetic Compatibility Handbook", "Times-Italic"),
+                        (" (Electrical", "Times-Roman"),
+                    ]
+                )
+            ],
+            [0],
+            [paragraph()],
+            ["[15] K. L. Kaiser, {v0} Engineering Handbook Series). CRC, 2004."],
+        )
+        self.assertIn(0, candidates)
 
     def test_theorem_prose_is_split_from_embedded_math_atoms(self) -> None:
         formulas = [

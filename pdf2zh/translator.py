@@ -43,6 +43,7 @@ from pdf2zh.translation_policy import (
     ExactReplacement,
     apply_exact_replacements,
     looks_like_reference_author_block,
+    looks_like_reference_title_prefix,
 )
 
 
@@ -3283,11 +3284,16 @@ class CodexTranslator(BaseTranslator):
         )
         spans: list[str] = []
         for match in pattern.finditer(entry):
-            title = match.group(2)
+            title = re.split(
+                r"\s*\(|,\s*Proceedings\s+of\b",
+                match.group(2),
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].rstrip()
             if (
                 not title.strip()
                 or title != title.strip()
-                or len(re.findall(r"[A-Za-z]+", title)) < 2
+                or not re.search(r"[A-Za-z]", title)
                 or entry.count(title) != 1
             ):
                 return ()
@@ -3314,9 +3320,14 @@ class CodexTranslator(BaseTranslator):
         author_end: int | None = None
         for period in re.finditer(r"\.", entry[label.end() :]):
             candidate_end = label.end() + period.end()
-            if looks_like_reference_author_block(entry[:candidate_end]):
+            if looks_like_reference_title_prefix(entry[:candidate_end]):
                 author_end = candidate_end
                 break
+        if author_end is None:
+            for year in re.finditer(r"\b(?:19|20)\d{2}[a-z]?\b", entry):
+                if looks_like_reference_title_prefix(entry[: year.end()]):
+                    author_end = year.end()
+                    break
         if author_end is None:
             return ()
         title_start = author_end
@@ -3342,6 +3353,12 @@ class CodexTranslator(BaseTranslator):
         )
         if bare_year is not None:
             boundaries.append(bare_year.start("punct"))
+        # Author/year citations need no punctuation between the title and a
+        # protected thesis/venue marker.  Do not consume the metadata itself.
+        if re.search(r"\d[a-z]?$", entry[:author_end]):
+            metadata = re.search(r"\s+(?=\{\{?v\d+\}?\})", tail)
+            if metadata is not None:
+                boundaries.append(metadata.start())
         if not boundaries:
             return ()
         title = tail[: min(boundaries)].strip()
@@ -3349,6 +3366,7 @@ class CodexTranslator(BaseTranslator):
             len(re.findall(r"[A-Za-z]+", title)) < 2
             or entry.count(title) != 1
             or re.search(r"[.!?]\s+[A-Za-z]", title) is not None
+            or "{v" in title
             or re.search(
                 r"https?://|\b(?:doi|isbn|issn|arxiv)\b|10\.\d{4,9}/",
                 title,
@@ -4350,7 +4368,7 @@ class CodexTranslator(BaseTranslator):
             return True
         if re.match(
             r"^(?:preprint\s+at\b|(?:ph\.?\s*d\.?|doctoral|master(?:'s)?)\s+"
-            r"thesis\b|dissertation\b|zenodo\b|in\s+\S)",
+            r"thesis\b|dissertation\b|zenodo\b|proceedings\s+of\b|in\s+\S)",
             remaining,
             re.IGNORECASE,
         ):
@@ -4413,7 +4431,9 @@ class CodexTranslator(BaseTranslator):
             return False
         prefix_boundary = prefix.rstrip()
         suffix_boundary = suffix.lstrip()
-        if prefix_boundary[-1].isalnum():
+        if prefix_boundary[-1].isalnum() and not looks_like_reference_title_prefix(
+            prefix_boundary
+        ):
             # Starting immediately after an ordinary word is evidence that the
             # model selected only a suffix of the work title.
             return False
@@ -4460,7 +4480,9 @@ class CodexTranslator(BaseTranslator):
             re.IGNORECASE,
         ):
             return False
-        if re.fullmatch(
+        if not re.search(
+            r"\[\[PDF2ZH_ITALIC_\d+_BEGIN\]\]$", prefix_boundary
+        ) and re.fullmatch(
             r"\s*(?:(?:[A-Z]\.){1,4}\s*)?"
             r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+"
             r"(?:\s+et\s+al\.)?\s*",

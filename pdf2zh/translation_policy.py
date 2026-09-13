@@ -627,6 +627,36 @@ def looks_like_reference_author_block(text: str) -> bool:
     return proper_names >= 1
 
 
+def looks_like_reference_title_prefix(text: str) -> bool:
+    """Recognize a complete author delimiter, including author/year styles.
+
+    An initials-only prefix (``[17] S. M.``) is not complete: accepting it
+    would select the surname as the beginning of the work title.
+    """
+    compact = text.strip()
+    compact = re.sub(r",\s+in\s*$", ",", compact, flags=re.IGNORECASE)
+    year = re.search(r"\s+(?:19|20)\d{2}[a-z]?\s*$", compact)
+    if year:
+        compact = compact[: year.start()].rstrip()
+    elif not compact.endswith((".", ",")):
+        return False
+    author = compact.rstrip("., ")
+    # A period after a surname means a title has already started.  A long
+    # byline must not make the author coverage heuristic swallow that title.
+    author_without_label = re.sub(r"^\s*(?:\[\d+\]|\d+[.)])\s*", "", author)
+    if re.search(r"\bet\s+al\.\s+\S", author_without_label, re.IGNORECASE):
+        return False
+    if any(
+        m.group(1).casefold() not in {"al", "jr", "sr"}
+        for m in re.finditer(r"\b([^\W\d_]{2,})\.", author_without_label)
+    ):
+        return False
+    words = re.findall(r"[^\W\d_]+", author, flags=re.UNICODE)
+    if not words or (not year and len(words[-1]) < 2):
+        return False
+    return looks_like_reference_author_block(author)
+
+
 _STRICT_BYLINE_NAME_TOKEN_RE = re.compile(
     r"(?:[A-Z]\.)|"
     r"(?:[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+)|"

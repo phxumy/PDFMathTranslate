@@ -75,6 +75,7 @@ from pdf2zh.translation_policy import (
     formula_cache_signature,
     is_running_header_segment,
     looks_like_reference_author_block,
+    looks_like_reference_title_prefix,
     restore_affiliation_breaks,
 )
 from pdf2zh.reading_flow import (
@@ -2076,24 +2077,29 @@ def _collect_reference_title_italic_runs(
             continue
         entry_start = preceding_labels[-1].start()
         entry_prefix = segment[entry_start : match.start()]
-        author_end: int | None = None
-        for period in re.finditer(r"\.", entry_prefix):
-            if looks_like_reference_author_block(entry_prefix[: period.end()]):
-                author_end = period.end()
-                break
-        if author_end is None or entry_prefix[author_end:].strip():
+        # The same italic title may be split into multiple PDF font runs at a
+        # source line break.  Previously accepted runs still belong to this title.
+        author_prefix = _FORMULA_MARKER_RE.sub(
+            lambda m: "" if int(re.sub(r"\s+", "", m.group(1))) in candidates else m.group(0),
+            entry_prefix,
+        )
+        if not looks_like_reference_title_prefix(author_prefix) or re.search(r"\d[a-z]?\s*$", author_prefix):
             continue
         visible = [char for char in chars if char.get_text()]
-        if not visible or any(
-            getattr(char, "_pdf2zh_layout_class", 0) == 0
-            or not _is_prose_italic_font(char.fontname)
-            for char in visible
+        if not visible or any(getattr(char, "_pdf2zh_layout_class", 0) == 0 for char in visible):
+            continue
+        # A roman series/publisher parenthesis can share the final formula run
+        # with an italic book title.  Expose it for boundary detection, while
+        # the title extractor leaves that suffix verbatim.
+        first_roman = next((i for i, char in enumerate(visible) if not _is_prose_italic_font(char.fontname)), len(visible))
+        if first_roman < len(visible) and (
+            first_roman == 0 or not _reconstruct_italic_run(visible[first_roman:]).lstrip().startswith("(")
         ):
             continue
         text = _reconstruct_italic_run(chars)
         words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
         if (
-            len(words) < 2
+            not words
             or len(text) > 240
             or re.search(
                 r"\b(?:doi|isbn|issn|arxiv|vol(?:ume)?|pages?)\b|"
@@ -2409,6 +2415,21 @@ def _tag_translatable_italic_formulas(
         )
 
     return _FORMULA_MARKER_RE.sub(replace, text), tuple(used)
+
+
+def _join_reference_title_styles(text: str) -> str:
+    block = r"\[\[PDF2ZH_ITALIC_\d+_BEGIN\]\].*?\[\[PDF2ZH_ITALIC_\d+_END\]\]"
+
+    def join(match: re.Match[str]) -> str:
+        value = match.group(0)
+        formula_id = re.search(r"ITALIC_(\d+)_BEGIN", value).group(1)
+        content = re.sub(
+            r"\[\[PDF2ZH_ITALIC_\d+_END\]\]\s*\[\[PDF2ZH_ITALIC_\d+_BEGIN\]\]",
+            " ", value,
+        )
+        return re.sub(r"\[\[PDF2ZH_ITALIC_\d+_END\]\]$", f"[[PDF2ZH_ITALIC_{formula_id}_END]]", content)
+
+    return re.sub(rf"{block}(?:\s*{block})+", join, text)
 
 
 def _gen_target_text_op(
@@ -3307,6 +3328,9 @@ class TranslateConverter(PDFConverterEx):
                         part.text,
                         reference_title_italic_candidates or {},
                     )
+                    # Adjacent font runs are one continuous book title.  Keep
+                    # one style pair so translation sees the complete phrase.
+                    reference_text = _join_reference_title_styles(reference_text)
                     reference_locations.append((plan_index, part_index))
                     reference_texts.append(reference_text)
                     reference_cache_contexts.append(

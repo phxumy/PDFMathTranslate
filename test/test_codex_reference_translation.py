@@ -26,6 +26,34 @@ def translator_stub() -> CodexTranslator:
 
 
 class CodexReferenceTranslationTests(unittest.TestCase):
+    def test_author_year_thesis_title_has_safe_exact_boundary(self):
+        title = "Metrology of quantum control and measurement in superconducting qubits"
+        entry = f"[33] Chen Z 2018 {title} {{v40}} UC Santa Barbara."
+        self.assertEqual(
+            CodexTranslator._structured_reference_title_spans(entry), (title,)
+        )
+        self.assertTrue(CodexTranslator._reference_title_boundary_is_safe(entry, title))
+
+    def test_initials_do_not_become_an_author_terminator(self):
+        entry = (
+            "[17] S. M. Girvin, in {v3} {v4} University Press, Oxford, 2014), p. 113."
+        )
+        self.assertEqual(CodexTranslator._structured_reference_title_spans(entry), ())
+
+    def test_styled_single_word_book_and_series_metadata(self):
+        for title, suffix in (
+            ("Superconductivity", ""),
+            ("Electromagnetic Compatibility Handbook", " (Electrical"),
+            ("Quantum Fluctuations", ", Proceedings of the Les Houches Summer School"),
+        ):
+            entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}{suffix}[[PDF2ZH_ITALIC_7_END]]. Elsevier, 2007."
+            self.assertEqual(
+                CodexTranslator._styled_reference_title_spans(entry), (title,)
+            )
+            self.assertTrue(
+                CodexTranslator._reference_title_boundary_is_safe(entry, title)
+            )
+
     def test_structured_author_title_placeholder_uses_exact_title_batch(self) -> None:
         translator = translator_stub()
         title = "Multilayer feedforward networks are universal approximators"
