@@ -4687,7 +4687,7 @@ class TranslateConverter(PDFConverterEx):
             )
             line_height = vertical_fit.line_height
             render_scale = vertical_fit.render_scale
-            if not brk:
+            if scanned_paragraph and not brk:
                 render_scale = min(
                     render_scale,
                     horizontal_fit_scale(

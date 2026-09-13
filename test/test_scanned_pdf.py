@@ -155,6 +155,21 @@ def test_long_single_line_translation_gets_uniform_width_fit():
     )
 
 
+def test_native_short_label_retains_its_font_size_when_translation_fits_page():
+    doc = make_source(scanned=False, hidden=False)
+    translate_locally(doc, "Translated label")
+    translated_spans = [
+        span
+        for block in doc[0].get_text("dict")["blocks"]
+        for line in block.get("lines", [])
+        for span in line["spans"]
+        if "Translated" in span["text"]
+    ]
+    assert translated_spans
+    assert translated_spans[0]["size"] == pytest.approx(12)
+    assert translated_spans[0]["bbox"][2] < doc[0].rect.width
+
+
 @pytest.mark.parametrize("reference_ink", [False, True])
 def test_only_real_missing_superscript_ink_becomes_a_movable_formula(reference_ink):
     doc = make_source(omitted_reference=True, reference_ink=reference_ink)
