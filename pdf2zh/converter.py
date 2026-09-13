@@ -19,6 +19,7 @@ from pymupdf import Font
 from tenacity import retry, wait_fixed, stop_after_attempt
 
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
+from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
     CJK_PROHIBITED_LINE_START,
@@ -3672,9 +3673,10 @@ class TranslateConverter(PDFConverterEx):
 
         ############################################################
         # A. 原文档解析
+        code_chars = code_block_chars(ltpage)
         for child in ltpage:
             if isinstance(child, LTChar):
-                if object_id(child) in toc_layout.omitted_chars:
+                if object_id(child) in toc_layout.omitted_chars and child not in code_chars:
                     continue
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
@@ -3684,7 +3686,10 @@ class TranslateConverter(PDFConverterEx):
                 cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
                 cls = layout[cy, cx]
                 toc_entry_index = toc_layout.entry_by_char.get(object_id(child))
-                if toc_entry_index is not None:
+                child._pdf2zh_preserved_code = child in code_chars
+                if child in code_chars:
+                    cls = 0
+                elif toc_entry_index is not None:
                     cls = toc_class_start + toc_entry_index
                 elif object_id(child) in toc_layout.page_number_chars:
                     cls = 0
@@ -4524,7 +4529,10 @@ class TranslateConverter(PDFConverterEx):
                         preserve_source_transform = (
                             source_state is not None
                             and getattr(vch, "_pdf2zh_layout_class", None) == 0
-                            and _is_non_horizontal_text_matrix(source_state.matrix)
+                            and (
+                                getattr(vch, "_pdf2zh_preserved_code", False)
+                                or _is_non_horizontal_text_matrix(source_state.matrix)
+                            )
                         )
                         if preserve_source_transform:
                             source_font = self.fontid[vch.font]
