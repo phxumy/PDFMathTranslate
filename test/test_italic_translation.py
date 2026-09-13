@@ -12,6 +12,7 @@ from pdf2zh.converter import (
     _gen_target_text_op,
     _has_inline_prose_context,
     _is_high_confidence_prose_italic,
+    _release_standalone_italic_headings,
     _split_formula_prose_boundaries,
     _split_punctuation_only_formula_run,
     _split_trailing_prose_openers,
@@ -119,6 +120,77 @@ def converter_with(translator) -> TranslateConverter:
 
 
 class ItalicClassifierTests(unittest.TestCase):
+    def test_wrapped_subsection_heading_reaches_each_backend(self) -> None:
+        from types import SimpleNamespace
+
+        first = fake_run("B. GROUND-PLANE CUTOUT TO REDUCE THE")
+        second = fake_run("FREQUENCY DEPENDENCE ON INTERCHIP-SPACING")
+        for char in second:
+            char.y0 -= 13.3
+            char.matrix = (*char.matrix[:5], char.matrix[5] - 13.3)
+        heading = (
+            "B. GROUND-PLANE CUTOUT TO REDUCE THE "
+            "FREQUENCY DEPENDENCE ON INTERCHIP-SPACING"
+        )
+        target = "B. 通过接地平面开口减小频率对芯片间距的依赖"
+        for name in ("google", "bing", "codex"):
+            with self.subTest(backend=name):
+                seen = []
+
+                def translate(text):
+                    seen.append(text)
+                    return target
+
+                translator = SimpleNamespace(
+                    name=name,
+                    lang_in="en",
+                    lang_out="zh-cn",
+                    translate=translate,
+                    translate_batch=lambda texts: [translate(text) for text in texts],
+                )
+                paragraphs = [paragraph(region_kind="title")]
+                segments = ["{v0}"]
+                _release_standalone_italic_headings(
+                    segments, [first + second], [0], paragraphs
+                )
+                self.assertEqual(segments, [heading])
+                self.assertTrue(paragraphs[0].brk)
+                result = converter_with(translator)._translate_planned_segments(
+                    segments, paragraphs, [heading], 612.0
+                )
+                self.assertEqual(seen, [heading])
+                self.assertEqual(result, [target])
+
+    def test_wrapped_heading_does_not_relax_inline_formula_or_name_checks(self) -> None:
+        cases = [
+            (fake_run("B. GROUND-PLANE CUTOUT"), "plain text", "{v0}"),
+            (fake_run("B. GROUND-PLANE CUTOUT", fontname="CMMI10"), "title", "{v0}"),
+            (fake_run("B. GROUND-PLANE CUTOUT"), "title", "A formula {v0}"),
+            (fake_run("Sandoko Kosen"), "title", "{v0}"),
+            (fake_run("B. x y z"), "title", "{v0}"),
+        ]
+        for run, kind, source in cases:
+            with self.subTest(source=source, kind=kind):
+                segments = [source]
+                _release_standalone_italic_headings(
+                    segments, [run], [0], [paragraph(region_kind=kind)]
+                )
+                self.assertEqual(segments, [source])
+        for anomaly in ("protected", "superscript", "column_jump"):
+            run = fake_run("B. GROUND-PLANE CUTOUT")
+            if anomaly == "protected":
+                run[-1]._pdf2zh_layout_class = 0
+            elif anomaly == "superscript":
+                run[-1].size = 6.0
+            else:
+                run[-1].y0 -= 14.0
+                run[-1].matrix = (*run[-1].matrix[:5], 86.0)
+            segments = ["{v0}"]
+            _release_standalone_italic_headings(
+                segments, [run], [0], [paragraph(region_kind="title")]
+            )
+            self.assertEqual(segments, ["{v0}"])
+
     def test_theorem_prose_is_split_from_embedded_math_atoms(self) -> None:
         formulas = [
             fake_mixed_run(

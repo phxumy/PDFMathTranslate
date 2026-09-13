@@ -1780,6 +1780,8 @@ def _reconstruct_italic_run(chars: list[LTChar]) -> str:
 def _is_high_confidence_prose_italic(
     chars: list[LTChar],
     paragraph_size: float,
+    *,
+    allow_heading_wrap: bool = False,
 ) -> str | None:
     """Return reconstructed prose only when an italic formula run is clearly text."""
     visible = [
@@ -1804,9 +1806,24 @@ def _is_high_confidence_prose_italic(
     if paragraph_size > 0 and not (0.90 <= typical_size / paragraph_size <= 1.10):
         return None
     baselines = [_char_baseline(char) for char in visible]
-    if max(baselines) - min(baselines) > max(0.8, 0.08 * typical_size):
+    baseline_tolerance = max(0.8, 0.08 * typical_size)
+    if not allow_heading_wrap and max(baselines) - min(baselines) > baseline_tolerance:
         return None
+    line_start = visible[0]
+    line_count = 1
     for previous, current in zip(visible, visible[1:]):
+        baseline_change = _char_baseline(previous) - _char_baseline(current)
+        if abs(baseline_change) > baseline_tolerance:
+            if (
+                not allow_heading_wrap
+                or not 0.9 * typical_size <= baseline_change <= 1.8 * typical_size
+                or abs(float(current.x0) - float(line_start.x0)) > 0.5 * typical_size
+            ):
+                return None
+            line_count += 1
+            if line_count > 3:
+                return None
+            continue
         gap = float(current.x0) - float(previous.x1)
         if gap > 0.60 * typical_size:
             return None
@@ -1908,6 +1925,38 @@ def _is_high_confidence_prose_italic(
         # Conservative handling of binomial taxonomic names.
         return None
     return text
+
+
+def _release_standalone_italic_headings(
+    segments: list[str],
+    formula_runs: list[list[LTChar]],
+    formula_paragraphs: list[int],
+    paragraphs: list["Paragraph"],
+) -> None:
+    """Expose complete subsection headings to every translation backend.
+
+    A wrapped all-italic heading can become one opaque formula even though the
+    layout model correctly identified its title region. Only a complete numbered
+    heading in that region may cross baselines; inline math and names retain the
+    stricter single-line classifier.
+    """
+    for formula_id, (chars, paragraph_id) in enumerate(
+        zip(formula_runs, formula_paragraphs, strict=True)
+    ):
+        if not 0 <= paragraph_id < len(paragraphs):
+            continue
+        paragraph = paragraphs[paragraph_id]
+        if (
+            paragraph.region_kind != "title"
+            or segments[paragraph_id].strip() != f"{{v{formula_id}}}"
+        ):
+            continue
+        text = _is_high_confidence_prose_italic(
+            chars, paragraph.size, allow_heading_wrap=True
+        )
+        if text is not None and _SUBSECTION_ITALIC_LABEL_RE.fullmatch(text):
+            segments[paragraph_id] = text
+            paragraph.brk = True
 
 
 def _has_inline_prose_context(
@@ -4196,6 +4245,8 @@ class TranslateConverter(PDFConverterEx):
                 varp,
                 pstk,
             )
+        if not self.vfont:
+            _release_standalone_italic_headings(sstk, var, varp, pstk)
         log.debug("\n==========[VSTACK]==========\n")
         for id, v in enumerate(var):  # 计算公式宽度
             anchor_x, l = _formula_horizontal_geometry(v)
