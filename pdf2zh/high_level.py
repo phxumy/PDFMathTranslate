@@ -33,6 +33,7 @@ from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
 
 NOTO_NAME = "noto"
+LATIN_NAME = "pdf2zh_latin"
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,8 @@ def translate_patch(
     service: str = "",
     noto_name: str = "",
     noto: Font = None,
+    latin: Font = None,
+    latin_name: str = LATIN_NAME,
     callback: object = None,
     cancellation_event: asyncio.Event = None,
     model: OnnxModel = None,
@@ -296,6 +299,8 @@ def translate_patch(
         ignore_cache,
     )
     device.layout_region_types = layout_region_types
+    device.latin = latin
+    device.latin_name = latin_name
     device.scan_backgrounds = {}
 
     assert device is not None
@@ -371,12 +376,17 @@ def translate_stream(
     ignore_cache: bool = False,
     **kwarg: Any,
 ):
-    font_list = [("tiro", None)]
+    font_list = [("tiro", None, None)]
 
     font_path = prepare_pdf_text_font(download_remote_fonts(lang_out.lower()))
     noto_name = NOTO_NAME
     noto = Font(noto_name, font_path)
-    font_list.append((noto_name, font_path))
+    font_list.append((noto_name, font_path, None))
+    # CJK target fonts do not cover every author-name character (e.g. Ł/ł).
+    # Embed the bundled Roman font as Unicode rather than writing glyph zero.
+    latin_name = LATIN_NAME
+    latin = Font("tiro")
+    font_list.append((latin_name, None, latin.buffer))
 
     doc_en = Document(stream=stream)
     stream = io.BytesIO()
@@ -387,7 +397,7 @@ def translate_stream(
     font_id = {}
     for page in doc_zh:
         for font in font_list:
-            font_id[font[0]] = page.insert_font(font[0], font[1])
+            font_id[font[0]] = page.insert_font(font[0], font[1], fontbuffer=font[2])
     xreflen = doc_zh.xref_length()
     for xref in range(1, xreflen):
         for label in ["Resources/", ""]:  # 可能是基于 xobj 的 res

@@ -20,6 +20,7 @@ from tenacity import retry, wait_fixed, stop_after_attempt
 
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
+from pdf2zh.identity_layout import orcid_list_chars
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
     CJK_PROHIBITED_LINE_START,
@@ -3832,6 +3833,7 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         # A. 原文档解析
         code_chars = code_block_chars(ltpage)
+        identity_chars = orcid_list_chars(ltpage)
         for child in ltpage:
             if isinstance(child, LTChar):
                 if object_id(child) in toc_layout.omitted_chars and child not in code_chars:
@@ -3845,7 +3847,8 @@ class TranslateConverter(PDFConverterEx):
                 cls = layout[cy, cx]
                 toc_entry_index = toc_layout.entry_by_char.get(object_id(child))
                 child._pdf2zh_preserved_code = child in code_chars
-                if child in code_chars:
+                child._pdf2zh_preserved_identity = child in identity_chars
+                if child in code_chars or child in identity_chars:
                     cls = 0
                 elif toc_entry_index is not None:
                     cls = toc_class_start + toc_entry_index
@@ -4383,6 +4386,8 @@ class TranslateConverter(PDFConverterEx):
         def raw_string(fcur: str, cstk: str):  # 编码字符串
             if fcur == self.noto_name:
                 return "".join(["%04x" % self.noto.has_glyph(ord(c)) for c in cstk])
+            elif fcur == getattr(self, "latin_name", None):
+                return "".join("%04x" % self.latin.has_glyph(ord(c)) for c in cstk)
             elif isinstance(self.fontmap[fcur], PDFCIDFont):  # 判断编码长度
                 return "".join(["%04x" % ord(c) for c in cstk])
             else:
@@ -4394,14 +4399,26 @@ class TranslateConverter(PDFConverterEx):
         ) -> tuple[str, float]:
             font_name = None
             try:
-                if self.fontmap["tiro"].to_unichr(ord(character)) == character:
+                if (
+                    ord(character) < 256
+                    and self.fontmap["tiro"].to_unichr(ord(character)) == character
+                ):
                     font_name = "tiro"
             except Exception:
                 pass
             if font_name is None:
                 font_name = self.noto_name
+                latin = getattr(self, "latin", None)
+                if (
+                    not self.noto.has_glyph(ord(character))
+                    and latin is not None
+                    and latin.has_glyph(ord(character))
+                ):
+                    font_name = self.latin_name
             if font_name == self.noto_name:
                 advance = self.noto.char_lengths(character, font_size)[0]
+            elif font_name == getattr(self, "latin_name", None):
+                advance = self.latin.char_lengths(character, font_size)[0]
             else:
                 advance = self.fontmap[font_name].char_width(ord(character)) * font_size
             return font_name, advance
@@ -4697,6 +4714,7 @@ class TranslateConverter(PDFConverterEx):
                             and getattr(vch, "_pdf2zh_layout_class", None) == 0
                             and (
                                 getattr(vch, "_pdf2zh_preserved_code", False)
+                                or getattr(vch, "_pdf2zh_preserved_identity", False)
                                 or _is_non_horizontal_text_matrix(source_state.matrix)
                             )
                         )
