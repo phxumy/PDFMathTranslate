@@ -368,3 +368,56 @@ def test_real_scan_pipeline_keeps_existing_english_abstract_pixels_without_http(
     assert not requests_seen
     assert "q 1 g" not in operations
     assert np.array_equal(before, rgb(doc[0]))
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+@pytest.mark.parametrize("indirect_states", [False, True])
+def test_scan_blend_registration_keeps_inherited_resources_and_existing_states(
+    inherited, indirect_states
+):
+    doc = make_source()
+    page = doc[0]
+    resources_kind, resources_value = doc.xref_get_key(page.xref, "Resources")
+    assert resources_kind == "xref"
+    resources_xref = int(resources_value.split()[0])
+    old_states = "<< /PDF2ZHScanMultiply << /BM /Screen >> >>"
+    if indirect_states:
+        states_xref = doc.get_new_xref()
+        doc.update_object(states_xref, old_states)
+        doc.xref_set_key(resources_xref, "ExtGState", f"{states_xref} 0 R")
+    else:
+        doc.xref_set_key(resources_xref, "ExtGState", old_states)
+    if inherited:
+        parent_xref = int(doc.xref_get_key(page.xref, "Parent")[1].split()[0])
+        doc.xref_set_key(parent_xref, "Resources", resources_value)
+        doc.xref_set_key(page.xref, "Resources", "null")
+        page = doc.reload_page(page)
+    before = rgb(page).copy()
+    fonts, images = page.get_fonts(), page.get_images()
+    scan = prepare_scan_background(page, before)
+
+    assert scan is not None and scan.blend_state == "PDF2ZHScanMultiply1"
+    page = doc.reload_page(page)
+    assert page.get_fonts() == fonts
+    assert page.get_images() == images
+    assert np.array_equal(before, rgb(page))
+    if indirect_states:
+        assert doc.xref_get_key(states_xref, "PDF2ZHScanMultiply/BM") == (
+            "name",
+            "/Screen",
+        )
+        assert doc.xref_get_key(states_xref, "PDF2ZHScanMultiply1/BM") == (
+            "name",
+            "/Multiply",
+        )
+    else:
+        owner = page.xref if inherited else resources_xref
+        prefix = "Resources/" if inherited else ""
+        assert doc.xref_get_key(owner, prefix + "ExtGState/PDF2ZHScanMultiply/BM") == (
+            "name",
+            "/Screen",
+        )
+        assert doc.xref_get_key(owner, prefix + "ExtGState/PDF2ZHScanMultiply1/BM") == (
+            "name",
+            "/Multiply",
+        )

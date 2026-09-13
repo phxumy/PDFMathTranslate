@@ -91,6 +91,27 @@ def prepare_scan_background(page: Any, rgb_image: np.ndarray) -> ScanBackground 
     resource_xref = page.xref
     prefix = "Resources/"
     kind, value = doc.xref_get_key(page.xref, "Resources")
+    if kind == "null":
+        # Resources are inheritable. A new local dictionary containing only our
+        # ExtGState would hide the parent's fonts and images, so first copy the
+        # effective dictionary onto this page, preserving all existing entries.
+        ancestor = page.xref
+        visited = {ancestor}
+        while kind == "null":
+            parent_kind, parent_value = doc.xref_get_key(ancestor, "Parent")
+            if parent_kind != "xref":
+                break
+            ancestor = int(parent_value.split()[0])
+            if ancestor in visited:
+                break
+            visited.add(ancestor)
+            kind, value = doc.xref_get_key(ancestor, "Resources")
+        if kind in {"xref", "dict"}:
+            effective = (
+                doc.xref_object(int(value.split()[0])) if kind == "xref" else value
+            )
+            doc.xref_set_key(page.xref, "Resources", effective)
+            kind, value = doc.xref_get_key(page.xref, "Resources")
     if kind == "xref":
         resource_xref = int(value.split()[0])
         prefix = ""
