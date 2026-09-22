@@ -300,6 +300,137 @@ class ItalicClassifierTests(unittest.TestCase):
         self.assertIn("such that for any 0", segments[1])
         self.assertEqual(segments[2], "")
 
+    def test_theorem_prose_reaches_each_backend_without_exposing_math(self) -> None:
+        from types import SimpleNamespace
+
+        for name in ("google", "bing", "codex"):
+            with self.subTest(backend=name):
+                formulas = [
+                    fake_mixed_run(
+                        [
+                            ("Suppose the sequence ", "TimesNewRoman-Italic"),
+                            ("x_n", "CMMI10"),
+                            (" converges uniformly.", "TimesNewRoman-Italic"),
+                        ]
+                    )
+                ]
+                segments = ["Lemma 4.2. {v0}"]
+                paragraphs = [paragraph(region_kind="plain text")]
+                _split_formula_prose_boundaries(
+                    segments,
+                    formulas,
+                    [[]],
+                    [0.0],
+                    [0],
+                    paragraphs,
+                    theorem_only=name != "codex",
+                )
+                self.assertEqual(
+                    segments,
+                    ["Lemma 4.2. Suppose the sequence {v0} converges uniformly."],
+                )
+                math_texts = ["".join(c.get_text() for c in run) for run in formulas]
+                self.assertEqual(math_texts, ["x_n"])
+                seen = []
+
+                def translate(text):
+                    seen.append(text)
+                    return text.replace("Suppose the sequence", "设序列").replace(
+                        "converges uniformly.", "一致收敛。"
+                    )
+
+                translator = SimpleNamespace(
+                    name=name,
+                    lang_in="en",
+                    lang_out="zh-cn",
+                    translate=translate,
+                    translate_batch=lambda texts: [translate(t) for t in texts],
+                )
+                result = converter_with(translator)._translate_planned_segments(
+                    segments,
+                    paragraphs,
+                    math_texts,
+                    612.0,
+                )
+                self.assertTrue(any("Suppose the sequence" in text for text in seen))
+                self.assertNotIn("x_n", " ".join(seen))
+                self.assertIn("一致收敛", result[0])
+                self.assertIn("{v0}", result[0])
+
+    def test_theorem_labels_accept_letter_and_roman_numbering(self) -> None:
+        for label in ("Theorem A.", "Lemma B.", "Proposition IV.", "Corollary A.1:"):
+            with self.subTest(label=label):
+                segments = [label + " {v0}"]
+                _split_formula_prose_boundaries(
+                    segments,
+                    [fake_run("Every continuous function")],
+                    [[]],
+                    [0.0],
+                    [0],
+                    [paragraph(region_kind="plain text")],
+                    theorem_only=True,
+                )
+                self.assertEqual(segments, [label + " Every continuous function"])
+
+    def test_theorem_context_does_not_activate_on_prose_mentions(self) -> None:
+        for source in (
+            "We use the theorem below. {v0}",
+            "Recall Lemma 4.2 for the proof. {v0}",
+            "Definition of the experimental procedure. {v0}",
+            "Theorem A proves the following property. {v0}",
+            "Lemma B is used below. {v0}",
+            "Proposition IV concerns this case. {v0}",
+        ):
+            with self.subTest(source=source):
+                segments = [source]
+                _split_formula_prose_boundaries(
+                    segments,
+                    [fake_run("some italic phrase")],
+                    [[]],
+                    [0.0],
+                    [0],
+                    [paragraph(region_kind="plain text")],
+                    theorem_only=True,
+                )
+                self.assertEqual(segments, [source])
+
+    def test_theorem_release_retains_protected_math_and_rotated_content(self) -> None:
+        for anomaly in (
+            "math_font",
+            "variables",
+            "protected",
+            "rotated",
+            "vectors",
+            "display",
+        ):
+            with self.subTest(anomaly=anomaly):
+                run = fake_run("continuous bounded functions")
+                lines = [[]]
+                kind = "plain text"
+                if anomaly == "math_font":
+                    run = fake_run("continuous bounded functions", fontname="CMMI10")
+                elif anomaly == "variables":
+                    run = fake_run("x y z")
+                elif anomaly == "protected":
+                    run[0]._pdf2zh_layout_class = 0
+                elif anomaly == "rotated":
+                    run[0].matrix = (0.0, 1.0, -1.0, 0.0, 0.0, 100.0)
+                elif anomaly == "vectors":
+                    lines = [[object()]]
+                elif anomaly == "display":
+                    kind = "isolate_formula"
+                segments = ["Theorem 3. {v0}"]
+                _split_formula_prose_boundaries(
+                    segments,
+                    [run],
+                    lines,
+                    [0.0],
+                    [0],
+                    [paragraph(region_kind=kind)],
+                    theorem_only=True,
+                )
+                self.assertEqual(segments, ["Theorem 3. {v0}"])
+
     def test_reference_specific_italic_title_does_not_release_a_venue(self) -> None:
         runs = [
             fake_run("Neural networks: a comprehensive foundation"),

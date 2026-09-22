@@ -1090,6 +1090,8 @@ def _split_formula_prose_boundaries(
     formula_offsets: list[float],
     formula_paragraphs: list[int],
     paragraphs: list["Paragraph"],
+    *,
+    theorem_only: bool = False,
 ) -> None:
     """Split only closed-form prose/math mixtures into independent atoms.
 
@@ -1114,6 +1116,8 @@ def _split_formula_prose_boundaries(
     closed through the checks below and ``_is_high_confidence_prose_italic``.
     """
 
+    # Theorem prose is released as ordinary text and is backend independent.
+    # Other branches prepare style runs for the Codex styled-text protocol.
     original_formula_count = len(formulas)
 
     def marker_for(formula_id: int) -> re.Pattern[str]:
@@ -1174,8 +1178,9 @@ def _split_formula_prose_boundaries(
     in_theorem = False
     theorem_segments = 0
     theorem_cue = re.compile(
-        r"\b(?:Theorem|Lemma|Proposition|Corollary|Definition|Assumption)"
-        r"(?:\s+[A-Z]?\d+(?:\.\d+)*)?\b",
+        r"^\s*(?:Theorem|Lemma|Proposition|Corollary|Definition|Assumption)"
+        r"(?:\s+(?:[A-Z]?\d+(?:\.\d+)*\b|"
+        r"(?:[A-Z](?:\.\d+)*|[IVXLCDM]+)(?=\s*[.:(]))|\s*[.:(])",
         re.IGNORECASE,
     )
     for paragraph_id, segment in enumerate(segments):
@@ -1228,6 +1233,16 @@ def _split_formula_prose_boundaries(
             if not is_prose
             for char in group
         ):
+            return None
+        prose_text = " ".join(
+            _reconstruct_italic_run(group) for is_prose, group in groups if is_prose
+        )
+        words = re.findall(r"[^\W\d_]+(?:[-‐‑–—][^\W\d_]+)*", prose_text)
+        if not words or not any(len(word) >= 3 for word in words):
+            return None
+        # An ordinary italic face can also encode mathematical identifiers.
+        # Do not expose isolated variables merely because a theorem precedes them.
+        if any(len(word) == 1 and word not in {"a", "A", "I"} for word in words):
             return None
         atoms: list[tuple[bool, list[LTChar], str]] = []
         for is_prose, group in groups:
@@ -1388,7 +1403,7 @@ def _split_formula_prose_boundaries(
             has_prose_context=_segment_contains_prose(segments[paragraph_id]),
             paragraph_layout_class=int(paragraph.layout_class),
         )
-        if closing_delimiters:
+        if closing_delimiters and not theorem_only:
             segments[paragraph_id] = marker.sub(
                 closing_delimiters,
                 segments[paragraph_id],
@@ -1451,6 +1466,9 @@ def _split_formula_prose_boundaries(
                 segments[paragraph_id],
                 count=1,
             )
+            continue
+
+        if theorem_only:
             continue
 
         footnote_split = split_superscript_footnote(chars, paragraph_size)
@@ -4284,7 +4302,7 @@ class TranslateConverter(PDFConverterEx):
                 pstk[paragraph_id].x += shift
                 pstk[paragraph_id].x0 += shift
                 pstk[paragraph_id].x1 += shift
-        if getattr(self.translator, "name", "") == "codex" and not self.vfont:
+        if not self.vfont:
             _split_formula_prose_boundaries(
                 sstk,
                 var,
@@ -4292,6 +4310,7 @@ class TranslateConverter(PDFConverterEx):
                 varf,
                 varp,
                 pstk,
+                theorem_only=getattr(self.translator, "name", "") != "codex",
             )
         if not self.vfont:
             _release_standalone_italic_headings(sstk, var, varp, pstk)

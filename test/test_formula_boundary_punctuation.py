@@ -1488,12 +1488,7 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         converter.vchar = ""
         converter.translator = type("Translator", (), {"name": "google"})()
 
-        with (
-            patch("pdf2zh.converter.LTChar", FakeChar),
-            patch(
-                "pdf2zh.converter._split_formula_prose_boundaries"
-            ) as split_boundaries,
-        ):
+        with patch("pdf2zh.converter.LTChar", FakeChar):
             draft = converter.receive_layout(
                 FakePage([*prose, base, subscript_m, subscript_j, period]),
                 preview_only=True,
@@ -1502,7 +1497,6 @@ class FormulaBoundaryPunctuationTests(unittest.TestCase):
         self.assertEqual(draft.sstk, ["value {v0}."])
         self.assertEqual(draft.formula_texts, ["φmj"])
         self.assertEqual(draft.varp, [0])
-        split_boundaries.assert_not_called()
 
     def test_receive_layout_keeps_runin_heading_and_body_in_one_segment(
         self,
