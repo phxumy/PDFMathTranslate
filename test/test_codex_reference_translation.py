@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from pdf2zh.translation_policy import ExactReplacement
@@ -41,18 +42,143 @@ class CodexReferenceTranslationTests(unittest.TestCase):
         self.assertEqual(CodexTranslator._structured_reference_title_spans(entry), ())
 
     def test_styled_single_word_book_and_series_metadata(self):
-        for title, suffix in (
-            ("Superconductivity", ""),
-            ("Electromagnetic Compatibility Handbook", " (Electrical"),
-            ("Quantum Fluctuations", ", Proceedings of the Les Houches Summer School"),
+        for title, suffix, continuation in (
+            ("Superconductivity", "", ". Elsevier, 2007."),
+            (
+                "Electromagnetic Compatibility Handbook",
+                " (Electrical",
+                " Engineering Handbook Series). CRC, 2004.",
+            ),
+            (
+                "Microwave Circuits",
+                " (Wiley",
+                " Series in Microwave Engineering). Wiley, 2001.",
+            ),
+            (
+                "Quantum Fluctuations",
+                ", Proceedings of the Les Houches Summer School",
+                ", edited by A. Smith (Elsevier, Amsterdam, 1997).",
+            ),
+            (
+                "Quantum Machines: Measurement and Control of Engineered Quantum Systems",
+                " (Oxford",
+                " University Press, Oxford, 2014), p. 113.",
+            ),
         ):
-            entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}{suffix}[[PDF2ZH_ITALIC_7_END]]. Elsevier, 2007."
+            entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}{suffix}[[PDF2ZH_ITALIC_7_END]]{continuation}"
             self.assertEqual(
                 CodexTranslator._styled_reference_title_spans(entry), (title,)
             )
             self.assertTrue(
                 CodexTranslator._reference_title_boundary_is_safe(entry, title)
             )
+
+    def test_parenthesized_styled_subtitle_is_translated_with_the_title(self):
+        for title in (
+            "Neural Networks (A Comprehensive Foundation)",
+            "Statistical Methods (with Examples (and Exercises))",
+            "(Re)Thinking Neural Networks",
+            "Forecasting (Time Series)",
+            "Quantum Physics (Methods, Proceedings of a Workshop)",
+            "Quantum Physics, Proceedings of a Workshop",
+        ):
+            with self.subTest(title=title):
+                translator = translator_stub()
+                entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}[[PDF2ZH_ITALIC_7_END]]. Academic Press, 2020."
+                seen_titles = []
+
+                def translate_exact(titles):
+                    seen_titles.extend(titles)
+                    return ["完整的中文题名（含副标题）"]
+
+                translator._run_exact_reference_title_batch = translate_exact
+                translator._run_discovered_reference_title_batch = lambda entries: (
+                    self.fail("a complete styled title needs no title discovery")
+                )
+                result = translator.translate_reference_entries([entry])[0]
+                self.assertEqual(seen_titles, [title])
+                self.assertIn("完整的中文题名（含副标题）", result)
+                self.assertTrue(result.endswith(". Academic Press, 2020."))
+
+    def test_partial_parenthesized_title_replacement_is_rejected(self):
+        for title in (
+            "Neural Networks (A Comprehensive Foundation)",
+            "Neural Networks, Proceedings of a Workshop",
+        ):
+            entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}[[PDF2ZH_ITALIC_7_END]]. Academic Press, 2020."
+            translated, valid = translator_stub()._apply_reference_title_replacements(
+                entry, [ExactReplacement("Neural Networks", "神经网络")]
+            )
+            self.assertFalse(valid)
+            self.assertEqual(translated, entry)
+
+    def test_legacy_partial_title_cache_is_not_reused(self):
+        translator = translator_stub()
+        title = "Neural Networks (A Comprehensive Foundation)"
+        entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}[[PDF2ZH_ITALIC_7_END]]. Academic Press, 2020."
+        unaffected = "[2] A. Smith. An ordinary article. Nature 1, 10 (2020)."
+
+        def legacy_key(source):
+            return translator.REFERENCE_CACHE_PREFIX + json.dumps(
+                {"context": "", "entry": source}, ensure_ascii=False, sort_keys=True
+            )
+
+        translator.cache.set(
+            legacy_key(entry), entry.replace("Neural Networks", "神经网络")
+        )
+        unaffected_translation = unaffected.replace("An ordinary article", "普通文章")
+        translator.cache.set(legacy_key(unaffected), unaffected_translation)
+        seen_titles = []
+
+        def translate_exact(titles):
+            seen_titles.extend(titles)
+            return ["神经网络（综合基础）"]
+
+        translator._run_exact_reference_title_batch = translate_exact
+        results = translator.translate_reference_entries([entry, unaffected])
+        self.assertEqual(seen_titles, [title])
+        self.assertNotIn("A Comprehensive Foundation", results[0])
+        self.assertEqual(results[1], unaffected_translation)
+
+    def test_unclosed_parenthesis_without_series_evidence_is_ambiguous(self):
+        for content, continuation in (
+            ("Neural Networks (A", " Comprehensive Foundation). Academic Press, 2020."),
+            ("Forecasting (Time", " Series). Academic Press, 2020."),
+            ("Neural Networks (Electrical", ". Academic Press, 2020."),
+        ):
+            entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{content}[[PDF2ZH_ITALIC_7_END]]{continuation}"
+            self.assertEqual(CodexTranslator._styled_reference_title_spans(entry), ())
+
+    def test_italic_venue_after_article_title_is_not_a_work_title(self):
+        translator = translator_stub()
+        title = "Overcoming catastrophic forgetting in neural networks"
+        venue = "Proceedings of the national"
+        entry = (
+            "[43] James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, "
+            "Joel Veness, Guillaume Desjardins, Andrei A Rusu, Kieran Milan, "
+            "John Quan, Tiago Ramalho, Agnieszka Grabska-Barwinska, et al. "
+            f"{title}. [[PDF2ZH_ITALIC_7_BEGIN]]{venue}[[PDF2ZH_ITALIC_7_END]] {{v8}}."
+        )
+        seen_titles = []
+
+        def translate_exact(titles):
+            seen_titles.extend(titles)
+            return ["克服神经网络中的灾难性遗忘"]
+
+        translator._run_exact_reference_title_batch = translate_exact
+        result = translator.translate_reference_entries([entry])[0]
+        self.assertEqual(seen_titles, [title])
+        self.assertIn(venue, result)
+        self.assertIn("克服神经网络中的灾难性遗忘", result)
+        self.assertFalse(
+            CodexTranslator._reference_title_boundary_is_safe(entry, venue)
+        )
+
+    def test_proceedings_book_title_after_authors_remains_translatable(self):
+        title = "Proceedings of the International Scientific Conference"
+        entry = f"[1] A. Smith, [[PDF2ZH_ITALIC_7_BEGIN]]{title}[[PDF2ZH_ITALIC_7_END]]. Academic Press, 2020."
+        self.assertEqual(CodexTranslator._styled_reference_title_spans(entry), (title,))
+        self.assertTrue(CodexTranslator._reference_title_boundary_is_safe(entry, title))
 
     def test_structured_author_title_placeholder_uses_exact_title_batch(self) -> None:
         translator = translator_stub()

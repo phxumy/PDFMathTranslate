@@ -3284,12 +3284,62 @@ class CodexTranslator(BaseTranslator):
         )
         spans: list[str] = []
         for match in pattern.finditer(entry):
-            title = re.split(
-                r"\s*\(|,\s*Proceedings\s+of\b",
-                match.group(2),
-                maxsplit=1,
-                flags=re.IGNORECASE,
-            )[0].rstrip()
+            if not looks_like_reference_title_prefix(entry[: match.start()]):
+                # Italics also mark venues.  They identify a work title only
+                # when the preceding text is a complete author block.
+                return ()
+            title = match.group(2).rstrip()
+            proceedings = re.search(r",\s*Proceedings\s+of\b", title, re.IGNORECASE)
+            if proceedings is not None:
+                prefix = title[: proceedings.start()]
+                suffix = entry[match.end() :]
+                if (
+                    prefix.count("(") == prefix.count(")")
+                    and re.search(
+                        r"\b(?:conference|symposium|workshop|school|congress|meeting)\b",
+                        title[proceedings.end() :],
+                        re.IGNORECASE,
+                    )
+                    and re.match(r"\s*,\s*edited\s+by\b", suffix, re.IGNORECASE)
+                    and re.search(r"\([^()]*\b(?:19|20)\d{2}\)", suffix)
+                ):
+                    title = prefix.rstrip()
+            # Balanced parentheses belong to the styled title, including
+            # subtitles and acronyms.  A formula run can also absorb the start
+            # of a roman book-series suffix.  Only trim that *unclosed* suffix
+            # when its continuation outside the style supplies series evidence.
+            openings: list[int] = []
+            for index, character in enumerate(title):
+                if character == "(":
+                    openings.append(index)
+                elif character == ")":
+                    if not openings:
+                        return ()
+                    openings.pop()
+            if openings:
+                opening = openings[0]
+                continuation = re.sub(
+                    r"\[\[PDF2ZH_ITALIC_\d+_(?:BEGIN|END)\]\]",
+                    "",
+                    entry[match.start(2) + opening :],
+                )
+                series = re.match(r"\(([^()]*)\)", continuation)
+                if series is None or not (
+                    re.search(
+                        r"\bseries\s+(?:in|on|of)\b|"
+                        r"\b(?:handbook|monographs?|lecture\s+notes)\s+series\b",
+                        series.group(1),
+                        re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"\b(?:press|publishers?|publishing|publications)\b"
+                        r"[^()]*\b(?:19|20)\d{2}\b",
+                        series.group(1),
+                        re.IGNORECASE,
+                    )
+                ):
+                    return ()
+                title = title[:opening].rstrip()
             if (
                 not title.strip()
                 or title != title.strip()
@@ -3867,8 +3917,14 @@ class CodexTranslator(BaseTranslator):
 
     @classmethod
     def _reference_cache_key(cls, entry: str, cache_context: str = "") -> str:
+        cache_payload = {"context": cache_context, "entry": entry}
+        if cls.ITALIC_TAG_PREFIX in entry:
+            # Earlier styled boundaries could truncate parenthesized titles or
+            # select venue names without a valid author prefix.  Only invalidate
+            # styled references; ordinary/quoted title caches remain reusable.
+            cache_payload["styled_title_boundary"] = "v2"
         payload = json.dumps(
-            {"context": cache_context, "entry": entry},
+            cache_payload,
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -4431,6 +4487,23 @@ class CodexTranslator(BaseTranslator):
             return False
         prefix_boundary = prefix.rstrip()
         suffix_boundary = suffix.lstrip()
+        italic_start = re.search(r"\[\[PDF2ZH_ITALIC_\d+_BEGIN\]\]$", prefix_boundary)
+        if italic_start is not None and not looks_like_reference_title_prefix(
+            prefix_boundary[: italic_start.start()]
+        ):
+            return False
+        if any(
+            styled_title.startswith(source_title)
+            and re.match(
+                r"\s*(?:\(|,\s*Proceedings\s+of\b)",
+                styled_title[len(source_title) :],
+                re.IGNORECASE,
+            )
+            for styled_title in cls._styled_reference_title_spans(entry)
+        ):
+            # A parenthesized subtitle inside a complete styled title is not
+            # publication metadata.  Reject partial model replacements.
+            return False
         if prefix_boundary[-1].isalnum() and not looks_like_reference_title_prefix(
             prefix_boundary
         ):
