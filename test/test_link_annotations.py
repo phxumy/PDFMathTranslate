@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pymupdf as fitz
+import pytest
 
 from pdf2zh import high_level
 from pdf2zh.link_annotations import suppress_reflowed_link_borders
@@ -65,7 +66,10 @@ def test_custom_link_appearance_is_untouched():
     assert doc.xref_object(xref) == before
 
 
-def test_pipeline_changes_only_rebuilt_pages_and_dual_translation_sides(tmp_path):
+@pytest.mark.parametrize("skip_subset", [False, True])
+def test_pipeline_changes_only_rebuilt_pages_and_dual_translation_sides(
+    tmp_path, skip_subset
+):
     doc = source_document()
     font = tmp_path / "font.ttf"
     font.write_bytes(fitz.Font("tiro").buffer)
@@ -86,10 +90,11 @@ def test_pipeline_changes_only_rebuilt_pages_and_dual_translation_sides(tmp_path
         patch.object(high_level, "translate_patch", side_effect=rebuild_one_page),
     ):
         mono, dual = high_level.translate_stream(
-            doc.tobytes(), pages=[0], lang_out="en", skip_subset_fonts=True
+            doc.tobytes(), pages=[0], lang_out="en", skip_subset_fonts=skip_subset
         )
     for stream, expected in [(mono, [True, False]), (dual, [False, True, False, True])]:
         reopened = fitz.open(stream=stream, filetype="pdf")
+        assert len(reopened) == len(expected)
         for page, hidden in zip(reopened, expected):
             links = page.get_links()
             assert len(links) == 1
@@ -99,3 +104,9 @@ def test_pipeline_changes_only_rebuilt_pages_and_dual_translation_sides(tmp_path
             # MuPDF recreates imported URI links with BS/W=0 when assembling
             # the dual, while original-side annotations retain their style.
             assert (border == "[0 0 0]" or width == "0") is hidden
+    mono_doc = fitz.open(stream=mono, filetype="pdf")
+    dual_doc = fitz.open(stream=dual, filetype="pdf")
+    assert "Translated text." in mono_doc[0].get_text()
+    assert mono_doc[1].get_text() == doc[1].get_text()
+    assert dual_doc[0].get_text() == doc[0].get_text()
+    assert dual_doc[1].get_text() == mono_doc[0].get_text()

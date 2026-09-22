@@ -444,6 +444,15 @@ def translate_stream(
     for id in range(page_count):
         doc_en.move_page(page_count + id, id * 2 + 1)
     if not skip_subset_fonts:
+        # Rebuild MuPDF's document/font state after replacing content streams
+        # and grafting pages. Subsetting those live edited objects can leave
+        # stale native font references and crash during tracing or final save.
+        # Snapshot both documents before either one's fonts are mutated.
+        serialized_zh, serialized_en = doc_zh.write(), doc_en.write()
+        doc_zh.close()
+        doc_en.close()
+        doc_zh = Document(stream=serialized_zh)
+        doc_en = Document(stream=serialized_en)
         doc_zh.subset_fonts(fallback=True)
         doc_en.subset_fonts(fallback=True)
     return (
