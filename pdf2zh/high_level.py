@@ -26,6 +26,7 @@ from pymupdf import Document, Font
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.font_cmap import prepare_pdf_text_font
+from pdf2zh.link_annotations import suppress_reflowed_link_borders
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import prepare_scan_background
 
@@ -434,6 +435,10 @@ def translate_stream(
         # print(ops_old)
         # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
+
+    for page in doc_zh:
+        if any(xref in obj_patch for xref in page.get_contents()):
+            suppress_reflowed_link_borders(page)
 
     doc_en.insert_file(doc_zh)
     for id in range(page_count):
