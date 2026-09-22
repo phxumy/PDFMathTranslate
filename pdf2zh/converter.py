@@ -627,6 +627,41 @@ _INLINE_SCRIPT_REGION_KINDS = frozenset(
 )
 
 
+def _should_attach_unlabelled_closing_punctuation(
+    previous, current, previous_class, current_class, previous_region
+) -> bool:
+    """Keep a touching line-final mark with text just outside a detected box."""
+    if (
+        previous is None
+        or current_class != 1
+        or previous_class <= 1
+        or previous_region
+        not in {
+            "plain text",
+            "title",
+            "figure_caption",
+            "table_caption",
+            "table_footnote",
+        }
+        or current.get_text() not in {".", ",", ";", ":", "!", "?", ")", "]", "}"}
+        or previous.fontname != current.fontname
+    ):
+        return False
+    size = float(previous.size)
+    if size <= 0 or abs(float(current.size) - size) > size * 0.05:
+        return False
+    if any(
+        abs(float(char.matrix[i])) > 1e-5
+        for char in (previous, current)
+        for i in (1, 2)
+    ):
+        return False
+    return (
+        abs(float(current.y0) - float(previous.y0)) <= size * 0.1
+        and -size * 0.05 <= float(current.x0) - float(previous.x1) <= size * 0.15
+    )
+
+
 def _should_bridge_cross_class_inline_script(
     previous: LTChar | None,
     candidate: LTChar,
@@ -3942,6 +3977,10 @@ class TranslateConverter(PDFConverterEx):
                     # and the following prose remain in one text segment.
                     cls = xt_cls
                     cur_v = True
+                elif _should_attach_unlabelled_closing_punctuation(
+                    xt, child, xt_cls, actual_cls, logical_region_kind
+                ):
+                    cls = xt_cls
                 # 锚定文档中 bullet 的位置
                 if child.get_text() == "•":
                     cls = 0

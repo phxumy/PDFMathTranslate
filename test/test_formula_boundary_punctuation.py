@@ -15,6 +15,7 @@ from pdf2zh.converter import (
     _remove_absorbed_formula_base,
     _segment_contains_prose,
     _should_bridge_cross_class_inline_script,
+    _should_attach_unlabelled_closing_punctuation,
     _should_bridge_formula_inline_script,
     _should_continue_cross_class_inline_script,
     _should_absorb_trailing_formula_base,
@@ -58,6 +59,53 @@ class FakeChar:
 
 
 class SplitMathIslandTests(unittest.TestCase):
+    def test_unlabelled_closing_mark_requires_touching_text_geometry(self):
+        previous = FakeChar("t", x0=90, x1=95, y0=50)
+        for mark in (".", ",", ")", ";"):
+            current = FakeChar(mark, x0=95.02, x1=97, y0=50)
+            self.assertTrue(
+                _should_attach_unlabelled_closing_punctuation(
+                    previous, current, 3, 1, "plain text"
+                )
+            )
+        for change in (
+            "protected",
+            "other_region",
+            "gap",
+            "baseline",
+            "rotated",
+            "font",
+            "letter",
+            "opening",
+            "display",
+        ):
+            current = FakeChar(".", x0=95.02, x1=97, y0=50)
+            cls, region = 1, "plain text"
+            if change == "protected":
+                cls = 0
+            elif change == "other_region":
+                cls = 4
+            elif change == "gap":
+                current.x0 = 99
+            elif change == "baseline":
+                current.y0 = 55
+            elif change == "rotated":
+                current.matrix = (0, 1, -1, 0, 0, 0)
+            elif change == "font":
+                current.fontname = "OtherFont"
+            elif change == "letter":
+                current.text = "x"
+            elif change == "opening":
+                current.text = "("
+            elif change == "display":
+                region = "isolate_formula"
+            with self.subTest(change=change):
+                self.assertFalse(
+                    _should_attach_unlabelled_closing_punctuation(
+                        previous, current, 3, cls, region
+                    )
+                )
+
     def test_content_ordered_braces_are_merged_with_short_math_syntax(self) -> None:
         segments = ["mode m {v0} {v1}; q {v2} is excited"]
         formulas = [
