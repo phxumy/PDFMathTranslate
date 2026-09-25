@@ -28,6 +28,7 @@ from tencentcloud.tmt.v20180321.models import (
 from tencentcloud.tmt.v20180321.tmt_client import TmtClient
 
 from pdf2zh.cache import TranslationCache
+from pdf2zh.source_segmentation import scientific_sentence_parts, safe_chunk_boundary
 from pdf2zh.config import ConfigManager
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START
 from pdf2zh.translation_quality import (
@@ -2221,18 +2222,7 @@ class CodexTranslator(BaseTranslator):
         if len(text) <= self.MAX_ITEM_CHARS:
             return [text]
 
-        sentence_like_parts = []
-        cursor = 0
-        for match in re.finditer(r".*?(?:[.!?;:](?:\s+|$)|$)", text, flags=re.DOTALL):
-            part = match.group(0)
-            if not part:
-                continue
-            sentence_like_parts.append(part)
-            cursor = match.end()
-            if cursor >= len(text):
-                break
-        if not sentence_like_parts:
-            sentence_like_parts = [text]
+        sentence_like_parts = scientific_sentence_parts(text) or [text]
 
         chunks = []
         current = ""
@@ -2243,9 +2233,11 @@ class CodexTranslator(BaseTranslator):
                     current = ""
                 remaining = part
                 while len(remaining) > self.MAX_ITEM_CHARS:
-                    split_at = remaining.rfind(" ", 0, self.MAX_ITEM_CHARS)
-                    if split_at <= 0:
-                        split_at = self.MAX_ITEM_CHARS
+                    split_at = safe_chunk_boundary(
+                        remaining,
+                        self.MAX_ITEM_CHARS,
+                        self._formula_atom_spans(remaining),
+                    )
                     chunks.append(remaining[:split_at])
                     remaining = remaining[split_at:]
                 if remaining:
@@ -2264,15 +2256,7 @@ class CodexTranslator(BaseTranslator):
 
     def _split_formula_context_text(self, text: str) -> list[str]:
         """Keep sentence boundaries independent for strict formula validation."""
-        sentence_parts = [
-            match.group(0)
-            for match in re.finditer(
-                r".*?(?:[.!?;:](?:\s+|$)|$)",
-                text,
-                flags=re.DOTALL,
-            )
-            if match.group(0)
-        ]
+        sentence_parts = scientific_sentence_parts(text)
         if not sentence_parts or "".join(sentence_parts) != text:
             return self._split_long_text(text)
         chunks: list[str] = []
