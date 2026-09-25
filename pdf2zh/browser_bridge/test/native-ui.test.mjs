@@ -203,6 +203,75 @@ test('native slider waits for delayed aria-valuetext when the page has no ordina
   });
 });
 
+test('native slider recovers closed menus and temporary remounts without repeating movement keys', { skip: !chrome }, async () => {
+  const assignment = "document.querySelector('#strength-description').textContent=labels[position]+'，选项 '+(position+1)+'，共 4 项';";
+  for (const interrupt of ["close();", "document.querySelector('[data-model-reasoning-effort-slider]').style.display='none';setTimeout(()=>document.querySelector('[data-model-reasoning-effort-slider]').style.display='',120);"]) {
+    const html = menuFixture()
+      .replace("let model='Alpha', position=1;", "let model='Alpha', position=1;window.moves=0;")
+      .replace("document.querySelector('#slider-owner').onkeydown=e=>{", "document.querySelector('#slider-owner').onkeydown=e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;window.moves++;")
+      .replace(assignment, `${interrupt}const next=position;setTimeout(()=>document.querySelector('#strength-description').textContent=labels[next]+'，第'+(next+1)+'项，共4项。',180);`);
+    await fixture(html, async page => {
+      const choices = await readChoices(page, 'effort');
+      assert.deepEqual(choices.options.map(item => item.value), ['即时', '普通', '深入', '最强']);
+      assert.equal(choices.selected, '普通');
+      assert.equal(await page.evaluate(() => window.moves), 6);
+      assert.equal(await page.evaluate(() => document.querySelector('[role="slider"]').getAttribute('aria-valuenow')), '1');
+    });
+  }
+});
+
+test('native slider diagnostics distinguish absent sliders from genuine range and lock changes', { skip: !chrome }, async () => {
+  const assignment = "document.querySelector('#strength-description').textContent=labels[position]+'，选项 '+(position+1)+'，共 4 项';";
+  for (const [mutation, reason, code] of [
+    ["document.querySelector('[data-model-reasoning-effort-slider]').remove();", 'missing_slider', 'SELECTION_UNVERIFIED'],
+    ["document.querySelector('[role=slider]').setAttribute('aria-valuemax','4');", 'changed_range', 'PICKER_UNAVAILABLE'],
+    ["document.querySelector('[data-model-reasoning-effort-slider]').insertAdjacentHTML('beforeend','<span data-locked=true data-selected=false></span>');", 'changed_locks', 'PICKER_UNAVAILABLE'],
+  ]) {
+    const html = menuFixture().replace("document.querySelector('#slider-owner').onkeydown=e=>{", "document.querySelector('#slider-owner').onkeydown=e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;").replace(assignment, mutation);
+    await fixture(html, async page => {
+      page.timeoutMs = 350;
+      await assert.rejects(() => catalog(page), error => {
+        const diagnostic = error.diagnostic;
+        assert.equal(error.code, code);
+        assert.equal(diagnostic.sliderDiagnostic.reason, reason);
+        assert.equal(diagnostic.sliderDiagnostic.expected.target, 0);
+        assert.equal(diagnostic.sliderDiagnostic.expected.max, 3);
+        assert.equal(diagnostic.evidence.chatSelected, true);
+        if (reason === 'missing_slider') assert.equal(diagnostic.sliderDiagnostic.observed, null);
+        if (reason === 'changed_range') assert.equal(diagnostic.sliderDiagnostic.observed.max, 4);
+        if (reason === 'changed_locks') assert.deepEqual(diagnostic.sliderDiagnostic.observed.ticks, ['true']);
+        return true;
+      });
+    });
+  }
+});
+
+test('native slider permits only trailing locked ticks to hide or reappear with delayed announcements', { skip: !chrome }, async () => {
+  const assignment = "document.querySelector('#strength-description').textContent=labels[position]+'，选项 '+(position+1)+'，共 4 项';";
+  const ticks = '<div id="ticks"><span data-locked="false" data-selected="false"></span><span data-locked="false" data-selected="true"></span><span data-locked="false" data-selected="false"></span><span data-locked="true" data-selected="false"></span></div>';
+  const html = menuFixture().replace('<div data-model-reasoning-effort-slider>', `<div data-model-reasoning-effort-slider>${ticks}`)
+    .replace("let model='Alpha', position=1;", "let model='Alpha', position=1;window.ranges=[];window.enteredLocked=false;")
+    .replace("document.querySelector('#slider-owner').onkeydown=e=>{", "document.querySelector('#slider-owner').onkeydown=e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;")
+    .replace(assignment, "if(position===3)window.enteredLocked=true;const max=position===2?2:3;window.ranges.push(max);document.querySelector('[role=slider]').setAttribute('aria-valuemax',max);document.querySelector('#ticks').innerHTML=Array.from({length:max+1},(_,i)=>'<span data-locked='+String(i===3)+' data-selected='+String(i===position)+'></span>').join('');const next=position;setTimeout(()=>document.querySelector('#strength-description').textContent=labels[next]+'，第'+(next+1)+'项，共'+(max+1)+'项。',180);");
+  await fixture(html, async page => {
+    const initial = await readChoices(page, 'effort');
+    assert.deepEqual(initial.options.map(item => item.value), ['即时', '普通', '深入']);
+    assert.equal(initial.selected, '普通');
+    assert.equal((await readChoices(page, 'effort', '深入')).selected, '深入');
+    // Start with the lock hidden, then show it again during enumeration.
+    assert.equal((await readChoices(page, 'effort', '普通')).selected, '普通');
+    assert.deepEqual(await page.evaluate(() => [...new Set(window.ranges)].sort()), [2, 3]);
+    assert.equal(await page.evaluate(() => window.enteredLocked), false);
+    assert.equal(await page.evaluate(() => document.querySelector('[role=slider]').getAttribute('aria-valuenow')), '1');
+  });
+  const changedUsable = menuFixture().replace('<div data-model-reasoning-effort-slider>', `<div data-model-reasoning-effort-slider>${ticks}`)
+    .replace("document.querySelector('#slider-owner').onkeydown=e=>{", "document.querySelector('#slider-owner').onkeydown=e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;")
+    .replace(assignment, "document.querySelector('[role=slider]').setAttribute('aria-valuemax',2);document.querySelector('#ticks').innerHTML='<span data-locked=false data-selected=true></span><span data-locked=false data-selected=false></span><span data-locked=true data-selected=false></span>';");
+  await fixture(changedUsable, async page => {
+    await assert.rejects(() => readChoices(page, 'effort'), error => error.code === 'PICKER_UNAVAILABLE' && error.diagnostic.sliderDiagnostic.reason === 'changed_range');
+  });
+});
+
 test('native catalog rejects slider mutations that silently change the model', { skip: !chrome }, async () => {
   const html = menuFixture().replace("if(e.key==='ArrowRight')position", "model='Beta 即将于某日停用';if(e.key==='ArrowRight')position");
   await fixture(html, async page => {
@@ -274,6 +343,55 @@ test('native menus tolerate picker event handlers arriving after the server-rend
     const models = await readChoices(page, 'model');
     assert.equal(models.selected, 'Alpha');
   });
+});
+
+test('native picker does not close an already-open menu whose option layout is delayed', { skip: !chrome }, async () => {
+  const html = menuFixture().replace('<style>', '<style>#menu[data-pending=true]>*{visibility:hidden}')
+    .replace("document.querySelector('#picker').onclick=()=>document.querySelector('#menu').hidden=false;", "window.pickerClicks=0;document.querySelector('#picker').onclick=()=>{window.pickerClicks++;const menu=document.querySelector('#menu');menu.hidden=!menu.hidden;document.querySelector('#picker').setAttribute('data-state',menu.hidden?'closed':'open');if(!menu.hidden){menu.dataset.pending='true';setTimeout(()=>menu.dataset.pending='false',1150)}};");
+  await fixture(html, async page => {
+    const models = await readChoices(page, 'model');
+    assert.equal(models.selected, 'Alpha');
+    assert.equal(await page.evaluate(() => window.pickerClicks), 1);
+    const diagnostic = await inspectCompatibility(page);
+    assert.equal(diagnostic.interactions.pickerRetries, 0);
+    assert.equal(typeof diagnostic.hasFocus, 'boolean');
+    assert.equal(diagnostic.visibilityState, 'visible');
+    assert.ok(diagnostic.picker.triggers.length > 0);
+  });
+});
+
+test('native target-scoped menu input stays on the owned target in a two-tab local fixture', { skip: !chrome }, async () => {
+  const browser = await chromium.launch({ executablePath: chrome, headless: true });
+  try {
+    const context = await browser.newContext();
+    const html = '<button id="picker">Picker</button><div role="menu" id="menu" hidden><button role="menuitemradio" aria-checked="true">Alpha</button></div><script>window.events=[];document.querySelector("#picker").onclick=e=>{events.push(e.isTrusted);document.querySelector("#menu").hidden=false}</script>';
+    await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body: html }));
+    const foreground = await context.newPage();
+    await foreground.goto('https://chatgpt.com/foreground-fixture');
+    const frontSession = await context.newCDPSession(foreground);
+    const { targetInfo } = await frontSession.send('Target.getTargetInfo');
+    const browserSession = await browser.newBrowserCDPSession();
+    const created = context.waitForEvent('page');
+    // Create blank first so routing is attached before any navigation.
+    await browserSession.send('Target.createTarget', { url: 'about:blank', background: true, browserContextId: targetInfo.browserContextId });
+    const owned = await created;
+    await owned.goto('https://chatgpt.com/owned-fixture');
+    await foreground.bringToFront();
+    const session = await context.newCDPSession(owned);
+    const client = Object.fromEntries(['Runtime', 'Input', 'Page'].map(domain => [domain, new Proxy({}, { get: (_, method) => args => session.send(`${domain}.${method}`, args) })]));
+    const page = createNativePage(client);
+    const before = await foreground.evaluate(() => ({ focus: document.hasFocus(), visibility: document.visibilityState }));
+    await page.click('#picker');
+    assert.equal(await owned.evaluate(() => !document.querySelector('#menu').hidden), true);
+    assert.deepEqual(await owned.evaluate(() => window.events), [true]);
+    // Evaluate the ordinary DOM alternative without changing product behavior.
+    await page.evaluate(() => { document.querySelector('#menu').hidden = true; document.querySelector('#picker').click(); });
+    assert.deepEqual(await owned.evaluate(() => window.events), [true, false]);
+    assert.deepEqual(await foreground.evaluate(() => window.events), []);
+    assert.deepEqual(await foreground.evaluate(() => ({ focus: document.hasFocus(), visibility: document.visibilityState })), before);
+    // Headless Chrome reports both targets visible, so this fixture verifies
+    // target isolation; it cannot prove a headed background rendering fix.
+  } finally { await browser.close(); }
 });
 
 test('native advanced submenus stay scoped and rediscover effort choices after model change', { skip: !chrome }, async () => {

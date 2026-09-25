@@ -59,6 +59,44 @@ async function userTurn(runtime) {
   })()`);
 }
 
+// Standard page translation hints, scoped to our ChatGPT main documents. They
+// leave Chrome's language preferences, login state and browser identity alone.
+export const OWNED_PAGE_NOTRANSLATE_SCRIPT = `(() => {
+  if (window.top !== window || location.origin !== 'https://chatgpt.com') return;
+  const apply = () => {
+    const root = document.documentElement;
+    if (root) { root.setAttribute('translate', 'no'); root.classList.add('notranslate'); }
+    const head = document.head;
+    if (head) {
+      let meta = head.querySelector('meta[name="google"][content="notranslate"]');
+      if (!meta) { meta = document.createElement('meta'); meta.name = 'google'; meta.content = 'notranslate'; head.appendChild(meta); }
+    }
+    return !!(root && head);
+  };
+  if (!apply()) {
+    const observer = new MutationObserver(() => { if (apply()) observer.disconnect(); });
+    observer.observe(document, { childList: true, subtree: true });
+  }
+})()`;
+
+export async function installOwnedPageTranslationHints(client) {
+  await client.Page.addScriptToEvaluateOnNewDocument({ source: OWNED_PAGE_NOTRANSLATE_SCRIPT });
+  await evaluation(client.Runtime, OWNED_PAGE_NOTRANSLATE_SCRIPT);
+}
+
+export async function translatedHomeState(runtime) {
+  return evaluation(runtime, `(() => {
+    const root = document.documentElement;
+    const home = location.origin === 'https://chatgpt.com' && location.pathname === '/' && !location.search && !location.hash;
+    const messages = document.querySelectorAll('[data-message-author-role],[data-message-id],[data-testid*="conversation-turn"]').length;
+    const editors = [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"]')];
+    const draft = editors.some(node => String(node.value ?? node.textContent ?? '').trim());
+    const generating = !!document.querySelector('[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="停止生成"]');
+    return { emptyHome: home && messages === 0 && editors.length > 0 && !draft && !generating,
+      translated: !!root && (root.classList.contains('translated-ltr') || root.classList.contains('translated-rtl')) };
+  })()`);
+}
+
 // Oracle's connection helper reconnects when its shared WebSocket cache is empty.
 // After explicit login, bind new owned page sessions to the existing transport
 // directly: an interrupted socket must fail instead of asking for authorization.
@@ -86,6 +124,7 @@ export function createBridge(overrides = {}) {
     submit: submitPrompt, waitAnswer: waitForAssistantResponse, promptReady: ensurePromptReady,
     readUserIds: readUserMessageIds, readFingerprint: readSubmittedPromptFingerprint, userTurn,
     recoveryNow: Date.now, recoveryPause: pause,
+    installTranslationHints: installOwnedPageTranslationHints, translatedHomeState,
     ...overrides };
   const connections = new Map();
   const pending = new Map();
@@ -99,7 +138,8 @@ export function createBridge(overrides = {}) {
   }
   async function saveOwners(entry) {
     await writeJson(path.join(entry.stateDir, 'native-browser.json'), { version: 2,
-      browser_ws: entry.endpoint.browserWSEndpoint, owned_targets: [...entry.owned], ui_tab: entry.uiTarget || null });
+      browser_ws: entry.endpoint.browserWSEndpoint, owned_targets: [...entry.owned], ui_tab: entry.uiTarget || null,
+      notranslate_reloaded_targets: [...entry.translationReloaded], notranslate_targets: [...entry.translationProtected] });
   }
   async function attachOwned(entry, target) {
     if (!entry.authorized || !entry.owned.has(target)) throw coded('TAB_NOT_OWNED', '该标签页不属于翻译软件，已拒绝访问。');
@@ -122,6 +162,9 @@ export function createBridge(overrides = {}) {
     entry.authorized = true;
     entry.owned.add(connection.targetId);
     await saveOwners(entry); // Never navigate before registering ownership.
+    await deps.installTranslationHints(connection.client);
+    entry.translationProtected.add(connection.targetId);
+    await saveOwners(entry);
     const page = deps.ui.createNativePage(connection.client);
     await page.goto(url);
     return connection;
@@ -141,6 +184,23 @@ export function createBridge(overrides = {}) {
     await saveOwners(entry);
     return connection;
   }
+  async function prepareOwnedHome(entry, connection) {
+    if (!entry.owned.has(connection.targetId)) throw coded('TAB_NOT_OWNED', '该标签页不属于翻译软件，已拒绝访问。');
+    const state = await deps.translatedHomeState(connection.client.Runtime);
+    if (!state.emptyHome) return;
+    const protectedBeforeLoad = entry.translationProtected.has(connection.targetId);
+    await deps.installTranslationHints(connection.client);
+    entry.translationProtected.add(connection.targetId);
+    await saveOwners(entry);
+    if (protectedBeforeLoad || entry.translationReloaded.has(connection.targetId)) return;
+    // Record the one-shot attempt before reloading, including across broker restarts.
+    entry.translationReloaded.add(connection.targetId);
+    await saveOwners(entry);
+    const current = await deps.translatedHomeState(connection.client.Runtime);
+    if (!current.emptyHome) return;
+    await connection.client.Page.reload({ ignoreCache: false });
+    await deps.promptReady(connection.client.Runtime, 30000, quiet);
+  }
   async function login(request) {
     let entry = connections.get(request.state_dir);
     if (!entry?.authorized) {
@@ -149,6 +209,8 @@ export function createBridge(overrides = {}) {
       const sameBrowser = saved?.version === 2 && saved.browser_ws === endpoint.browserWSEndpoint;
       entry = { stateDir: request.state_dir, endpoint, authorized: false,
         owned: new Set(sameBrowser && Array.isArray(saved.owned_targets) ? saved.owned_targets : []),
+        translationReloaded: new Set(sameBrowser && Array.isArray(saved.notranslate_reloaded_targets) ? saved.notranslate_reloaded_targets : []),
+        translationProtected: new Set(sameBrowser && Array.isArray(saved.notranslate_targets) ? saved.notranslate_targets : []),
         uiTarget: sameBrowser ? saved.ui_tab : null };
       // Only explicit login may open a browser WebSocket. A saved target may be
       // resumed only when its browser WebSocket identity is unchanged.
@@ -173,10 +235,11 @@ export function createBridge(overrides = {}) {
       first.client.on?.('disconnect', () => { entry.authorized = false; });
       first.client._ws?.on?.('close', () => { entry.authorized = false; });
       connections.set(request.state_dir, entry);
+      await prepareOwnedHome(entry, first);
       return deps.ui.prepareLoginPage(deps.ui.createNativePage(first.client));
     }
     const connection = await setupConnection(entry, true);
-    return withConnection(connection, page => deps.ui.prepareLoginPage(page));
+    return withConnection(connection, async page => { await prepareOwnedHome(entry, connection); return deps.ui.prepareLoginPage(page); });
   }
 
   async function migrateLegacy(request, journal) {
@@ -392,6 +455,7 @@ export function createBridge(overrides = {}) {
     if (!connection) return { ok: true, status: 'needs_login', message: '翻译软件的标签页已关闭，请点击“连接已登录的 Chrome”重新打开。' };
     return withConnection(connection, async page => {
       if (request.op === 'status') return deps.ui.connectionStatus(await deps.ui.inspectPage(page));
+      await prepareOwnedHome(entry, connection);
       const result = await deps.ui.catalog(page, request.model || undefined, request.effort || undefined);
       return { ok: true, status: 'ready', message: '已从已登录账号读取可用模型和推理强度。', ...result };
     });

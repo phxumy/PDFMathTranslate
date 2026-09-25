@@ -16,6 +16,7 @@ export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 300
   }
   const page = {
     client, timeoutMs, modeTimeoutMs, pollMs,
+    interactionCounts: { pointerClicks: 0, keyPresses: 0, pickerRetries: 0 },
     async evaluate(fn, arg) {
       const expression = `(${fn.toString()})(${arg === undefined ? '' : JSON.stringify(arg)})`;
       const result = await client.Runtime.evaluate({ expression, awaitPromise: true, returnByValue: true });
@@ -38,6 +39,7 @@ export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 300
         return hit && (hit === node || node.contains(hit)) ? { x, y } : null;
       }, selector);
       if (!point) throw coded('CONTROL_UNAVAILABLE', '网页选项不可用或被其他窗口覆盖，请检查浏览器页面。');
+      page.interactionCounts.pointerClicks++;
       await client.Input.dispatchMouseEvent({ type: 'mouseMoved', ...point });
       await client.Input.dispatchMouseEvent({ type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
       await client.Input.dispatchMouseEvent({ type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
@@ -54,6 +56,7 @@ export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 300
         if (!focused) throw coded('CONTROL_UNAVAILABLE', '无法聚焦网页选项。');
       }
       const detail = { key, code: key, windowsVirtualKeyCode: KEY_CODES[key], nativeVirtualKeyCode: KEY_CODES[key] };
+      page.interactionCounts.keyPresses++;
       await client.Input.dispatchKeyEvent({ type: 'keyDown', ...detail });
       await client.Input.dispatchKeyEvent({ type: 'keyUp', ...detail });
     },
@@ -172,9 +175,11 @@ export async function inspectCompatibility(page, knownEvidence) {
         const rect = node.getBoundingClientRect();
         return { tag: node.tagName.toLowerCase(), ...attrs(node, ['role', 'data-testid', 'class', 'aria-label', 'aria-selected', 'aria-checked', 'data-state', 'aria-haspopup', 'aria-disabled']), label: short(node.textContent, 80), rect: { width: Math.round(rect.width), height: Math.round(rect.height) } };
       });
-    return { composerAncestors, modeControls };
+    return { composerAncestors, modeControls, visibilityState: document.visibilityState, hasFocus: document.hasFocus() };
   });
-  return { evidence, ...structure };
+  const picker = await pickerSnapshot(page);
+  const interactions = Object.fromEntries(['pointerClicks', 'keyPresses', 'pickerRetries'].map(key => [key, Number(page.interactionCounts?.[key] || 0)]));
+  return { evidence, ...structure, picker, interactions };
 }
 
 export async function ensureChat(page) {
@@ -235,6 +240,25 @@ async function clickRow(page, row) {
 const containsWord = (label, words) => words.some(word => normalize(label).toLowerCase().includes(word));
 const radioRows = rows => rows.filter(row => ['radio', 'menuitemradio', 'option'].includes(row.role));
 
+async function pickerSnapshot(page) {
+  return page.evaluate(({ picker, menus }) => {
+    const eligible = node => !node.closest('article,[data-message-author-role],[inert],[data-active="false"]');
+    const displayed = node => {
+      if (!eligible(node) || node.closest('[hidden],[aria-hidden="true"]') || getComputedStyle(node).visibility === 'hidden') return false;
+      for (let parent = node; parent; parent = parent.parentElement) if (getComputedStyle(parent).display === 'none') return false;
+      return true;
+    };
+    const visible = node => displayed(node) && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0;
+    const triggers = [...document.querySelectorAll(picker)].filter(eligible).slice(0, 8);
+    const panels = [...document.querySelectorAll(menus)].filter(eligible);
+    const states = triggers.map(node => ({ state: node.getAttribute('data-state') || '', expanded: node.getAttribute('aria-expanded') || '', visible: visible(node) }));
+    // Radix can mark a picker open before its portalled rows receive layout.
+    // Clicking its trigger again at that point closes the pending menu.
+    const open = states.some(state => state.state === 'open' || state.expanded === 'true') || panels.some(displayed);
+    return { open, triggers: states, menuCount: panels.length, displayedMenuCount: panels.filter(displayed).length, visibleMenuCount: panels.filter(visible).length };
+  }, { picker: PICKER, menus: MENU });
+}
+
 async function openPicker(page) {
   await closeMenus(page);
   // The composer is often available several seconds before React mounts the picker.
@@ -246,7 +270,11 @@ async function openPicker(page) {
     if (rows.length) return rows;
     // A server-rendered pill can precede React's event handlers. Retry only
     // while there is no open menu; never click an already open picker closed.
-    if (Date.now() - clickedAt > 800) { await page.click(PICKER); clickedAt = Date.now(); }
+    if (Date.now() - clickedAt > 800 && !(await pickerSnapshot(page)).open) {
+      if (page.interactionCounts) page.interactionCounts.pickerRetries++;
+      await page.click(PICKER);
+      clickedAt = Date.now();
+    }
     return null;
   }, 'PICKER_UNAVAILABLE', '网页没有打开可识别的模型菜单。');
 }
@@ -352,33 +380,93 @@ export async function readSlider(page, requested) {
   if (!available.includes(original) || available.some((position, index) => index > 0 && position !== available[index - 1] + 1)) {
     throw coded('OPTION_UNAVAILABLE', '当前推理强度不可用，或可用档位被锁定档位隔开。请在网页选择可用档位后刷新。');
   }
-  const originalLocks = JSON.stringify(current.ticks);
+  let acceptedRange = { min: current.min, max: current.max, ticks: [...current.ticks] };
   let restoreSafe = true;
+  let lastObservation = current;
+  let lastReason = 'label_not_synchronized';
+  let reopenedMenus = 0;
+  const addSliderDiagnostic = (error, target) => {
+    const snapshot = value => value ? {
+      value: value.value, min: value.min, max: value.max,
+      ticks: value.ticks.map(item => ['true', 'false'].includes(item) ? item : 'unknown'),
+      hasLocked: value.hasLocked, disabled: value.disabled,
+      hasLabel: !!value.label, announcementPosition: value.announcementPosition, announcementTotal: value.announcementTotal,
+    } : null;
+    error.diagnostic = { ...error.diagnostic, sliderDiagnostic: {
+      reason: lastReason, expected: { target, original, min: acceptedRange.min, max: acceptedRange.max, ticks: [...acceptedRange.ticks], available: [...available] },
+      observed: snapshot(lastObservation), reopenedMenus,
+    } };
+    return error;
+  };
+  const observe = async deadline => {
+    let next = await readSliderState(page);
+    if (!next) { lastObservation = null; lastReason = 'missing_slider'; }
+    if (!next && Date.now() < deadline) {
+      const menuOpen = await page.evaluate(selector => [...document.querySelectorAll(selector)].some(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert],[data-active="false"]');
+      }), MENU);
+      if (!menuOpen) {
+        // Reopen only a demonstrably closed picker; missing slider nodes inside
+        // an open menu may merely be remounting and must not trigger more keys.
+        const recovery = { ...page, timeoutMs: Math.max(1, deadline - Date.now()) };
+        reopenedMenus++;
+        await openPicker(recovery);
+        recovery.timeoutMs = Math.max(1, deadline - Date.now());
+        await revealSimpleSlider(recovery);
+        next = await readSliderState(page);
+      }
+    }
+    lastObservation = next;
+    if (!next) { lastReason = 'missing_slider'; return null; }
+    const rangeChanged = next.min !== acceptedRange.min || next.max !== acceptedRange.max;
+    const locksChanged = JSON.stringify(next.ticks) !== JSON.stringify(acceptedRange.ticks);
+    if (rangeChanged || locksChanged) {
+      const completeTicks = state => [state.min, state.max].every(Number.isInteger) && state.max >= state.min && state.max - state.min <= 12 && state.ticks.length === state.max - state.min + 1 && state.ticks.every(value => ['true', 'false'].includes(value));
+      const nextAvailable = next.ticks.flatMap((value, index) => value === 'false' ? [next.min + index] : []);
+      const overlap = Math.min(next.ticks.length, acceptedRange.ticks.length);
+      // The page may hide/show trailing upgrade-only ticks when a tier is
+      // selected. Accept only a complete, equivalent set of usable positions.
+      const sameUsableRange = next.min === range.min && next.max !== acceptedRange.max && completeTicks(next) && completeTicks(acceptedRange)
+        && JSON.stringify(nextAvailable) === JSON.stringify(available)
+        && next.ticks.slice(0, overlap).every((value, index) => value === acceptedRange.ticks[index])
+        && [...next.ticks.slice(overlap), ...acceptedRange.ticks.slice(overlap)].every(value => value === 'true');
+      if (sameUsableRange) acceptedRange = { min: next.min, max: next.max, ticks: [...next.ticks] };
+      else {
+        restoreSafe = false;
+        lastReason = rangeChanged ? 'changed_range' : 'changed_locks';
+        throw coded('PICKER_UNAVAILABLE', rangeChanged ? '网页推理强度范围发生变化，请刷新模型。' : '网页推理强度锁定状态发生变化，请刷新模型。');
+      }
+    }
+    if (!available.includes(next.value)) {
+      restoreSafe = false;
+      lastReason = 'unavailable_value';
+      throw coded('OPTION_UNAVAILABLE', '网页切换到了不可用推理强度，已停止操作。');
+    }
+    current = next;
+    return next;
+  };
   const synchronized = async (target, previousLabel, requireLabel = true) => {
     let signature = '';
     let stableSince = 0;
-    return poll(page, async () => {
-      const next = await readSliderState(page);
-      if (!next || next.min !== range.min || next.max !== range.max || JSON.stringify(next.ticks) !== originalLocks) {
-        restoreSafe = false;
-        throw coded('PICKER_UNAVAILABLE', '网页推理强度范围或锁定状态发生变化，请刷新模型。');
-      }
-      if (!available.includes(next.value)) {
-        restoreSafe = false;
-        throw coded('OPTION_UNAVAILABLE', '网页切换到了不可用推理强度，已停止操作。');
-      }
-      // Keep the newest position even while labels lag, so failure recovery
-      // never sends keys from an obsolete position.
-      current = next;
-      if (next.value !== target) { signature = ''; return null; }
-      if (!requireLabel) return next;
-      const ordinalMatches = next.announcementPosition === null || next.announcementPosition === next.value - range.min + 1;
-      const totalMatches = next.announcementTotal === null || next.announcementTotal === range.max - range.min + 1;
-      if (!next.label || next.label === previousLabel || !ordinalMatches || !totalMatches) { signature = ''; return null; }
-      const candidate = JSON.stringify([next.value, next.label, next.announcementPosition, next.announcementTotal]);
-      if (candidate !== signature) { signature = candidate; stableSince = Date.now(); return null; }
-      return Date.now() - stableSince >= 150 ? next : null;
-    }, 'SELECTION_UNVERIFIED', '网页推理强度的位置与文字标签尚未同步，请稍后刷新。');
+    const deadline = Date.now() + page.timeoutMs;
+    try {
+      return await poll(page, async () => {
+        const next = await observe(deadline);
+        if (!next) { signature = ''; return null; }
+        // Keep the newest position even while labels lag, so failure recovery
+        // never sends keys from an obsolete position.
+        if (next.value !== target) { lastReason = 'position_not_synchronized'; signature = ''; return null; }
+        if (!requireLabel) return next;
+        const ordinalMatches = next.announcementPosition === null || next.announcementPosition === next.value - next.min + 1;
+        const totalMatches = next.announcementTotal === null || next.announcementTotal === next.max - next.min + 1;
+        lastReason = !ordinalMatches || !totalMatches ? 'announcement_not_synchronized' : 'label_not_synchronized';
+        if (!next.label || next.label === previousLabel || !ordinalMatches || !totalMatches) { signature = ''; return null; }
+        const candidate = JSON.stringify([next.value, next.label, next.announcementPosition, next.announcementTotal]);
+        if (candidate !== signature) { signature = candidate; stableSince = Date.now(); return null; }
+        return Date.now() - stableSince >= 150 ? next : null;
+      }, 'SELECTION_UNVERIFIED', '网页推理强度的位置与文字标签尚未同步，请稍后刷新。');
+    } catch (error) { throw addSliderDiagnostic(error, target); }
   };
   const move = async (target, requireLabel = true) => {
     if (!available.includes(target)) throw coded('OPTION_UNAVAILABLE', '当前账号没有提供该推理强度。');
@@ -413,7 +501,15 @@ export async function readSlider(page, requested) {
     throw error;
   } finally {
     if (restoreSafe) {
-      try { await move(destination, !failure); }
+      try {
+        if (failure) {
+          // If a remount hid the post-key state, recover an actual observation
+          // before deciding whether any restoration key is necessary.
+          const deadline = Date.now() + page.timeoutMs;
+          await poll(page, () => observe(deadline), 'SELECTION_UNVERIFIED', '无法重新确认推理强度位置。');
+        }
+        await move(destination, !failure);
+      }
       catch (error) { if (!failure) throw error; }
     }
   }
@@ -455,7 +551,7 @@ export async function catalog(page, model, effort) {
     return { models: verified.options, efforts: efforts.options, model: verified.selected, effort: efforts.selected, mode: modeFromEvidence(evidence) };
   } catch (error) {
     if (/^(PICKER|SELECTION|CONTROL)_/.test(error.code || '')) {
-      try { error.diagnostic = await inspectCompatibility(page); } catch { /* Preserve the original error if inspection fails. */ }
+      try { error.diagnostic = { ...error.diagnostic, ...await inspectCompatibility(page) }; } catch { /* Preserve the original error if inspection fails. */ }
     }
     throw error;
   }

@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createBridge, connectOwnedPage } from '../bridge.mjs';
+import vm from 'node:vm';
+import { createBridge, connectOwnedPage, OWNED_PAGE_NOTRANSLATE_SCRIPT, installOwnedPageTranslationHints, translatedHomeState } from '../bridge.mjs';
 import { browserPromptFingerprint } from '../node_modules/@steipete/oracle/dist/src/browser/promptFingerprint.js';
 
 async function temporary(fn) {
@@ -12,7 +13,7 @@ async function temporary(fn) {
   finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 function fixture() {
-  const calls = { discover: 0, attach: [], submit: 0, close: [], navigate: [], catalog: 0, scoped: [] };
+  const calls = { discover: 0, attach: [], submit: 0, close: [], navigate: [], catalog: 0, scoped: [], hints: [], reloads: [] };
   const tabs = new Map([['personal-tab', { messageId: 'private', text: 'DO NOT READ', url: 'https://chatgpt.com/c/personal' }]]);
   let next = 0;
   const deps = {
@@ -23,13 +24,13 @@ function fixture() {
       if (options.targetId && !tabs.has(id)) throw new Error('No target with given id found');
       const state = tabs.get(id) || { url: 'about:blank', count: 0 };
       tabs.set(id, state);
-      const client = { Runtime: { state, evaluate: async () => ({ result: { value: 0 } }) }, Input: {}, Page: {}, on: () => {},
+      const client = { Runtime: { state, evaluate: async () => ({ result: { value: 0 } }) }, Input: {}, Page: { reload: async () => calls.reloads.push(id) }, on: () => {},
         _ws: { readyState: 1, on: () => {} },
         Target: { createTarget: async options => { assert.deepEqual(options, { url: 'about:blank', background: true }); const targetId = `owned-${++next}`; tabs.set(targetId, { url: 'about:blank', count: 0 }); return { targetId }; } } };
       return { client, targetId: id, close: async options => { calls.close.push({ id, options }); } };
     },
     ui: {
-      createNativePage: client => ({ client, goto: async url => { calls.navigate.push(url); client.Runtime.state.url = url; } }),
+      createNativePage: client => ({ client, goto: async url => { assert.equal(client.Runtime.state.hintsInstalled, true, 'document-start hints must precede the first navigation'); calls.navigate.push(url); client.Runtime.state.url = url; } }),
       prepareLoginPage: async () => ({ ok: true, status: 'ready' }),
       inspectPage: async () => ({ ready: true }), connectionStatus: () => ({ ok: true, status: 'ready' }),
       ensureChat: async () => {},
@@ -45,12 +46,14 @@ function fixture() {
       await options.onPromptSubmitted();
     },
     waitAnswer: async () => ({ text: '{"translation":"离线测试译文"}' }),
+    installTranslationHints: async client => { calls.hints.push(client.Runtime.state); client.Runtime.state.hintsInstalled = true; },
+    translatedHomeState: async runtime => ({ emptyHome: runtime.state.url === 'https://chatgpt.com/' && !runtime.state.messageId && !runtime.state.draft, translated: !!runtime.state.translated }),
   };
   deps.scopedAttach = async (_anchor, targetId) => {
     calls.scoped.push(targetId);
     const state = tabs.get(targetId);
     if (!state) throw new Error('No target with given id found');
-    return { targetId, client: { Runtime: { state, evaluate: async () => ({ result: { value: 0 } }) }, Input: {}, Page: {} }, close: async options => { calls.close.push({ id: targetId, options }); } };
+    return { targetId, client: { Runtime: { state, evaluate: async () => ({ result: { value: 0 } }) }, Input: {}, Page: { reload: async () => calls.reloads.push(targetId) } }, close: async options => { calls.close.push({ id: targetId, options }); } };
   };
   return { deps, calls, tabs };
 }
@@ -255,3 +258,93 @@ test('owned page facade binds every command to its exact session without reconne
   await connection.close();
   assert.deepEqual(commands, [['Runtime.evaluate', { expression: 'location.href' }, 'own-session'], ['Input.insertText', { text: 'offline' }, 'own-session'], ['detach', { sessionId: 'own-session' }]]);
 });
+
+test('notranslate document-start hints tolerate delayed root/head, are idempotent and skip other origins', async () => {
+  let callback; let disconnected = 0;
+  const classes = new Set(); const attrs = {}; const metas = [];
+  const root = { setAttribute: (name, value) => { attrs[name] = value; }, classList: { add: value => classes.add(value) } };
+  const head = { querySelector: () => metas[0], appendChild: node => metas.push(node) };
+  const document = { documentElement: null, head: null, createElement: tag => { assert.equal(tag, 'meta'); return {}; } };
+  const window = {}; window.top = window;
+  const context = { document, window, location: { origin: 'https://chatgpt.com' }, MutationObserver: class {
+    constructor(fn) { callback = fn; } observe(target, options) { assert.equal(target, document); assert.deepEqual({ ...options }, { childList: true, subtree: true }); } disconnect() { disconnected++; }
+  } };
+  vm.runInNewContext(OWNED_PAGE_NOTRANSLATE_SCRIPT, context);
+  document.documentElement = root; callback();
+  assert.equal(attrs.translate, 'no'); assert.ok(classes.has('notranslate')); assert.equal(disconnected, 0);
+  document.head = head; callback();
+  assert.equal(disconnected, 1); assert.deepEqual(metas, [{ name: 'google', content: 'notranslate' }]);
+  vm.runInNewContext(OWNED_PAGE_NOTRANSLATE_SCRIPT, context);
+  assert.equal(metas.length, 1);
+  context.location.origin = 'https://example.invalid'; attrs.translate = 'yes';
+  vm.runInNewContext(OWNED_PAGE_NOTRANSLATE_SCRIPT, context);
+  assert.equal(attrs.translate, 'yes');
+  context.location.origin = 'https://chatgpt.com'; window.top = {};
+  vm.runInNewContext(OWNED_PAGE_NOTRANSLATE_SCRIPT, context);
+  assert.equal(attrs.translate, 'yes', 'subframes are untouched');
+});
+
+test('notranslate installation uses the bound Page registration before applying current-page hints', async () => {
+  const calls = [];
+  await installOwnedPageTranslationHints({
+    Page: { addScriptToEvaluateOnNewDocument: async args => calls.push(['register', args.source]) },
+    Runtime: { evaluate: async args => { calls.push(['current', args.expression]); return {}; } },
+  });
+  assert.deepEqual(calls, [['register', OWNED_PAGE_NOTRANSLATE_SCRIPT], ['current', OWNED_PAGE_NOTRANSLATE_SCRIPT]]);
+});
+
+test('translated homepage detection excludes conversation, draft, generation and missing composer', async () => {
+  const location = { origin: 'https://chatgpt.com', pathname: '/', search: '', hash: '' };
+  let messages = []; let editors = [{ textContent: '' }]; let generating = null;
+  const classes = new Set(['translated-ltr']);
+  const document = {
+    documentElement: { classList: { contains: name => classes.has(name) } },
+    querySelectorAll: selector => selector.includes('data-message-author-role') ? messages : editors,
+    querySelector: () => generating,
+  };
+  const runtime = { evaluate: async ({ expression }) => ({ result: { value: vm.runInNewContext(expression, { location, document }) } }) };
+  assert.equal((await translatedHomeState(runtime)).emptyHome, true);
+  assert.equal((await translatedHomeState(runtime)).translated, true);
+  for (const modify of [() => { location.pathname = '/c/saved'; }, () => { messages = [{}]; }, () => { editors = [{ textContent: 'unsent draft' }]; }, () => { generating = {}; }, () => { editors = []; }]) {
+    location.pathname = '/'; messages = []; editors = [{ textContent: '' }]; generating = null;
+    modify(); assert.equal((await translatedHomeState(runtime)).emptyHome, false);
+  }
+  classes.clear(); assert.equal((await translatedHomeState(runtime)).translated, false);
+});
+
+test('only a legacy empty owned setup page reloads once on first protection, across broker restarts', async () => temporary(async directory => {
+  const f = fixture(); let bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  assert.deepEqual(f.calls.reloads, [], 'new pages receive hints before navigation without a reload');
+  const savedPath = path.join(directory, 'native-browser.json');
+  const legacy = JSON.parse(await fs.readFile(savedPath, 'utf8'));
+  delete legacy.notranslate_targets;
+  await fs.writeFile(savedPath, JSON.stringify(legacy));
+  await bridge.run({ op: 'status', state_dir: directory });
+  assert.deepEqual(f.calls.reloads, [], 'read-only status never repairs/reloads');
+  bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  assert.deepEqual(f.calls.reloads, ['owned-1']);
+  await bridge.run({ op: 'catalog', state_dir: directory });
+  bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  assert.deepEqual(f.calls.reloads, ['owned-1'], 'persistent one-shot prevents a reload loop');
+  assert.equal(f.tabs.get('personal-tab').hintsInstalled, undefined);
+}));
+
+test('translation hints never reload a draft, submitted page or recovering conversation', async () => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  const setup = f.tabs.get('owned-1'); setup.translated = true; setup.draft = true;
+  await bridge.run({ op: 'catalog', state_dir: directory });
+  setup.draft = false; setup.messageId = 'existing-message';
+  await bridge.run({ op: 'login', state_dir: directory });
+  let captures = 0;
+  f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('interrupted capture'); return { text: 'recovered' }; };
+  // createBridge snapshots dependencies; use the same fixture through a new broker.
+  const resumed = createBridge(f.deps); await resumed.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); await resumed.run(req);
+  f.tabs.get('owned-2').translated = true;
+  assert.equal((await resumed.run({ ...req, op: 'recover' })).answer, 'recovered');
+  assert.deepEqual(f.calls.reloads, []);
+}));
