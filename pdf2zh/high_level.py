@@ -29,6 +29,7 @@ from pdf2zh.font_cmap import prepare_pdf_text_font
 from pdf2zh.link_annotations import suppress_reflowed_link_borders
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import prepare_scan_background
+from pdf2zh.source_spelling import collect_source_spelling
 
 from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
@@ -303,6 +304,7 @@ def translate_patch(
     device.latin = latin
     device.latin_name = latin_name
     device.scan_backgrounds = {}
+    device.source_spelling = collect_source_spelling(doc_zh)
 
     assert device is not None
     obj_patch = {}

@@ -21,6 +21,7 @@ from tenacity import retry, wait_fixed, stop_after_attempt
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.identity_layout import orcid_list_chars
+from pdf2zh.source_spelling import normalize_source_wraps
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
     CJK_PROHIBITED_LINE_START,
@@ -4307,6 +4308,15 @@ class TranslateConverter(PDFConverterEx):
                 varf.append(vfix)
                 varp.append(len(sstk) - 1)
             sstk[-1] += prose_suffix
+        for index, paragraph in enumerate(pstk):
+            if paragraph.layout_class <= 1:
+                continue
+            sstk[index], offsets = normalize_source_wraps(
+                sstk[index],
+                paragraph.break_offsets,
+                getattr(self, "source_spelling", None),
+            )
+            paragraph.break_offsets = list(offsets)
         _merge_overlapping_split_math_islands(
             sstk,
             var,
