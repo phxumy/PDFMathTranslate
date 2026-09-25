@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { filterOptions, modeFromEvidence } from '../ui.mjs';
-import { oracleArguments } from '../bridge.mjs';
+import { oracleArguments, setupTabCandidate, uiTab } from '../bridge.mjs';
 
 const bridge = fileURLToPath(new URL('../bridge.mjs', import.meta.url));
 test('only enabled, visible, distinct actual options are offered', () => {
@@ -77,5 +77,30 @@ test('corrupt or structurally incomplete journals never authorize resubmission',
         assert.equal(response.not_submitted, false, `${op}: ${contents}`);
       }
     }
+  } finally { await fs.rm(state, { recursive: true, force: true }); }
+});
+test('restart adopts only a unique login setup page and status performs no writes or navigation', async () => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'pdf2zh-bridge-test-'));
+  const authPage = { url: () => 'https://auth.openai.com/log-in/password', target: 'new-auth-target' };
+  const conversation = { url: () => 'https://chatgpt.com/c/fixture-translation', target: 'translation-target' };
+  const original = JSON.stringify({ ui_tab: 'old-target-before-restart' });
+  let opened = 0;
+  const context = {
+    pages: () => [authPage, conversation],
+    newPage: async () => { opened++; throw new Error('must not create a duplicate login flow'); },
+    newCDPSession: async page => ({ send: async () => ({ targetInfo: { targetId: page.target } }), detach: async () => {} }),
+  };
+  authPage.context = () => context;
+  conversation.context = () => context;
+  try {
+    await fs.writeFile(path.join(state, 'browser.json'), original);
+    assert.equal(await uiTab(state, context, false), authPage);
+    assert.equal(await fs.readFile(path.join(state, 'browser.json'), 'utf8'), original, 'status must not persist tab adoption');
+    assert.equal(await uiTab(state, context, true), authPage);
+    assert.equal(JSON.parse(await fs.readFile(path.join(state, 'browser.json'), 'utf8')).ui_tab, 'new-auth-target');
+    assert.equal(opened, 0);
+    assert.equal(setupTabCandidate([conversation]), null);
+    assert.equal(setupTabCandidate([authPage, { url: () => 'https://chatgpt.com/' }]), null, 'ambiguous candidates cannot be adopted');
+    assert.equal(setupTabCandidate([{ url: () => 'https://auth.openai.com.attacker.invalid/log-in' }]), null);
   } finally { await fs.rm(state, { recursive: true, force: true }); }
 });

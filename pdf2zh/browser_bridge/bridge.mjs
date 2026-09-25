@@ -5,7 +5,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chromium } from 'playwright-core';
-import { catalog, coded, ensureChat, inspectPage } from './ui.mjs';
+import { catalog, coded, connectionStatus, ensureChat, inspectPage, prepareLoginPage } from './ui.mjs';
+import { browserEndpoint } from './endpoint.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ORACLE = path.join(HERE, 'node_modules', '@steipete', 'oracle');
@@ -48,18 +49,6 @@ function chromeCandidates(request) {
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium',
   ].filter(Boolean);
 }
-async function browserEndpoint(stateDir) {
-  const active = await fs.readFile(path.join(stateDir, 'chrome-profile', 'DevToolsActivePort'), 'utf8').catch(() => '');
-  const [portText, socketPath] = active.trim().split(/\r?\n/);
-  const port = Number(portText);
-  if (!Number.isInteger(port) || port < 1 || !socketPath?.startsWith('/devtools/browser/')) return null;
-  const endpoint = `http://127.0.0.1:${port}`;
-  try {
-    const version = await (await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(1800) })).json();
-    if (new URL(version.webSocketDebuggerUrl).pathname !== socketPath) return null;
-    return { endpoint, port };
-  } catch { return null; }
-}
 async function connect(stateDir) {
   const live = await browserEndpoint(stateDir);
   if (!live) throw coded('BROWSER_CLOSED', '翻译专用浏览器已关闭。请点“登录 / 打开浏览器”，然后继续原文件以恢复；不会自动重发。');
@@ -78,14 +67,30 @@ async function findOwnedTab(context, id) {
   }
   return null;
 }
-async function uiTab(stateDir, context, create = true) {
+export function setupTabCandidate(pages) {
+  const candidates = pages.filter(page => {
+    try {
+      const url = new URL(page.url());
+      return url.protocol === 'https:' && (['auth.openai.com', 'auth0.openai.com'].includes(url.hostname) ||
+        (url.hostname === 'chatgpt.com' && url.pathname === '/'));
+    } catch { return false; }
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
+export async function uiTab(stateDir, context, create = true) {
   const statePath = path.join(stateDir, 'browser.json');
   const state = await readJson(statePath, {});
   let page = await findOwnedTab(context, state.ui_tab);
+  if (!page) {
+    // A restarted browser changes target IDs. Only a unique setup/login page in
+    // our dedicated profile can be adopted, never an existing /c/ conversation.
+    page = setupTabCandidate(context.pages());
+    if (page && create) await writeJson(statePath, { ...state, ui_tab: await targetId(page) });
+  }
   if (!page && create) {
     page = await context.newPage();
-    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await writeJson(statePath, { ...state, ui_tab: await targetId(page) });
+    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
   }
   return page;
 }
@@ -95,7 +100,7 @@ async function login(request) {
     if (!chrome) throw coded('CHROME_NOT_FOUND', '未找到 Google Chrome。请先安装 Chrome 或设置 PDF2ZH_CHATGPT_CHROME_PATH。');
     const profile = path.join(request.state_dir, 'chrome-profile');
     await fs.mkdir(profile, { recursive: true });
-    const child = spawn(chrome, [`--user-data-dir=${profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--new-window', 'https://chatgpt.com/'], {
+    const child = spawn(chrome, [`--user-data-dir=${profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--new-window', 'about:blank'], {
       detached: true, stdio: 'ignore', windowsHide: false,
     });
     let launchError;
@@ -107,17 +112,8 @@ async function login(request) {
     }
   }
   const { context } = await connect(request.state_dir);
-  let page = await uiTab(request.state_dir, context, false);
-  if (!page) {
-    // Only this newly created dedicated profile's tabs can be considered here.
-    page = context.pages().find(p => p.url() === 'https://chatgpt.com/');
-    if (page) await writeJson(path.join(request.state_dir, 'browser.json'), { ui_tab: await targetId(page) });
-    else page = await uiTab(request.state_dir, context);
-  }
-  await page.bringToFront();
-  const evidence = await inspectPage(page).catch(() => ({}));
-  return { ok: true, status: evidence.composer && !evidence.login ? 'ready' : 'needs_login',
-    message: evidence.composer && !evidence.login ? '专用浏览器已打开，登录状态可复用。请刷新可用模型。' : '请在打开的专用浏览器中登录 ChatGPT，完成后点“刷新模型 / 状态”。' };
+  const page = await uiTab(request.state_dir, context);
+  return prepareLoginPage(page);
 }
 
 function oracleEnvironment(stateDir) {
@@ -319,11 +315,11 @@ export async function run(request) {
   if (request.op === 'recover') return recover(request);
   if (!['status', 'catalog', 'select'].includes(request.op)) throw coded('INVALID_REQUEST', 'Unknown operation.');
   const { context } = await connect(request.state_dir);
-  const page = await uiTab(request.state_dir, context);
+  const page = await uiTab(request.state_dir, context, request.op !== 'status');
   if (request.op === 'status') {
+    if (!page) return { ok: true, status: 'needs_login', message: '专用登录标签页已关闭。请点“登录 ChatGPT / 打开登录窗口”重新打开。' };
     const evidence = await inspectPage(page);
-    return { ok: true, status: evidence.composer && !evidence.login ? 'ready' : 'needs_login',
-      message: evidence.composer && !evidence.login ? '专用浏览器已连接。' : '请在专用浏览器登录后刷新。' };
+    return connectionStatus(evidence);
   }
   const result = await catalog(page, request.model || undefined, request.effort || undefined);
   return { ok: true, status: 'ready', message: '已从当前登录账号的网页读取可用模型和推理强度。', ...result };
@@ -340,7 +336,7 @@ async function main() {
   } catch (error) {
     let journalUnreadable = false;
     const journal = request?.request_dir ? await readJournal(request.request_dir).catch(() => { journalUnreadable = true; return null; }) : null;
-    process.stdout.write(`${JSON.stringify({ ok: false, status: 'paused', error_code: error.code || 'BROWSER_ERROR', message: error.message,
+    process.stdout.write(`${JSON.stringify({ ok: false, status: error.status || 'paused', error_code: error.code || 'BROWSER_ERROR', message: error.message,
       ...(journal ? identityFields(journal) : {}), ...(error.session_id ? { session_id: error.session_id } : {}),
       ...(error.conversation_url ? { conversation_url: error.conversation_url } : {}),
       not_submitted: !journalUnreadable && (error.not_submitted === true || ((request?.op === 'translate' || request?.op === 'recover') && !journal?.dispatch_started)),

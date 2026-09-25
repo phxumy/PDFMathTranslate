@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { catalog, readChoices } from '../ui.mjs';
+import { catalog, connectionStatus, ensureChat, inspectPage, prepareLoginPage, readChoices } from '../ui.mjs';
 
 const chrome = ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].find(existsSync);
 test('account menus retain Advanced state and refresh model-specific effort choices', { skip: !chrome }, async () => {
@@ -46,5 +46,67 @@ test('slider choices come from actual ARIA labels and catalog restores prior eff
     assert.equal(values.selected, '中等');
     const changed = await readChoices(page, 'effort', '深入');
     assert.equal(changed.selected, '深入');
+  } finally { await browser.close(); }
+});
+
+test('auth route error distinguishes passive 403 evidence from ordinary login', { skip: !chrome }, async () => {
+  const browser = await chromium.launch({ executablePath: chrome, headless: true });
+  try {
+    const page = await browser.newPage();
+    // Every request is served from a fixture; this test never contacts OpenAI.
+    await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<h1>糟糕，出错了!</h1><pre>Route Error (400 Invalid content type: text/html; charset=UTF-8)</pre>' }));
+    await page.goto('https://auth.openai.com/log-in/password');
+    await page.evaluate(() => Object.defineProperty(performance, 'getEntriesByType', { configurable: true, value: () => [{ name: 'https://auth.openai.com/api/accounts/password/verify', responseStatus: 403 }] }));
+    const evidence = await inspectPage(page);
+    const state = connectionStatus(evidence);
+    assert.equal(state.status, 'auth_error');
+    assert.equal(state.error_code, 'AUTH_PAGE_ERROR');
+    assert.match(state.message, /403/);
+    assert.doesNotMatch(state.message, /密码错误/);
+    await assert.rejects(() => ensureChat(page), error => error.code === 'AUTH_PAGE_ERROR' && error.status === 'auth_error');
+    await page.evaluate(() => Object.defineProperty(performance, 'getEntriesByType', { value: () => [{ name: 'https://auth.openai.com/awe/api/v2/rum', responseStatus: 403 }] }));
+    assert.doesNotMatch(connectionStatus(await inspectPage(page)).message, /403/, 'telemetry rejections are not authentication evidence');
+    await page.setContent('<h1>Enter your password</h1><input type="password"><button>Continue</button>');
+    assert.equal(connectionStatus(await inspectPage(page)).status, 'needs_login');
+  } finally { await browser.close(); }
+});
+
+test('explicit Login recovers only recognized error pages and retains a normal form', { skip: !chrome }, async () => {
+  const browser = await chromium.launch({ executablePath: chrome, headless: true });
+  try {
+    const page = await browser.newPage();
+    const requests = [];
+    await page.route('**/*', route => {
+      requests.push(route.request().url());
+      return route.fulfill({ contentType: 'text/html', body: route.request().url().includes('auth.openai.com')
+        ? '<h1>Oops, an error occurred</h1><pre>Route Error (400 Invalid content type: text/html)</pre>'
+        : '<h1>Welcome</h1><button>Log in</button>' });
+    });
+    await page.goto('https://auth.openai.com/log-in/password');
+    const errorState = connectionStatus(await inspectPage(page));
+    assert.equal(errorState.status, 'auth_error');
+    assert.equal(requests.length, 1, 'status inspection does not navigate');
+    const recovered = await prepareLoginPage(page);
+    assert.equal(page.url(), 'https://chatgpt.com/');
+    assert.equal(recovered.status, 'needs_login');
+    assert.deepEqual(requests, ['https://auth.openai.com/log-in/password', 'https://chatgpt.com/']);
+    await page.goto('https://auth.openai.com/log-in/password');
+    await page.setContent('<h1>Enter your password</h1><input id="form-state" value="fixture-in-progress"><button>Continue</button>');
+    const before = requests.length;
+    await prepareLoginPage(page);
+    assert.equal(requests.length, before);
+    assert.equal(page.url(), 'https://auth.openai.com/log-in/password');
+    assert.equal(await page.locator('#form-state').inputValue(), 'fixture-in-progress');
+  } finally { await browser.close(); }
+});
+
+test('verification is reported distinctly and quoted chat errors are ignored', { skip: !chrome }, async () => {
+  const browser = await chromium.launch({ executablePath: chrome, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<title>Just a moment...</title><h1>Verify you are human</h1>');
+    assert.equal(connectionStatus(await inspectPage(page)).status, 'verification_required');
+    await page.setContent('<title>ChatGPT</title><div id="prompt-textarea" contenteditable="true"> </div><article><p>Route Error (400 Invalid content type)</p></article>');
+    assert.equal(connectionStatus(await inspectPage(page)).status, 'ready');
   } finally { await browser.close(); }
 });

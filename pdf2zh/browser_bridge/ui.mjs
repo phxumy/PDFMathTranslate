@@ -37,8 +37,22 @@ export async function inspectPage(page) {
     const work = controls.find(n => /^(Work|工作|工作模式|ワーク)$/i.test(norm(n.textContent)));
     const composer = [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"]')].some(visible);
     const login = [...document.querySelectorAll('button,a')].some(n => visible(n) && /^(Log in|Sign in|登录|登入|ログイン)$/i.test(norm(n.textContent)));
+    const authPage = ['auth.openai.com', 'auth0.openai.com'].includes(location.hostname) ||
+      (location.hostname === 'chatgpt.com' && /^\/(auth|login|log-in)(\/|$)/.test(location.pathname));
+    // Inspect rendered error labels only, never input values, cookies or request bodies.
+    const errorLabels = authPage && !composer ? [...document.querySelectorAll('h1,h2,p,pre,code,[role="alert"],[data-testid*="error"]')]
+      .filter(visible).map(n => norm(n.textContent)) : [];
+    const routeError = errorLabels.some(text => /\bRoute\s*Error\b|\bInvalid content type\b/i.test(text));
+    const genericAuthError = errorLabels.some(text => /^(Oops[,!]? (an error occurred|something went wrong)|糟糕[，,！!]?\s*(出错了|发生错误)|出错了|エラーが発生しました)/i.test(text));
+    // Performance entries are passive response metadata; no login request is replayed.
+    const verifyStatus = authPage ? [...performance.getEntriesByType('resource')].reverse().find(entry => {
+      try { const url = new URL(entry.name); return url.origin === location.origin && url.pathname === '/api/accounts/password/verify'; }
+      catch { return false; }
+    })?.responseStatus : undefined;
+    const authError = Boolean(authPage && !composer && (routeError || genericAuthError));
     return {
       url: location.href, home: location.pathname === '/', composer, login,
+      authPage, authError, authHttpStatus: authError && Number(verifyStatus) === 403 ? 403 : null,
       chatSelected: !!selected(chat), workSelected: !!selected(work), hasModeControls: !!(chat || work),
       workPath: /^\/(work|agent)(\/|$)/i.test(location.pathname),
       workMarker: [...document.querySelectorAll('[data-testid*="work"], [data-mode="work"]')].some(visible),
@@ -49,8 +63,34 @@ export async function inspectPage(page) {
   });
 }
 
+export function connectionStatus(evidence) {
+  if (evidence.authError) {
+    return { ok: false, status: 'auth_error', error_code: 'AUTH_PAGE_ERROR',
+      message: evidence.authHttpStatus === 403
+        ? 'ChatGPT 登录验证请求被服务拒绝（HTTP 403），登录页随后显示 Route Error。尚未登录成功。再次点“登录 ChatGPT”可从首页重新开始；登录信息会保留。'
+        : 'ChatGPT 登录页面发生错误，尚未登录成功。再次点“登录 ChatGPT”可从首页重新开始；登录信息会保留。' };
+  }
+  if (evidence.challenge) return { ok: false, status: 'verification_required', error_code: 'VERIFY_REQUIRED', message: '专用浏览器正在等待网页验证，请在浏览器中正常完成验证后刷新状态。' };
+  if (evidence.composer && !evidence.login) return { ok: true, status: 'ready', message: '专用浏览器已连接，登录状态可复用。请刷新可用模型。' };
+  return { ok: true, status: 'needs_login', message: '请在专用浏览器中登录 ChatGPT，完成后点“刷新模型 / 状态”。' };
+}
+
+export async function prepareLoginPage(page) {
+  let evidence = await inspectPage(page);
+  // Only an explicit Login action resets a recognized error page. Ordinary forms,
+  // verification screens and existing chats retain their current state.
+  if (evidence.authError) {
+    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    evidence = await inspectPage(page);
+  }
+  await page.bringToFront();
+  return connectionStatus(evidence);
+}
+
 export async function ensureChat(page) {
   let evidence = await inspectPage(page);
+  const state = connectionStatus(evidence);
+  if (state.error_code) throw Object.assign(coded(state.error_code, state.message), { status: state.status });
   if (evidence.login || !evidence.composer) throw coded('LOGIN_REQUIRED', '请在专用浏览器中登录 ChatGPT，完成验证后刷新模型列表。');
   if (modeFromEvidence(evidence) === 'work') {
     const chat = page.getByRole('radio', { name: /^(Chat|聊天|聊天模式|チャット)$/i }).first();
