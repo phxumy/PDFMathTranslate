@@ -686,6 +686,94 @@ class UnchangedRoleTranslationTests(unittest.TestCase):
 
 
 class ReferenceTitleResidueTests(unittest.TestCase):
+    def test_complete_short_product_name_allows_canonical_case_and_version(self):
+        for source_name, target_name in (
+            ("Ai feynman", "AI Feynman"),
+            ("Ai feynman 2.0", "AI Feynman 2.0"),
+            ("Qx newton v3.1", "QX Newton v3.1"),
+        ):
+            with self.subTest(source_name=source_name):
+                source = source_name + ": A method for predicting physical systems"
+                target = target_name + "：一种预测物理系统的方法"
+                self.assertFalse(has_suspicious_reference_title_residue(source, target))
+
+    def test_case_and_version_do_not_exempt_ordinary_title_prefixes(self):
+        for source_name, target_name in (
+            ("Deep learning", "DEEP Learning"),
+            ("Neural Networks", "Neural Networks"),
+            ("New method", "NEW Method"),
+            ("An approach", "AN Approach"),
+            ("Go faster", "GO Faster"),
+            ("Quantum method 2.0", "Quantum method 2.0"),
+        ):
+            with self.subTest(source_name=source_name):
+                self.assertTrue(
+                    has_suspicious_reference_title_residue(
+                        source_name + ": A method for predicting physical systems",
+                        target_name + "：一种预测物理系统的方法",
+                    )
+                )
+
+    def test_changed_or_missing_product_version_is_rejected(self):
+        for name in ("Ai feynman", "AI Feynman"):
+            for target_name in ("AI Feynman", "AI Feynman 2.1", "AI Feynman 12.0"):
+                with self.subTest(name=name, target_name=target_name):
+                    self.assertTrue(
+                        has_suspicious_reference_title_residue(
+                            name + " 2.0: A method for predicting physical systems",
+                            target_name + "：一种预测物理系统的方法",
+                        )
+                    )
+        self.assertFalse(
+            has_suspicious_reference_title_residue(
+                "Ai feynman 2.0: A method for predicting physical systems",
+                "人工智能费曼2.0用于预测物理系统的方法",
+            )
+        )
+
+    def test_terminal_numbered_model_size_is_one_identifier(self):
+        for source_name in ("GPT-2 small", "QX-7 medium"):
+            with self.subTest(source_name=source_name):
+                self.assertFalse(
+                    has_suspicious_reference_title_residue(
+                        "A circuit for indirect object identification in "
+                        + source_name,
+                        "用于间接对象识别的" + source_name + "回路",
+                    )
+                )
+        self.assertTrue(
+            has_suspicious_reference_title_residue(
+                "GPT-2 small improvements in object identification",
+                "GPT-2 small 在对象识别方面的改进",
+            )
+        )
+        self.assertTrue(
+            has_suspicious_reference_title_residue(
+                "A circuit for indirect object identification in GPT-2 small",
+                "用于 indirect object identification 的GPT-2 small回路",
+            )
+        )
+
+    def test_dotted_software_identifier_keeps_the_complete_extension(self):
+        source = "Interpretable machine learning for science with pysr and symbolicregression. jl"
+        self.assertFalse(
+            has_suspicious_reference_title_residue(
+                source, "使用PySR和SymbolicRegression.jl进行面向科学的可解释机器学习"
+            )
+        )
+        for target in (
+            "使用PySR和SymbolicRegression进行面向科学的可解释机器学习",
+            "使用PySR和SymbolicRegression.py进行面向科学的可解释机器学习",
+            "使用pysr和SymbolicRegression.jl进行面向科学的可解释机器学习",
+        ):
+            with self.subTest(target=target):
+                self.assertTrue(has_suspicious_reference_title_residue(source, target))
+        self.assertFalse(
+            has_suspicious_reference_title_residue(
+                "Numerical experiments using solver.py", "使用solver.py进行数值实验"
+            )
+        )
+
     def test_named_product_can_remain_before_a_translated_explanation(self) -> None:
         source = (
             "Qiskit metal: an open-source framework for quantum device "

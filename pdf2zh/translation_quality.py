@@ -916,6 +916,11 @@ def has_suspicious_reference_title_residue(source: str, target: str) -> bool:
 
     clean_source = _strip_non_prose(source)
     clean_target = _strip_non_prose(target)
+    clean_source, clean_target, damaged_identifier = _mask_reference_identifiers(
+        clean_source, clean_target
+    )
+    if damaged_identifier:
+        return True
     source_matches = tuple(_ENGLISH_WORD_RE.finditer(clean_source))
     source_words = tuple(match.group(0).casefold() for match in source_matches)
     target_matches = tuple(_ENGLISH_WORD_RE.finditer(clean_target))
@@ -995,10 +1000,16 @@ def _preserved_reference_product_name(source: str, target: str) -> str | None:
         return None
     source_name = " ".join(source_match.group("name").split())
     target_name = " ".join(target_match.group("name").split())
-    if source_name != target_name:
+    if source_name.casefold() != target_name.casefold():
         return None
     name_tokens = source_name.split()
-    name_words = tuple(_ENGLISH_WORD_RE.finditer(source_name))
+    target_tokens = target_name.split()
+    # A complete trailing version belongs to the name, but it cannot on its
+    # own certify an ordinary title phrase as a software/product identifier.
+    if re.fullmatch(r"v?\d+(?:\.\d+)*", name_tokens[-1], re.IGNORECASE):
+        name_tokens = name_tokens[:-1]
+        target_tokens = target_tokens[:-1]
+    name_words = tuple(_ENGLISH_WORD_RE.finditer(" ".join(name_tokens)))
     if (
         not 1 <= len(name_words) <= 2
         or len(name_tokens) != len(name_words)
@@ -1018,9 +1029,102 @@ def _preserved_reference_product_name(source: str, target: str) -> str | None:
     name_has_identifier = any(
         _is_stylized_identifier_token(token) for token in name_tokens
     ) or _is_software_product_brand(name_tokens[0])
+    # Bibliographies often sentence-case an acronym-bearing name.  Accept a
+    # canonicalized two-letter acronym only in this complete, short,
+    # colon-delimited name; ordinary function words and mere Title Case fail.
+    if not name_has_identifier and name_tokens[0][:1].isupper():
+        name_has_identifier = any(
+            len(token) == 2
+            and token.isalpha()
+            and token.isupper()
+            and token.casefold() not in _FUNCTION_WORDS
+            and token.casefold()
+            not in {"am", "be", "do", "go", "me", "my", "no", "oh", "so", "up", "us"}
+            for token in target_tokens
+        )
     if not name_has_identifier:
         return None
     return source_name
+
+
+def _mask_reference_identifiers(source: str, target: str) -> tuple[str, str, bool]:
+    """Remove only source-anchored complete model/software identifiers.
+
+    This supplies lexical units to the residue checker, not permission to keep
+    surrounding English prose.  An extension or version changed by translation
+    does not match, and source-only fragments cannot be masked.
+    """
+    if not any(_is_cjk_ideograph(char) for char in target):
+        return source, target, False
+    source_lead = _LEADING_REFERENCE_NAME_RE.match(source)
+    if source_lead:
+        version = re.search(
+            r"\bv?\d+\.\d+(?:\.\d+)*$", source_lead.group("name"), re.IGNORECASE
+        )
+        if (
+            version
+            and re.search(
+                r"(?<![\d.])v?" + re.escape(version[0].lstrip("vV")) + r"(?![\d.])",
+                target,
+                re.IGNORECASE,
+            )
+            is None
+        ):
+            return source, target, True
+    patterns = (
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?P<name>[A-Z][A-Za-z0-9]{1,12}-\d+(?:\.\d+)*"
+            r"\s+(?:tiny|small|base|medium|large|xl|xxl))"
+            r"(?=\s*(?:$|[),;:.!?]))"
+        ),
+        re.compile(
+            r"(?<=\s)(?P<name>[A-Za-z][A-Za-z0-9_]{2,}\s*\.\s*[a-z]{2,3})"
+            r"(?=\s*(?:$|[),;:!?]))"
+        ),
+    )
+    for pattern in patterns:
+        for match in reversed(list(pattern.finditer(source))):
+            name = match.group("name")
+            is_dotted_software = "." in name and "-" not in name
+            if is_dotted_software:
+                left, extension = re.split(r"\s*\.\s*", name)
+                if (
+                    extension.casefold() in _FUNCTION_WORDS
+                    or left.casefold() in _FUNCTION_WORDS
+                    or re.search(
+                        r"\b(?:with|using|via|and)\s*$",
+                        source[: match.start()],
+                        re.IGNORECASE,
+                    )
+                    is None
+                ):
+                    continue
+            # Whitespace around a PDF-split dot and conventional casing may be
+            # normalized, while every letter, digit, hyphen and dot must remain.
+            parts = re.split(r"(\s+|\.)", name)
+            expression = "".join(
+                (
+                    r"\s*"
+                    if part.isspace()
+                    else r"\s*\.\s*" if part == "." else re.escape(part)
+                )
+                for part in parts
+            )
+            candidates = list(
+                re.finditer(
+                    r"(?<![A-Za-z0-9_])" + expression + r"(?![A-Za-z0-9_])",
+                    target,
+                    re.IGNORECASE,
+                )
+            )
+            if len(candidates) != 1:
+                if is_dotted_software:
+                    return source, target, True
+                continue
+            candidate = candidates[0]
+            target = target[: candidate.start()] + " " + target[candidate.end() :]
+            source = source[: match.start()] + " " + source[match.end() :]
+    return source, target, False
 
 
 def _is_software_product_brand(token: str) -> bool:
