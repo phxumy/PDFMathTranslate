@@ -58,6 +58,15 @@ _SOURCE_CROSS_REFERENCE_RE = re.compile(
     r"(?:\s*[）)])?",
     re.IGNORECASE,
 )
+_SOURCE_REFERENCE_LIST_SEPARATOR_RE = re.compile(
+    r"\s*(?P<separator>,\s*(?:(?:and|or)\b\s*)?|" r"(?:and|or|to)\b\s*|[&–—-]\s*)",
+    re.IGNORECASE,
+)
+_SOURCE_REFERENCE_LIST_ITEM_RE = re.compile(
+    rf"(?P<open>[（(])?\s*(?P<identifier>{_SOURCE_CROSS_REFERENCE_IDENTIFIER})"
+    r"(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))\s*(?P<close>[）)])?",
+    re.IGNORECASE,
+)
 _CROSS_REFERENCE_TERMINAL_RE = re.compile(r"^[\s\u00a0]*[。．.!?！？]")
 _TARGET_CROSS_REFERENCE_LABELS = {
     "figure": r"图",
@@ -329,6 +338,38 @@ def normalize_scientific_cross_reference_placement(
     """
 
     masked_source = _mask_cross_reference_opaque_text(source)
+    normalized = target
+    consumed_groups: dict[tuple, int] = {}
+    for start, end, kind, identifiers, separators in _source_reference_groups(
+        masked_source
+    ):
+        group_pattern = _target_reference_group_pattern(kind, identifiers, separators)
+        matches = tuple(
+            group_pattern.finditer(_mask_cross_reference_opaque_text(normalized))
+        )
+        key = (kind, identifiers, separators)
+        used = consumed_groups.get(key, 0)
+        if len(matches) <= used:
+            # A list is one reference unit.  Finding only its first number is
+            # insufficient when later numbers have moved into unrelated prose.
+            return None
+        match = matches[used]
+        group_text = normalized[match.start() : match.end()]
+        group_text = re.sub(
+            rf"(?i)(?<![A-Za-z])(?:{_SOURCE_CROSS_REFERENCE_LABELS[kind]})"
+            r"\.?(?![A-Za-z])",
+            _TARGET_CROSS_REFERENCE_CANONICAL_LABELS[kind],
+            group_text,
+        )
+        normalized = (
+            normalized[: match.start()] + group_text + normalized[match.end() :]
+        )
+        consumed_groups[key] = used + 1
+        # Group members were validated together, including shared parentheses.
+        # Do not subsequently repair the first member as an isolated reference.
+        masked_source = (
+            masked_source[:start] + " " * (end - start) + masked_source[end:]
+        )
     references: list[tuple[str, str, bool]] = []
     for match in _SOURCE_CROSS_REFERENCE_RE.finditer(masked_source):
         identifier_end = match.end("identifier")
@@ -358,9 +399,8 @@ def normalize_scientific_cross_reference_placement(
             )
         )
     if not references:
-        return target
+        return normalized
 
-    normalized = target
     consumed: dict[tuple[str, str], int] = {}
     for kind, identifier, source_is_terminal in references:
         normalized = _normalize_duplicate_cross_reference_labels(
@@ -404,6 +444,115 @@ def normalize_scientific_cross_reference_placement(
         consumed[key] = used + 1
     normalized = _normalize_terminal_figure_example_artifact(source, normalized)
     return _normalize_simplifying_equation_phrases(source, normalized)
+
+
+def _source_reference_groups(
+    source: str,
+) -> list[tuple[int, int, str, tuple[str, ...], tuple[str, ...]]]:
+    """Read explicit citation lists without guessing from arbitrary nearby numbers."""
+
+    groups = []
+    covered_until = 0
+    for first in _SOURCE_CROSS_REFERENCE_RE.finditer(source):
+        if first.start() < covered_until:
+            continue
+        label = first.group("label").casefold().rstrip(".")
+        kind = (
+            "figure"
+            if label.startswith("fig")
+            else (
+                "table"
+                if label.startswith(("tab", "tbl"))
+                else "equation" if label.startswith("eq") else "reference"
+            )
+        )
+        if _FORMULA_PLACEHOLDER_RE.match(source, first.end("identifier")):
+            continue
+        first_wrapped = source[
+            first.start() : first.start("identifier")
+        ].rstrip().endswith(("(", "（")) and source[
+            first.end("identifier") : first.end()
+        ].strip() in (
+            ")",
+            "）",
+        )
+        plural = label.endswith("s")
+        identifiers = [first.group("identifier")]
+        separators = []
+        cursor = first.end()
+        while separator := _SOURCE_REFERENCE_LIST_SEPARATOR_RE.match(source, cursor):
+            item_start = separator.end()
+            labelled = _SOURCE_CROSS_REFERENCE_RE.match(source, item_start)
+            if labelled is not None:
+                same_kind = (
+                    re.fullmatch(
+                        _SOURCE_CROSS_REFERENCE_LABELS[kind] + r"\.?",
+                        labelled.group("label"),
+                        re.IGNORECASE,
+                    )
+                    is not None
+                )
+                if not same_kind:
+                    break
+                item = labelled
+            else:
+                item = _SOURCE_REFERENCE_LIST_ITEM_RE.match(source, item_start)
+                if item is None or bool(item.group("open")) != bool(
+                    item.group("close")
+                ):
+                    break
+                # Singular "Eq. 1 and 2 layers" does not prove that 2 is another
+                # reference. Paired parentheses or a plural/repeated label do.
+                if not plural and not (first_wrapped and item.group("open")):
+                    break
+            if _FORMULA_PLACEHOLDER_RE.match(source, item.end("identifier")):
+                break
+            raw_separator = separator.group("separator").strip().casefold()
+            relation = (
+                "range"
+                if raw_separator in {"-", "–", "—", "to"}
+                else "or" if raw_separator.endswith("or") else "list"
+            )
+            identifiers.append(item.group("identifier"))
+            separators.append(relation)
+            cursor = item.end()
+        if len(identifiers) > 1:
+            groups.append(
+                (first.start(), cursor, kind, tuple(identifiers), tuple(separators))
+            )
+            covered_until = cursor
+    return groups
+
+
+def _target_reference_group_pattern(
+    kind: str,
+    identifiers: tuple[str, ...],
+    separators: tuple[str, ...],
+) -> re.Pattern[str]:
+    label = (
+        rf"(?:{_TARGET_CROSS_REFERENCE_LABELS[kind]}|"
+        rf"(?i:(?<![A-Za-z]){_SOURCE_CROSS_REFERENCE_LABELS[kind]}\.?(?![A-Za-z])))"
+    )
+    joins = {
+        "list": r"(?:[,，、]\s*(?:(?:以及|和|及|与|(?i:and))\s*)?|以及|和|及|与|&|(?i:and))",
+        "or": r"(?:[,，、]\s*)?(?:或者|或|(?i:or))",
+        "range": r"(?:[-–—~～]|至|到|(?i:to))",
+    }
+    bare = [
+        re.escape(identifier) + r"(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))"
+        for identifier in identifiers
+    ]
+    wrapped = [rf"(?:[（(]\s*{item}\s*[）)]|{item}(?!\s*[）)]))" for item in bare]
+
+    def joined(items: list[str]) -> str:
+        result = items[0]
+        for relation, item in zip(separators, items[1:], strict=True):
+            result += rf"\s*{joins[relation]}\s*(?:{label}\s*)?{item}"
+        return result
+
+    return re.compile(
+        rf"{label}\s*(?:{joined(wrapped)}|[（(]\s*{joined(bare)}\s*[）)])"
+    )
 
 
 def _mask_cross_reference_opaque_text(text: str) -> str:

@@ -68,6 +68,101 @@ class CjkStructuralRepetitionNormalizationTests(unittest.TestCase):
 
 
 class ScientificCrossReferencePlacementTests(unittest.TestCase):
+    def test_reference_lists_remain_one_unit_with_localized_separators(self) -> None:
+        source = "The notation is defined in Eq. (2.5) and (2.6)."
+        for target in (
+            "记号在式(2.5)和(2.6)中定义。",
+            "记号在方程（2.5）及方程（2.6）中定义。",
+            "记号在公式2.5、2.6中定义。",
+            "记号在式（2.5，2.6）中定义。",
+            "记号在式（2.5以及2.6）中定义。",
+        ):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+
+    def test_detached_missing_reordered_or_changed_list_members_are_rejected(
+        self,
+    ) -> None:
+        source = "The notation {v0} and {v1} is defined in Eq. (2.5) and (2.6)."
+        for target in (
+            "方程(2.5)中定义的记号{v0}和{v1} 和 (2.6)。",
+            "记号{v0}和{v1}定义于式(2.5)。",
+            "记号{v0}和{v1}定义于式(2.6)和(2.5)。",
+            "记号{v0}和{v1}定义于式(2.5)和(2.7)。",
+            "记号{v0}和{v1}定义于式(2.5)和(2.60)。",
+            "记号{v0}和{v1}定义于式2.5和2.6)。",
+        ):
+            with self.subTest(target=target):
+                self.assertIsNone(
+                    normalize_scientific_cross_reference_placement(source, target)
+                )
+
+    def test_reference_lists_support_kinds_number_styles_and_repeated_labels(
+        self,
+    ) -> None:
+        cases = (
+            ("Figs. C.1, C.2 and C.3 show the result.", "图C.1、C.2和C.3展示了结果。"),
+            ("Tables II and IV give the values.", "表II及IV列出数值。"),
+            ("See Ref. {v0} and Ref. {v1}.", "见参考文献{v0}及{v1}。"),
+            ("Eq. (3) or (4) applies.", "式（3）或（4）适用。"),
+            ("Eqs. (7)–(9) apply.", "式（7）至（9）适用。"),
+            ("Equations 3, 4, and 5 apply.", "方程（3、4、5）适用。"),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(
+                "Eq. (2) and (3) apply.", "Eq. (2) 及 Eq. (3)适用。"
+            ),
+            "式 (2) 及 式 (3)适用。",
+        )
+
+    def test_reference_range_and_alternative_relations_are_not_interchanged(
+        self,
+    ) -> None:
+        for source, target in (
+            ("Eqs. (7)–(9) apply.", "式（7）和（9）适用。"),
+            ("Eq. (3) or (4) applies.", "式（3）和（4）适用。"),
+        ):
+            with self.subTest(source=source):
+                self.assertIsNone(
+                    normalize_scientific_cross_reference_placement(source, target)
+                )
+
+    def test_reference_lists_do_not_claim_unrelated_numbers_or_other_kinds(
+        self,
+    ) -> None:
+        for source, target in (
+            ("Eq. 1 and 2 layers are required.", "需要式1和两个层。"),
+            ("Eq. (1) and 2 layers are required.", "需要式（1）和两个层。"),
+            ("See Eq. (1) and Fig. (2).", "参见式（1），并查看图（2）。"),
+            ("See Eqs. (7{v0} for details.", "详见式（7{v0}。"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+
+    def test_repeated_reference_groups_require_repeated_complete_targets(self) -> None:
+        source = "Eqs. (1) and (2) apply. Eqs. (1) and (2) still apply."
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                source, "式(1)和(2)适用。式(1)仍然适用。"
+            )
+        )
+        target = "式(1)和(2)适用。式(1)和(2)仍然适用。"
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(source, target), target
+        )
+
     def test_clear_figure_number_misplacements_are_repaired(self) -> None:
         cases = (
             (
