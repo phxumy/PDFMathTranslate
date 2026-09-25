@@ -110,3 +110,21 @@ test('verification is reported distinctly and quoted chat errors are ignored', {
     assert.equal(connectionStatus(await inspectPage(page)).status, 'ready');
   } finally { await browser.close(); }
 });
+
+test('localized challenge takes precedence over auth errors and Login does not reload it', { skip: !chrome }, async () => {
+  const browser = await chromium.launch({ executablePath: chrome, headless: true });
+  try {
+    const page = await browser.newPage();
+    let navigations = 0;
+    await page.route('**/*', route => {
+      navigations++;
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<title>请稍候…</title><h1>糟糕，出错了!</h1><p>Route Error (400 Invalid content type)</p>' });
+    });
+    await page.goto('https://auth.openai.com/log-in/password');
+    assert.equal(connectionStatus(await inspectPage(page)).status, 'verification_required');
+    assert.equal((await prepareLoginPage(page)).status, 'verification_required');
+    assert.equal(navigations, 1);
+    await page.setContent('<title>请稍等</title><h1>正在验证</h1>');
+    assert.equal(connectionStatus(await inspectPage(page)).status, 'verification_required');
+  } finally { await browser.close(); }
+});

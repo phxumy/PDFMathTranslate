@@ -19,6 +19,8 @@
 
 这类错误可能伴随认证请求返回 HTTP 403。它表示请求被拒绝，仅凭此状态不能判断密码错误或具体网络原因。请在专用窗口完成网站要求的验证；如果仍失败，先确认日常浏览器使用相同网络能否正常登录，再排查当前 VPN 或代理。程序不会绕过网站验证。
 
+如果停留在“请稍候…”人机验证页，软件会暂停并显示等待验证。即使页面同时保留旧错误信息，点击登录也不会重新加载正在验证的页面。验证反复出现时，浏览器接入尚不可用；界面测试通过不代表网站一定接受当前浏览器会话。Cloudflare 的[官方排错说明](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)列出了网络、浏览器配置和检测误判等原因；其[浏览器支持说明](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/)也明确指出不支持自动化浏览器完成生产环境验证。
+
 Windows 下，如果 Chrome 重启后保存的调试端口过期，程序会从使用本软件专用配置的 Chrome 主进程查找实际监听端口，并校验连接身份。不会接管日常浏览器。
 
 ## 关闭、取消与继续

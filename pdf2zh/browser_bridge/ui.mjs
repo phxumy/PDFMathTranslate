@@ -58,19 +58,19 @@ export async function inspectPage(page) {
       workMarker: [...document.querySelectorAll('[data-testid*="work"], [data-mode="work"]')].some(visible),
       legacyPicker: visible(document.querySelector('[data-testid="model-switcher-dropdown-button"]')),
       modelPill: [...document.querySelectorAll('[data-testid="model-switcher-dropdown-button"],button.__composer-pill[aria-haspopup="menu"]')].filter(visible).map(n => norm(n.innerText)).join(' / '),
-      challenge: /just a moment|verify you are human|验证您是真人/i.test(document.title),
+      challenge: !composer && /just a moment|please wait|verify you are human|请稍候|请稍等|验证您是真人|しばらくお待ち/i.test(document.title),
     };
   });
 }
 
 export function connectionStatus(evidence) {
+  if (evidence.challenge) return { ok: false, status: 'verification_required', error_code: 'VERIFY_REQUIRED', message: 'ChatGPT 正在等待网页人机验证，翻译尚未开始。请在浏览器完成验证；若反复回到此页面，请先检查同一网络下日常浏览器能否访问，不要反复点击登录或刷新。' };
   if (evidence.authError) {
     return { ok: false, status: 'auth_error', error_code: 'AUTH_PAGE_ERROR',
       message: evidence.authHttpStatus === 403
         ? 'ChatGPT 登录验证请求被服务拒绝（HTTP 403），登录页随后显示 Route Error。尚未登录成功。再次点“登录 ChatGPT”可从首页重新开始；登录信息会保留。'
         : 'ChatGPT 登录页面发生错误，尚未登录成功。再次点“登录 ChatGPT”可从首页重新开始；登录信息会保留。' };
   }
-  if (evidence.challenge) return { ok: false, status: 'verification_required', error_code: 'VERIFY_REQUIRED', message: '专用浏览器正在等待网页验证，请在浏览器中正常完成验证后刷新状态。' };
   if (evidence.composer && !evidence.login) return { ok: true, status: 'ready', message: '专用浏览器已连接，登录状态可复用。请刷新可用模型。' };
   return { ok: true, status: 'needs_login', message: '请在专用浏览器中登录 ChatGPT，完成后点“刷新模型 / 状态”。' };
 }
@@ -79,7 +79,7 @@ export async function prepareLoginPage(page) {
   let evidence = await inspectPage(page);
   // Only an explicit Login action resets a recognized error page. Ordinary forms,
   // verification screens and existing chats retain their current state.
-  if (evidence.authError) {
+  if (evidence.authError && !evidence.challenge) {
     await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     evidence = await inspectPage(page);
   }
