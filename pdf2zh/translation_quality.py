@@ -331,6 +331,14 @@ def normalize_scientific_cross_reference_placement(
     masked_source = _mask_cross_reference_opaque_text(source)
     references: list[tuple[str, str, bool]] = []
     for match in _SOURCE_CROSS_REFERENCE_RE.finditer(masked_source):
+        identifier_end = match.end("identifier")
+        while suffix := _FORMULA_PLACEHOLDER_RE.match(masked_source, identifier_end):
+            # A font boundary can split a reference into a visible prefix and
+            # an opaque suffix, such as ``Eqs. (7{v0}``.  The placeholder may
+            # contain the rest of a range and its closing delimiter.  Keep the
+            # compound identifier intact instead of balancing the visible prefix
+            # as though it were a complete reference.
+            identifier_end = suffix.end()
         raw_label = match.group("label").casefold()
         kind = (
             "figure"
@@ -345,7 +353,7 @@ def normalize_scientific_cross_reference_placement(
         references.append(
             (
                 kind,
-                source[match.start("identifier") : match.end("identifier")],
+                source[match.start("identifier") : identifier_end],
                 _CROSS_REFERENCE_TERMINAL_RE.match(following) is not None,
             )
         )
@@ -374,6 +382,13 @@ def normalize_scientific_cross_reference_placement(
         if correct_count > used:
             consumed[key] = used + 1
             continue
+        if _FORMULA_PLACEHOLDER_RE.search(identifier) and not (
+            _FORMULA_PLACEHOLDER_RE.fullmatch(identifier)
+        ):
+            # The hidden suffix prevents safe delimiter or placement repairs.
+            # Still require a correctly adjacent label; do not accept arbitrary
+            # intervening prose simply because part of the identifier is opaque.
+            return None
         repaired = _repair_one_misplaced_cross_reference(
             normalized,
             kind,
@@ -414,6 +429,11 @@ def _target_identifier_pattern(identifier: str) -> str:
     escaped = re.escape(identifier)
     if _FORMULA_PLACEHOLDER_RE.fullmatch(identifier):
         return escaped
+    if _FORMULA_PLACEHOLDER_RE.search(identifier):
+        # A compound identifier may end with an opaque closing delimiter.  Only
+        # match its exact visible prefix and tokens, allowing an opening delimiter
+        # before them without manufacturing a closing one inside the atom.
+        return rf"(?:[（(]\s*)?{escaped}"
     # Parentheses are optional, but they must be balanced when present.  The
     # former pair of independent optionals accepted malformed output such as
     # ``式(8中`` and allowed it into the cache as a valid cross-reference.

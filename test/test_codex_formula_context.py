@@ -356,6 +356,21 @@ class CodexFormulaContextTests(unittest.TestCase):
             cached,
         )
 
+    def test_cross_reference_normalization_preserves_split_formula_atoms(self) -> None:
+        translator = translator_stub()
+        source = "It follows from Eqs. (7{v0} that {v1} is negative."
+        target = "由式（7{v0}可知{v1}为负。"
+
+        self.assertEqual(translator._accepted_translation(source, target), target)
+        for invalid in (
+            "由式（7）{v0}可知{v1}为负。",
+            "由式（8{v0}可知{v1}为负。",
+            "由式（7{v1}可知{v0}为负。",
+            "由式（7可知{v1}为负。",
+        ):
+            with self.subTest(target=invalid):
+                self.assertIsNone(translator._accepted_translation(source, invalid))
+
     def test_contextual_retry_rejects_ordinary_cache_that_expands_formula(
         self,
     ) -> None:

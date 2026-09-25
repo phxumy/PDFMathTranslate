@@ -260,6 +260,55 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
             "这是对式(8)中所得结果的推广.",
         )
 
+    def test_reference_prefix_adjacent_to_formula_is_not_repaired(self) -> None:
+        cases = (
+            ("From Eqs. (7{v32} the result follows.", "由式（7{v32}可得结果。"),
+            ("See Fig. (12{{v4}} for details.", "详见图(12{{v4}}。"),
+            ("According to Table IV{v2}, this holds.", "根据表 IV{v2}，这成立。"),
+            ("See Eq. {v1}{v2} for details.", "详见式{v1}{v2}。"),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+
+    def test_partial_reference_does_not_disable_other_reference_validation(
+        self,
+    ) -> None:
+        source = "Compare Eqs. (7{v0} with Eq. (9)."
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(
+                source, "比较式（7{v0}与式(9中的结果。"
+            ),
+            "比较式（7{v0}与式(9)中的结果。",
+        )
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                source, "比较式（7{v0}与式(10)中的结果。"
+            )
+        )
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                "From Eqs. (7{v0} the result follows.",
+                "从方程中看到（7{v0}可得结果。",
+            )
+        )
+
+    def test_complete_reference_next_to_formula_is_still_validated(self) -> None:
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(
+                "From Eq. (7){v0} follows.", "由式(7{v0}可得。"
+            ),
+            "由式(7){v0}可得。",
+        )
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                "From Eq. (7){v0} follows.", "由式(8){v0}可得。"
+            )
+        )
+
     def test_terminal_figure_reference_drops_only_stray_locative_artifact(self) -> None:
         source = (
             "The coefficients are known from fabrication, see Fig. 3c. "
