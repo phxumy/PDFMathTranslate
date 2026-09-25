@@ -62,6 +62,7 @@ from pdf2zh.translator import (
     QwenMtTranslator,
     SiliconTranslator,
     TencentTranslator,
+    TranslationAbortedError,
     XinferenceTranslator,
     ZhipuTranslator,
 )
@@ -97,7 +98,20 @@ log = logging.getLogger(__name__)
 
 
 def _retryable_translation_error(error: BaseException) -> bool:
-    return isinstance(error, Exception) and not isinstance(error, CodexPermanentError)
+    return isinstance(error, Exception) and not isinstance(
+        error, (CodexPermanentError, TranslationAbortedError)
+    )
+
+
+def _supports_scientific_translation(translator: BaseTranslator) -> bool:
+    """Use backend capabilities, retaining compatibility with older Codex adapters."""
+    return bool(
+        getattr(
+            translator,
+            "scientific_translation",
+            getattr(translator, "name", "") == "codex",
+        )
+    )
 
 
 ITALIC_TAG_PREFIX = "[[PDF2ZH_ITALIC_"
@@ -3110,13 +3124,17 @@ class TranslateConverter(PDFConverterEx):
         service_model = param[1] if len(param) > 1 else None
         if not envs:
             envs = {}
-        for translator in [GoogleTranslator, BingTranslator, DeepLTranslator, DeepLXTranslator, OllamaTranslator, XinferenceTranslator, AzureOpenAITranslator,
-                           OpenAITranslator, ZhipuTranslator, ModelScopeTranslator, SiliconTranslator, GeminiTranslator, AzureTranslator, TencentTranslator, DifyTranslator, AnythingLLMTranslator, ArgosTranslator, GrokTranslator, GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator, CodexTranslator, QwenMtTranslator]:
+        translators = [GoogleTranslator, BingTranslator, DeepLTranslator, DeepLXTranslator, OllamaTranslator, XinferenceTranslator, AzureOpenAITranslator,
+                       OpenAITranslator, ZhipuTranslator, ModelScopeTranslator, SiliconTranslator, GeminiTranslator, AzureTranslator, TencentTranslator, DifyTranslator, AnythingLLMTranslator, ArgosTranslator, GrokTranslator, GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator, CodexTranslator, QwenMtTranslator]
+        if service_name == "chatgpt-browser":
+            from pdf2zh.chatgpt import ChatGPTTranslator
+            translators.append(ChatGPTTranslator)
+        for translator in translators:
             if service_name == translator.name:
                 self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache)
         if not self.translator:
             raise ValueError("Unsupported translation service")
-        if self.translator.name == "codex":
+        if _supports_scientific_translation(self.translator):
             self.translator.set_concurrency(self.thread)
         self.translation_policy = DocumentTranslationPolicy()
         self.layout_region_types: dict[int, dict[int, str]] = {}
@@ -3304,7 +3322,7 @@ class TranslateConverter(PDFConverterEx):
                     log.exception(e, exc_info=False)
                 raise e
 
-        if getattr(self.translator, "name", "") == "codex":
+        if _supports_scientific_translation(self.translator):
             results = list(sstk)
             ordinary_indices: list[int] = []
             ordinary_texts: list[str] = []
@@ -3376,7 +3394,7 @@ class TranslateConverter(PDFConverterEx):
             self.translator, "translate_reference_entries", None
         )
         if (
-            getattr(self.translator, "name", "") != "codex"
+            not _supports_scientific_translation(self.translator)
             or not callable(reference_translator)
         ):
             return normalized_entries
@@ -3465,6 +3483,8 @@ class TranslateConverter(PDFConverterEx):
                     strict=True,
                 )
             ]
+        except (TranslationAbortedError, CodexPermanentError):
+            raise
         except BaseException as exc:
             if log.isEnabledFor(logging.DEBUG):
                 log.exception(exc)
@@ -3738,6 +3758,8 @@ class TranslateConverter(PDFConverterEx):
                 formula_contexts,
                 join_kind=f"{group.edge.kind}:{group.edge.join_mode}",
             )
+        except (TranslationAbortedError, CodexPermanentError):
+            raise
         except BaseException as exc:
             if log.isEnabledFor(logging.DEBUG):
                 log.exception(exc)
@@ -3782,6 +3804,8 @@ class TranslateConverter(PDFConverterEx):
         ]
         try:
             replacements = translate(left_entry, right_prefix)
+        except (TranslationAbortedError, CodexPermanentError):
+            raise
         except BaseException as exc:
             if log.isEnabledFor(logging.DEBUG):
                 log.exception(exc)
@@ -3939,7 +3963,7 @@ class TranslateConverter(PDFConverterEx):
 
     def _reading_flow_enabled(self) -> bool:
         return (
-            getattr(self.translator, "name", "") == "codex"
+            _supports_scientific_translation(self.translator)
             and not getattr(self.translator, "prompttext", None)
             and callable(
                 getattr(
@@ -4539,7 +4563,7 @@ class TranslateConverter(PDFConverterEx):
                 varf,
                 varp,
                 pstk,
-                theorem_only=getattr(self.translator, "name", "") != "codex",
+                theorem_only=not _supports_scientific_translation(self.translator),
             )
         if not self.vfont:
             _release_standalone_italic_headings(sstk, var, varp, pstk)
@@ -4568,12 +4592,12 @@ class TranslateConverter(PDFConverterEx):
         }
         italic_candidates = (
             _collect_translatable_italic_runs(var, varp, pstk, sstk)
-            if getattr(self.translator, "name", "") == "codex" and not self.vfont
+            if _supports_scientific_translation(self.translator) and not self.vfont
             else {}
         )
         reference_title_italic_candidates = (
             _collect_reference_title_italic_runs(var, varp, pstk, sstk)
-            if getattr(self.translator, "name", "") == "codex" and not self.vfont
+            if _supports_scientific_translation(self.translator) and not self.vfont
             else {}
         )
         if italic_candidates:
@@ -4592,7 +4616,7 @@ class TranslateConverter(PDFConverterEx):
                 sstk,
                 italic_candidates,
             )
-            if getattr(self.translator, "name", "") == "codex"
+            if _supports_scientific_translation(self.translator)
             else {}
         )
         if readonly_formula_contexts:

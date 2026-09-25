@@ -1087,30 +1087,18 @@ class OpenAIlikedTranslator(OpenAITranslator):
         self.prompttext = prompt
 
 
-class CodexTranslator(BaseTranslator):
-    name = "codex"
-    envs = {
-        "CODEX_BIN": "codex",
-        "CODEX_PROFILE": None,
-        "CODEX_MODEL": None,
-        "CODEX_REASONING_EFFORT": "none",
-        "CODEX_TIMEOUT": "120",
-    }
+class TranslationAbortedError(RuntimeError):
+    """A transport needs user intervention; never retry, split, or preserve silently."""
+
+
+class ScientificTranslator(BaseTranslator):
+    """Scientific translation rules shared by independent execution backends."""
+
+    scientific_translation = True
     CustomPrompt = True
-    REQUIRED_EXEC_FLAGS = {
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "--sandbox",
-        "--color",
-        "--output-schema",
-        "--output-last-message",
-    }
-    FAST_PATH_FLAGS = {"--ignore-user-config", "--ignore-rules", "--model"}
-    COMPAT_PATH_FLAGS = {"--model", "--profile"}
     MAX_BATCH_ITEMS = 8
     MAX_BATCH_CHARS = 2500
     MAX_ITEM_CHARS = 300
-    SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
     SCIENTIFIC_TRANSLATION_POLICY = (
         "preserve-personal-names-v1;reference-work-titles-only-v2;"
         "translate-prose-italic-and-preserve-style-v2;"
@@ -1181,32 +1169,8 @@ class CodexTranslator(BaseTranslator):
         r"\{\{v\d+\}\}|\{v\d+\})"
     )
 
-    def __init__(
-        self, lang_in, lang_out, model, envs=None, prompt=None, ignore_cache=False
-    ):
-        self.set_envs(envs)
-        if not model:
-            model = self.envs["CODEX_MODEL"]
-        self.reasoning_effort = (
-            str(self.envs.get("CODEX_REASONING_EFFORT") or "none").strip().lower()
-        )
-        if self.reasoning_effort not in self.SUPPORTED_REASONING_EFFORTS:
-            supported = ", ".join(sorted(self.SUPPORTED_REASONING_EFFORTS))
-            raise ValueError(
-                "Unsupported CODEX_REASONING_EFFORT "
-                f"{self.reasoning_effort!r}; expected one of: {supported}."
-            )
+    def __init__(self, lang_in, lang_out, model, prompt=None, ignore_cache=False):
         super().__init__(lang_in, lang_out, model, ignore_cache)
-        configured_codex_bin = self.envs["CODEX_BIN"] or "codex"
-        self.codex_bin = find_codex_executable(configured_codex_bin)
-        if self.codex_bin is None:
-            raise RuntimeError(
-                f"codex executable not found: {configured_codex_bin}. Checked the "
-                "portable package, CODEX_CLI_PATH, PATH, and the Codex desktop app. "
-                "Set CODEX_BIN to the full path of codex.exe."
-            )
-        self.profile = self.envs["CODEX_PROFILE"]
-        self.timeout = int(self.envs.get("CODEX_TIMEOUT") or "120")
         self.prompttext = prompt
         self.single_output_schema = {
             "type": "object",
@@ -1260,23 +1224,14 @@ class CodexTranslator(BaseTranslator):
             "required": ["title_translations"],
             "additionalProperties": False,
         }
-        self.codex_version = None
-        self.supported_exec_flags: set[str] = set()
-        self.fast_command_available = False
-        self.compat_command_available = False
-        self.preferred_command_mode = "fast"
         self.max_concurrency = 1
-        self._probe_cli()
-        self.add_cache_impact_parameters("profile", self.profile)
-        self.add_cache_impact_parameters("reasoning_effort", self.reasoning_effort)
         self.add_cache_impact_parameters("prompt", self.prompt("", self.prompttext))
-        self.add_cache_impact_parameters("command_mode", self.preferred_command_mode)
         self.add_cache_impact_parameters(
             "scientific_translation_policy", self.SCIENTIFIC_TRANSLATION_POLICY
         )
 
     def set_concurrency(self, value: int | str | None) -> None:
-        """Set the maximum number of independent Codex requests in flight."""
+        """Set the maximum number of independent translation requests in flight."""
 
         try:
             concurrency = int(value or 1)
@@ -1295,7 +1250,7 @@ class CodexTranslator(BaseTranslator):
             return [worker(batch) for batch in batches]
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.max_concurrency, len(batches)),
-            thread_name_prefix="pdf2zh-codex",
+            thread_name_prefix=f"pdf2zh-{self.name}",
         ) as executor:
             return list(executor.map(worker, batches))
 
@@ -1891,133 +1846,9 @@ class CodexTranslator(BaseTranslator):
             'Return JSON with exactly one field: {"translations": ["...", "..."]}.'
         )
 
-    def _run_probe_command(self, args: list[str]) -> subprocess.CompletedProcess:
-        try:
-            return subprocess.run(
-                [self.codex_bin, *args],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                check=False,
-                **codex_subprocess_window_kwargs(),
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(f"codex executable not found: {self.codex_bin}") from exc
-
-    def _probe_cli(self):
-        version_result = self._run_probe_command(["--version"])
-        if version_result.returncode != 0:
-            detail = version_result.stderr.strip() or version_result.stdout.strip()
-            raise RuntimeError(f"Codex CLI version probe failed: {detail}")
-        self.codex_version = (
-            version_result.stdout.strip() or version_result.stderr.strip()
-        )
-
-        help_result = self._run_probe_command(["exec", "--help"])
-        if help_result.returncode != 0:
-            detail = help_result.stderr.strip() or help_result.stdout.strip()
-            raise RuntimeError(f"Codex CLI help probe failed: {detail}")
-
-        help_text = "\n".join([help_result.stdout, help_result.stderr])
-        candidate_flags = (
-            self.REQUIRED_EXEC_FLAGS
-            | self.FAST_PATH_FLAGS
-            | self.COMPAT_PATH_FLAGS
-            | {"--config"}
-        )
-        self.supported_exec_flags = {
-            flag for flag in candidate_flags if flag in help_text
-        }
-        if "--config" in self.supported_exec_flags:
-            self.supported_exec_flags.add("-c")
-
-        missing_required = self.REQUIRED_EXEC_FLAGS - self.supported_exec_flags
-        if missing_required:
-            raise RuntimeError(
-                "Codex CLI is missing required exec flags: "
-                + ", ".join(sorted(missing_required))
-            )
-
-        self.compat_command_available = True
-        self.fast_command_available = (
-            self.FAST_PATH_FLAGS.issubset(self.supported_exec_flags)
-            and not self.profile
-        )
-        if self.profile:
-            if "--profile" not in self.supported_exec_flags:
-                raise RuntimeError(
-                    "Codex CLI does not support --profile, but CODEX_PROFILE was set."
-                )
-            self.preferred_command_mode = "compat"
-        elif self.fast_command_available:
-            self.preferred_command_mode = "fast"
-        else:
-            self.preferred_command_mode = "compat"
-
     @staticmethod
     def _is_passthrough_text(text: str) -> bool:
         return not text.strip() or re.match(r"^\{v\d+\}$", text) is not None
-
-    @staticmethod
-    def _looks_like_unsupported_flag(detail: str) -> bool:
-        lowered = detail.lower()
-        return any(
-            needle in lowered
-            for needle in [
-                "unexpected argument",
-                "unrecognized option",
-                "unknown option",
-                "found argument",
-            ]
-        )
-
-    def _build_command(
-        self, prompt_text: str, schema_path: str, output_path: str, mode: str
-    ) -> list[str]:
-        command = [
-            self.codex_bin,
-            "exec",
-        ]
-        if mode == "fast":
-            command.extend(["--ignore-user-config", "--ignore-rules"])
-        if mode == "compat" and self.profile:
-            command.extend(["--profile", self.profile])
-        command.extend(
-            [
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "--sandbox",
-                "read-only",
-                "--color",
-                "never",
-            ]
-        )
-        if self.model and "--model" in self.supported_exec_flags:
-            command.extend(["--model", self.model])
-        if "--config" not in self.supported_exec_flags:
-            raise RuntimeError(
-                "Codex CLI does not support --config, which is required for "
-                "CODEX_REASONING_EFFORT."
-            )
-        command.extend(
-            [
-                "--config",
-                f'model_reasoning_effort="{self.reasoning_effort}"',
-            ]
-        )
-        command.extend(
-            [
-                "--output-schema",
-                schema_path,
-                "--output-last-message",
-                output_path,
-            ]
-        )
-        command.append(prompt_text)
-        return command
 
     def _load_json_output(self, output_path: str) -> dict:
         if not os.path.exists(output_path):
@@ -2136,67 +1967,15 @@ class CodexTranslator(BaseTranslator):
             )
         return [indexed_replacements[index] for index in range(1, expected_count + 1)]
 
-    def _iter_command_modes(self) -> list[str]:
-        if self.preferred_command_mode == "compat" or not self.fast_command_available:
-            return ["compat"]
-        return ["fast", "compat"]
-
     def _execute_codex_request(
         self, prompt_text: str, schema: dict, response_loader, mode_override: str = None
     ):
-        with tempfile.TemporaryDirectory(prefix="pdf2zh-codex-") as workdir:
-            schema_path = os.path.join(workdir, "output.schema.json")
-            output_path = os.path.join(workdir, "output.json")
-            with open(schema_path, "w", encoding="utf-8") as f:
-                json.dump(schema, f)
+        """Execute one structured request using the concrete backend only.
 
-            modes = [mode_override] if mode_override else self._iter_command_modes()
-            last_error = None
-            for mode in modes:
-                command = self._build_command(
-                    prompt_text, schema_path, output_path, mode
-                )
-                try:
-                    result = subprocess.run(
-                        command,
-                        cwd=workdir,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=self.timeout,
-                        check=False,
-                        **codex_subprocess_window_kwargs(),
-                    )
-                except FileNotFoundError as exc:
-                    raise CodexPermanentError(
-                        f"codex executable not found: {self.codex_bin}"
-                    ) from exc
-                except subprocess.TimeoutExpired as exc:
-                    raise CodexTimeoutError(
-                        f"Codex translator timed out after {self.timeout} seconds."
-                    ) from exc
-
-                if result.returncode == 0:
-                    if mode == "compat":
-                        self.preferred_command_mode = "compat"
-                    return response_loader(output_path)
-
-                detail = (
-                    result.stderr.strip() or result.stdout.strip() or "unknown error"
-                )
-                last_error = codex_cli_error(result.returncode, detail)
-                if (
-                    mode == "fast"
-                    and "compat" in modes
-                    and self._looks_like_unsupported_flag(detail)
-                ):
-                    self.preferred_command_mode = "compat"
-                    continue
-                raise last_error
-
-            raise last_error
+        The historical method name is kept for existing Codex integrations. This
+        shared class deliberately has no CLI discovery or execution fallback.
+        """
+        raise NotImplementedError("A scientific translator requires its own transport.")
 
     def _run_single_translation(
         self,
@@ -5016,6 +4795,250 @@ class CodexTranslator(BaseTranslator):
 
     def get_rich_text_right_placeholder(self, id: int):
         return self.get_formular_placeholder(id + 1)
+
+
+class CodexTranslator(ScientificTranslator):
+    name = "codex"
+    envs = {
+        "CODEX_BIN": "codex",
+        "CODEX_PROFILE": None,
+        "CODEX_MODEL": None,
+        "CODEX_REASONING_EFFORT": "none",
+        "CODEX_TIMEOUT": "120",
+    }
+    REQUIRED_EXEC_FLAGS = {
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--sandbox",
+        "--color",
+        "--output-schema",
+        "--output-last-message",
+    }
+    FAST_PATH_FLAGS = {"--ignore-user-config", "--ignore-rules", "--model"}
+    COMPAT_PATH_FLAGS = {"--model", "--profile"}
+    SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+
+    def __init__(
+        self, lang_in, lang_out, model, envs=None, prompt=None, ignore_cache=False
+    ):
+        self.set_envs(envs)
+        if not model:
+            model = self.envs["CODEX_MODEL"]
+        self.reasoning_effort = (
+            str(self.envs.get("CODEX_REASONING_EFFORT") or "none").strip().lower()
+        )
+        if self.reasoning_effort not in self.SUPPORTED_REASONING_EFFORTS:
+            supported = ", ".join(sorted(self.SUPPORTED_REASONING_EFFORTS))
+            raise ValueError(
+                "Unsupported CODEX_REASONING_EFFORT "
+                f"{self.reasoning_effort!r}; expected one of: {supported}."
+            )
+        super().__init__(lang_in, lang_out, model, prompt, ignore_cache)
+        configured_codex_bin = self.envs["CODEX_BIN"] or "codex"
+        self.codex_bin = find_codex_executable(configured_codex_bin)
+        if self.codex_bin is None:
+            raise RuntimeError(
+                f"codex executable not found: {configured_codex_bin}. Checked the "
+                "portable package, CODEX_CLI_PATH, PATH, and the Codex desktop app. "
+                "Set CODEX_BIN to the full path of codex.exe."
+            )
+        self.profile = self.envs["CODEX_PROFILE"]
+        self.timeout = int(self.envs.get("CODEX_TIMEOUT") or "120")
+        self.codex_version = None
+        self.supported_exec_flags: set[str] = set()
+        self.fast_command_available = False
+        self.compat_command_available = False
+        self.preferred_command_mode = "fast"
+        self._probe_cli()
+        self.add_cache_impact_parameters("profile", self.profile)
+        self.add_cache_impact_parameters("reasoning_effort", self.reasoning_effort)
+        self.add_cache_impact_parameters("command_mode", self.preferred_command_mode)
+
+    def _run_probe_command(self, args: list[str]) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                [self.codex_bin, *args],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                **codex_subprocess_window_kwargs(),
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"codex executable not found: {self.codex_bin}") from exc
+
+    def _probe_cli(self):
+        version_result = self._run_probe_command(["--version"])
+        if version_result.returncode != 0:
+            detail = version_result.stderr.strip() or version_result.stdout.strip()
+            raise RuntimeError(f"Codex CLI version probe failed: {detail}")
+        self.codex_version = (
+            version_result.stdout.strip() or version_result.stderr.strip()
+        )
+
+        help_result = self._run_probe_command(["exec", "--help"])
+        if help_result.returncode != 0:
+            detail = help_result.stderr.strip() or help_result.stdout.strip()
+            raise RuntimeError(f"Codex CLI help probe failed: {detail}")
+
+        help_text = "\n".join([help_result.stdout, help_result.stderr])
+        candidate_flags = (
+            self.REQUIRED_EXEC_FLAGS
+            | self.FAST_PATH_FLAGS
+            | self.COMPAT_PATH_FLAGS
+            | {"--config"}
+        )
+        self.supported_exec_flags = {
+            flag for flag in candidate_flags if flag in help_text
+        }
+        if "--config" in self.supported_exec_flags:
+            self.supported_exec_flags.add("-c")
+
+        missing_required = self.REQUIRED_EXEC_FLAGS - self.supported_exec_flags
+        if missing_required:
+            raise RuntimeError(
+                "Codex CLI is missing required exec flags: "
+                + ", ".join(sorted(missing_required))
+            )
+
+        self.compat_command_available = True
+        self.fast_command_available = (
+            self.FAST_PATH_FLAGS.issubset(self.supported_exec_flags)
+            and not self.profile
+        )
+        if self.profile:
+            if "--profile" not in self.supported_exec_flags:
+                raise RuntimeError(
+                    "Codex CLI does not support --profile, but CODEX_PROFILE was set."
+                )
+            self.preferred_command_mode = "compat"
+        elif self.fast_command_available:
+            self.preferred_command_mode = "fast"
+        else:
+            self.preferred_command_mode = "compat"
+
+    @staticmethod
+    def _looks_like_unsupported_flag(detail: str) -> bool:
+        lowered = detail.lower()
+        return any(
+            needle in lowered
+            for needle in [
+                "unexpected argument",
+                "unrecognized option",
+                "unknown option",
+                "found argument",
+            ]
+        )
+
+    def _build_command(
+        self, prompt_text: str, schema_path: str, output_path: str, mode: str
+    ) -> list[str]:
+        command = [
+            self.codex_bin,
+            "exec",
+        ]
+        if mode == "fast":
+            command.extend(["--ignore-user-config", "--ignore-rules"])
+        if mode == "compat" and self.profile:
+            command.extend(["--profile", self.profile])
+        command.extend(
+            [
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--color",
+                "never",
+            ]
+        )
+        if self.model and "--model" in self.supported_exec_flags:
+            command.extend(["--model", self.model])
+        if "--config" not in self.supported_exec_flags:
+            raise RuntimeError(
+                "Codex CLI does not support --config, which is required for "
+                "CODEX_REASONING_EFFORT."
+            )
+        command.extend(
+            [
+                "--config",
+                f'model_reasoning_effort="{self.reasoning_effort}"',
+            ]
+        )
+        command.extend(
+            [
+                "--output-schema",
+                schema_path,
+                "--output-last-message",
+                output_path,
+            ]
+        )
+        command.append(prompt_text)
+        return command
+
+    def _iter_command_modes(self) -> list[str]:
+        if self.preferred_command_mode == "compat" or not self.fast_command_available:
+            return ["compat"]
+        return ["fast", "compat"]
+
+    def _execute_codex_request(
+        self, prompt_text: str, schema: dict, response_loader, mode_override: str = None
+    ):
+        with tempfile.TemporaryDirectory(prefix="pdf2zh-codex-") as workdir:
+            schema_path = os.path.join(workdir, "output.schema.json")
+            output_path = os.path.join(workdir, "output.json")
+            with open(schema_path, "w", encoding="utf-8") as f:
+                json.dump(schema, f)
+
+            modes = [mode_override] if mode_override else self._iter_command_modes()
+            last_error = None
+            for mode in modes:
+                command = self._build_command(
+                    prompt_text, schema_path, output_path, mode
+                )
+                try:
+                    result = subprocess.run(
+                        command,
+                        cwd=workdir,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=self.timeout,
+                        check=False,
+                        **codex_subprocess_window_kwargs(),
+                    )
+                except FileNotFoundError as exc:
+                    raise CodexPermanentError(
+                        f"codex executable not found: {self.codex_bin}"
+                    ) from exc
+                except subprocess.TimeoutExpired as exc:
+                    raise CodexTimeoutError(
+                        f"Codex translator timed out after {self.timeout} seconds."
+                    ) from exc
+
+                if result.returncode == 0:
+                    if mode == "compat":
+                        self.preferred_command_mode = "compat"
+                    return response_loader(output_path)
+
+                detail = (
+                    result.stderr.strip() or result.stdout.strip() or "unknown error"
+                )
+                last_error = codex_cli_error(result.returncode, detail)
+                if (
+                    mode == "fast"
+                    and "compat" in modes
+                    and self._looks_like_unsupported_flag(detail)
+                ):
+                    self.preferred_command_mode = "compat"
+                    continue
+                raise last_error
+
+            raise last_error
 
 
 class QwenMtTranslator(OpenAITranslator):

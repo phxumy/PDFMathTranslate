@@ -18,6 +18,13 @@ from pdf2zh import __version__
 from pdf2zh.high_level import translate
 from pdf2zh.doclayout import ModelInstance
 from pdf2zh.config import ConfigManager
+from pdf2zh.chatgpt import (
+    ChatGPTTranslator,
+    cancel_chatgpt_wait,
+    get_chatgpt_status,
+    login_chatgpt,
+    refresh_chatgpt_options,
+)
 from pdf2zh.translator import (
     AnythingLLMTranslator,
     AzureOpenAITranslator,
@@ -43,6 +50,7 @@ from pdf2zh.translator import (
     DeepseekTranslator,
     OpenAIlikedTranslator,
     QwenMtTranslator,
+    TranslationAbortedError,
 )
 from babeldoc.docvision.doclayout import OnnxModel
 from babeldoc import __version__ as babeldoc_version
@@ -74,6 +82,7 @@ service_map: dict[str, BaseTranslator] = {
     "DeepSeek": DeepseekTranslator,
     "OpenAI-liked": OpenAIlikedTranslator,
     "Codex": CodexTranslator,
+    "ChatGPT 聊天": ChatGPTTranslator,
     "Ali Qwen-Translation": QwenMtTranslator,
 }
 
@@ -183,6 +192,52 @@ def download_with_limit(url: str, save_path: str, size_limit: int) -> str:
     return save_path / filename
 
 
+def _chatgpt_control_updates(result):
+    """Expose only model/effort choices observed in the signed-in browser."""
+    updates = []
+    for options_key, selection_key in (("models", "model"), ("efforts", "effort")):
+        choices = [
+            (option["label"], option["value"])
+            for option in result.get(options_key, [])
+            if option.get("label") and option.get("value")
+        ]
+        available_values = {value for _, value in choices}
+        selected = result.get(selection_key)
+        updates.append(
+            gr.update(
+                choices=choices,
+                value=selected if selected in available_values else None,
+                interactive=bool(choices),
+            )
+        )
+    return (
+        result.get("message") or result.get("status") or "请打开登录窗口。",
+        *updates,
+    )
+
+
+def _chatgpt_action(action, *args):
+    try:
+        result = action(*args)
+    except Exception as exc:
+        logger.warning("ChatGPT browser connection: %s", exc)
+        result = {"ok": False, "message": str(exc)}
+    return _chatgpt_control_updates(result)
+
+
+def open_chatgpt_login():
+    return _chatgpt_action(login_chatgpt)
+
+
+def refresh_chatgpt_controls(model=None, effort=None):
+    return _chatgpt_action(refresh_chatgpt_options, model, effort)
+
+
+def select_chatgpt_model(model):
+    # Effort choices belong to the newly selected model, not the previous one.
+    return refresh_chatgpt_controls(model, None)
+
+
 def stop_translate_file(state: dict) -> None:
     """
     This function stops the translation process.
@@ -198,6 +253,8 @@ def stop_translate_file(state: dict) -> None:
     if session_id in cancellation_event_map:
         logger.info(f"Stopping translation for session {session_id}")
         cancellation_event_map[session_id].set()
+        if state.get("service") == ChatGPTTranslator.name:
+            cancel_chatgpt_wait()
 
 
 def translate_file(
@@ -217,6 +274,8 @@ def translate_file(
     use_babeldoc,
     recaptcha_response,
     state,
+    chatgpt_model=None,
+    chatgpt_effort=None,
     progress=gr.Progress(),
     *envs,
 ):
@@ -247,8 +306,18 @@ def translate_file(
         - The progress bar
         - The progress bar
     """
+    translator = service_map[service]
+    is_chatgpt = translator.name == ChatGPTTranslator.name
+    if is_chatgpt:
+        if use_babeldoc:
+            raise gr.Error("ChatGPT 聊天目前支持标准排版流程，请关闭 Use BabelDOC。")
+        if not chatgpt_model:
+            raise gr.Error(
+                "请先登录 ChatGPT 并刷新模型，选择网页实际提供的模型后再翻译。"
+            )
     session_id = uuid.uuid4()
     state["session_id"] = session_id
+    state["service"] = translator.name
     cancellation_event_map[session_id] = asyncio.Event()
     # Translate PDF content using selected service.
     if flag_demo and not verify_recaptcha(recaptcha_response):
@@ -277,7 +346,6 @@ def translate_file(
     file_mono = output / f"{filename}-mono.pdf"
     file_dual = output / f"{filename}-dual.pdf"
 
-    translator = service_map[service]
     if page_range != "Others":
         selected_page = page_map[page_range]
     else:
@@ -293,7 +361,11 @@ def translate_file(
 
     _envs = {}
     for i, env in enumerate(translator.envs.items()):
-        _envs[env[0]] = envs[i]
+        _envs[env[0]] = envs[i] if i < len(envs) else env[1]
+    if is_chatgpt:
+        _envs["CHATGPT_MODEL"] = chatgpt_model
+        _envs["CHATGPT_EFFORT"] = chatgpt_effort or ""
+        ConfigManager.set_translator_by_name(translator.name, _envs)
     for k, v in _envs.items():
         if str(k).upper().endswith("API_KEY") and str(v) == "***":
             # Load Real API_KEYs from local configure file
@@ -313,6 +385,8 @@ def translate_file(
     try:
         threads = int(threads)
     except ValueError:
+        threads = 1
+    if is_chatgpt:
         threads = 1
 
     param = {
@@ -338,8 +412,11 @@ def translate_file(
             return babeldoc_translate_file(**param)
         translate(**param)
     except CancelledError:
-        del cancellation_event_map[session_id]
         raise gr.Error("Translation cancelled")
+    except TranslationAbortedError as exc:
+        raise gr.Error(str(exc)) from exc
+    finally:
+        cancellation_event_map.pop(session_id, None)
     print(f"Files after translation: {os.listdir(output)}")
 
     if not file_mono.exists() or not file_dual.exists():
@@ -833,6 +910,34 @@ with gr.Blocks(
                         interactive=True,
                     )
                 )
+            with gr.Column(visible=False) as chatgpt_panel:
+                with gr.Row():
+                    chatgpt_login_btn = gr.Button("登录 ChatGPT / 打开登录窗口")
+                    chatgpt_refresh_btn = gr.Button("刷新模型与连接状态")
+                chatgpt_status = gr.Textbox(
+                    label="ChatGPT 连接状态",
+                    value="请打开登录窗口；登录完成后点击刷新模型。",
+                    interactive=False,
+                    lines=2,
+                )
+                chatgpt_model = gr.Dropdown(
+                    label="ChatGPT 模型",
+                    choices=[],
+                    value=None,
+                    interactive=False,
+                    info="从当前账号网页读取可用模型，登录后刷新。",
+                )
+                chatgpt_effort = gr.Dropdown(
+                    label="推理强度",
+                    choices=[],
+                    value=None,
+                    interactive=False,
+                    info="随模型变化；网页未提供此选项时保持空白。",
+                )
+                gr.Markdown(
+                    "独立浏览器保存登录，翻译时请保持运行。登录有效时下次可直接连接。"
+                    "中断后重新连接，并对同一文件点击翻译，可续用已保存译文。"
+                )
             with gr.Row():
                 lang_from = gr.Dropdown(
                     label="Translate from",
@@ -883,6 +988,7 @@ with gr.Blocks(
 
             def on_select_service(service, evt: gr.EventData):
                 translator = service_map[service]
+                is_chatgpt = translator.name == ChatGPTTranslator.name
                 _envs = []
                 for _ in range(MAX_ENV_FIELDS):
                     _envs.append(gr.update(visible=False, value=""))
@@ -891,7 +997,7 @@ with gr.Blocks(
                     value = ConfigManager.get_env_by_translatername(
                         translator, env[0], env[1]
                     )
-                    visible = True
+                    visible = not is_chatgpt
                     if hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
@@ -912,9 +1018,24 @@ with gr.Blocks(
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
                     (
-                        gr.update(value="4", interactive=True)
-                        if translator.name == "codex"
+                        gr.update(value="1", interactive=False)
+                        if is_chatgpt
+                        else (
+                            gr.update(value="4", interactive=True)
+                            if translator.name == "codex"
+                            else gr.update(interactive=True)
+                        )
+                    ),
+                    gr.update(visible=is_chatgpt),
+                    (
+                        gr.update(value=False, interactive=False)
+                        if is_chatgpt
                         else gr.update(interactive=True)
+                    ),
+                    *(
+                        _chatgpt_action(get_chatgpt_status)
+                        if is_chatgpt
+                        else (gr.update(), gr.update(), gr.update())
                     ),
                 ]
 
@@ -955,7 +1076,37 @@ with gr.Blocks(
             service.select(
                 on_select_service,
                 service,
-                [*envs, prompt, threads],
+                [
+                    *envs,
+                    prompt,
+                    threads,
+                    chatgpt_panel,
+                    use_babeldoc,
+                    chatgpt_status,
+                    chatgpt_model,
+                    chatgpt_effort,
+                ],
+            )
+            chatgpt_outputs = [chatgpt_status, chatgpt_model, chatgpt_effort]
+            chatgpt_login_btn.click(
+                open_chatgpt_login,
+                inputs=[],
+                outputs=chatgpt_outputs,
+            )
+            chatgpt_refresh_btn.click(
+                refresh_chatgpt_controls,
+                inputs=[chatgpt_model, chatgpt_effort],
+                outputs=chatgpt_outputs,
+            )
+            chatgpt_model.input(
+                select_chatgpt_model,
+                inputs=[chatgpt_model],
+                outputs=chatgpt_outputs,
+            )
+            chatgpt_effort.input(
+                refresh_chatgpt_controls,
+                inputs=[chatgpt_model, chatgpt_effort],
+                outputs=chatgpt_outputs,
             )
             vfont.change(on_vfont_change, inputs=vfont, outputs=None)
             file_type.select(
@@ -1030,6 +1181,8 @@ with gr.Blocks(
             use_babeldoc,
             recaptcha_response,
             state,
+            chatgpt_model,
+            chatgpt_effort,
             *envs,
         ],
         outputs=[
@@ -1045,6 +1198,7 @@ with gr.Blocks(
     cancellation_btn.click(
         stop_translate_file,
         inputs=[state],
+        queue=False,
     )
 
 
