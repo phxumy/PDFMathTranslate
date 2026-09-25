@@ -131,6 +131,56 @@ test('failed capture resumes only the same verified user turn without resubmissi
   const recovered = await bridge.run({ ...req, op: 'recover' });
   assert.equal(recovered.answer, 'recovered'); assert.equal(f.calls.submit, 1);
 }));
+test('recovery waits for the saved message and later Chat controls before reading an answer', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0; let clock = 0; let recovering = false; let modeChecks = 0;
+  let savedTurn;
+  f.deps.waitAnswer = async () => {
+    captures++;
+    if (captures === 1) throw new Error('fixture interrupted capture');
+    assert.ok(modeChecks >= 2, 'answer cannot be read before delayed Chat controls hydrate');
+    return { text: 'loaded original answer' };
+  };
+  f.deps.ui.ensureChat = async () => {
+    if (recovering && ++modeChecks < 2) throw Object.assign(new Error('sidebar is still loading'), { code: 'CHAT_MODE_UNVERIFIED' });
+  };
+  f.deps.recoveryNow = () => clock;
+  f.deps.recoveryPause = async ms => {
+    clock += ms;
+    assert.equal(captures, 1, 'waiting for hydration must not read assistant content');
+    if (clock === 500) Object.assign(f.tabs.get('owned-3'), savedTurn);
+  };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); await bridge.run(req);
+  savedTurn = { ...f.tabs.get('owned-2') }; f.tabs.delete('owned-2'); recovering = true;
+  const recovered = await bridge.run({ ...req, op: 'recover' });
+  assert.equal(recovered.answer, 'loaded original answer');
+  assert.equal(clock, 750); assert.equal(f.calls.submit, 1); assert.equal(captures, 2);
+  assert.equal(f.calls.navigate.at(-1), savedTurn.url);
+}));
+test('recovery hydration timeout is bounded and never resubmits or reads another answer', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0; let clock = 0; let pauses = 0;
+  f.deps.waitAnswer = async () => { captures++; throw new Error('interrupted capture'); };
+  f.deps.recoveryNow = () => clock;
+  f.deps.recoveryPause = async ms => { clock += ms; pauses++; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); await bridge.run(req); f.tabs.delete('owned-2');
+  const recovered = await bridge.run({ ...req, op: 'recover' });
+  assert.equal(recovered.error_code, 'RECOVERY_NOT_READY'); assert.equal(recovered.not_submitted, false);
+  assert.equal(clock, 1000); assert.equal(pauses, 4);
+  assert.equal(f.calls.submit, 1); assert.equal(captures, 1);
+}));
+test('recovery rejects a different conversation before reading its answer or changing saved URL', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0;
+  f.deps.waitAnswer = async () => { captures++; throw new Error('interrupted capture'); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); await bridge.run(req);
+  f.tabs.get('owned-2').url = 'https://chatgpt.com/c/different-conversation';
+  const recovered = await bridge.run({ ...req, op: 'recover' });
+  assert.equal(recovered.error_code, 'RECOVERY_IDENTITY_UNVERIFIED'); assert.equal(recovered.not_submitted, false);
+  assert.equal(captures, 1); assert.equal(f.calls.submit, 1);
+  const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(journal.conversation_url, 'https://chatgpt.com/c/our-request');
+}));
 test('changed page identity is rejected and never accepted as the old answer', async () => temporary(async directory => {
   const f = fixture(); f.deps.waitAnswer = async () => { throw new Error('wait failed'); };
   const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });

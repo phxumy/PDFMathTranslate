@@ -10,12 +10,12 @@ export { coded };
 const MENU = '[role="menu"],[role="listbox"],[data-testid="composer-intelligence-picker-content"]';
 const KEY_CODES = { Escape: 27, ArrowLeft: 37, ArrowRight: 39, ArrowUp: 38, ArrowDown: 40, Enter: 13, Home: 36, End: 35 };
 
-export function createNativePage(client, { timeoutMs = 9000, pollMs = 150 } = {}) {
+export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 30000, pollMs = 150 } = {}) {
   if (!client?.Runtime?.evaluate || !client?.Input?.dispatchMouseEvent || !client?.Input?.dispatchKeyEvent) {
     throw coded('CDP_UNAVAILABLE', '原生浏览器连接没有提供当前标签页的操作接口。');
   }
   const page = {
-    client, timeoutMs, pollMs,
+    client, timeoutMs, modeTimeoutMs, pollMs,
     async evaluate(fn, arg) {
       const expression = `(${fn.toString()})(${arg === undefined ? '' : JSON.stringify(arg)})`;
       const result = await client.Runtime.evaluate({ expression, awaitPromise: true, returnByValue: true });
@@ -27,7 +27,7 @@ export function createNativePage(client, { timeoutMs = 9000, pollMs = 150 } = {}
       const point = await page.evaluate(selector => {
         const node = [...document.querySelectorAll(selector)].find(n => {
           const rect = n.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0 && getComputedStyle(n).visibility !== 'hidden';
+          return rect.width > 0 && rect.height > 0 && getComputedStyle(n).visibility !== 'hidden' && !n.closest('[inert],[data-active="false"]');
         });
         if (!node || node.disabled || node.getAttribute('aria-disabled') === 'true') return null;
         node.scrollIntoView({ block: 'center', inline: 'nearest' });
@@ -87,7 +87,7 @@ export async function inspectPage(page) {
     const outsideMessages = n => !n.closest('article,[data-message-author-role]');
     const modeControls = [...document.querySelectorAll('button[role="radio"],[role="tab"],button[data-testid*="mode"]')].filter(n => visible(n) && outsideMessages(n));
     const selected = n => n && (n.getAttribute('aria-checked') === 'true' || n.getAttribute('aria-selected') === 'true' || ['on','active','checked'].includes(n.getAttribute('data-state')));
-    const chatControl = modeControls.find(n => /^(Chat|聊天|聊天模式|チャット)$/i.test(norm(n.textContent)));
+    const chatControl = modeControls.find(n => /^(Chat|聊天|聊天模式|对话|對話|チャット)$/i.test(norm(n.textContent)));
     const workControl = modeControls.find(n => /^(Work|工作|工作模式|ワーク)$/i.test(norm(n.textContent)));
     const profileControl = [...document.querySelectorAll('[data-testid*="profile"],button[aria-label]')]
       .some(n => visible(n) && outsideMessages(n) && (/profile/i.test(n.getAttribute('data-testid') || '') || /^(Open profile menu|打开个人资料菜单|プロフィールメニューを開く)$/i.test(n.getAttribute('aria-label') || '')));
@@ -129,15 +129,74 @@ export async function prepareLoginPage(page) {
   return connectionStatus(evidence);
 }
 
+// Compatibility diagnostics deliberately describe chrome, never conversation
+// text, input values, account details, URLs, cookies or arbitrary DOM attributes.
+export async function inspectCompatibility(page, knownEvidence) {
+  const source = knownEvidence || await inspectPage(page);
+  const evidence = Object.fromEntries([
+    'home', 'composer', 'login', 'challenge', 'authError', 'legacyPicker',
+    'workPath', 'workMarker', 'chatSelected', 'workSelected', 'hasModeControls',
+    'profileControl', 'historyPresent', 'historyWork', 'historyChat', 'conversation',
+  ].map(key => [key, !!source[key]]));
+  const structure = await page.evaluate(() => {
+    const visible = n => !!n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden';
+    const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const excluded = 'article,aside,nav,[role="navigation"],[data-message-author-role],[data-message-id],[data-testid*="conversation-turn"],input,textarea,select,[contenteditable="true"],[data-testid*="sidebar" i],[id*="sidebar" i],[class*="sidebar" i],[data-testid*="profile" i],[id*="profile" i],[class*="profile" i],[data-testid*="account" i],[id*="account" i],[class*="account" i]';
+    const privateLabel = /profile|account|personal|个人资料|账户|账号|プロフィール|アカウント/i;
+    const safeNode = n => {
+      if (n.closest(excluded)) return false;
+      for (let parent = n; parent && parent !== document.body; parent = parent.parentElement) {
+        if (privateLabel.test(parent.getAttribute('aria-label') || '')) return false;
+      }
+      return true;
+    };
+    const short = (value, limit = 160) => norm(value).slice(0, limit);
+    const attrs = (node, names) => Object.fromEntries(names.map(name => [name, short(node.getAttribute(name))]));
+    const composer = [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"]')].find(visible);
+    const composerAncestors = [];
+    for (let node = composer?.parentElement; node && node !== document.body && composerAncestors.length < 12; node = node.parentElement) {
+      if (!safeNode(node)) continue;
+      composerAncestors.push({ tag: node.tagName.toLowerCase(), ...attrs(node, ['id', 'class', 'data-testid', 'data-mode', 'data-type']) });
+    }
+    const modeControls = [...document.querySelectorAll('main button,header button,form button,main [role="button"],header [role="button"],form [role="button"],main [role="radio"],header [role="radio"],form [role="radio"],main [role="tab"],header [role="tab"],form [role="tab"]')]
+      .filter(node => visible(node) && safeNode(node) && !privateLabel.test(node.textContent || '') && !node.querySelector(excluded))
+      .filter(node => {
+        if (node.closest('form') && (node.tagName === 'BUTTON' || node.getAttribute('role') === 'button')) return true;
+        if (['radio', 'tab'].includes(node.getAttribute('role')) && node.closest('main,header')) return true;
+        const metadata = ['data-testid', 'class', 'data-mode', 'data-type'].map(name => node.getAttribute(name) || '').join(' ');
+        const label = norm(node.getAttribute('aria-label') || node.textContent);
+        return /mode|model|composer.*pill|intelligence|reasoning|thinking/i.test(metadata) || /^(?:Chat(?:GPT)?|Work|Chat mode|Work mode|Mode|Model|Models|聊天|聊天模式|工作|工作模式|模式|模型|选择模型|智能强度|推理强度|即时|チャット|ワーク|モード|モデル)(?:\s*[⌄▾▼])?$/i.test(label);
+      })
+      .slice(0, 32)
+      .map(node => {
+        const rect = node.getBoundingClientRect();
+        return { tag: node.tagName.toLowerCase(), ...attrs(node, ['role', 'data-testid', 'class', 'aria-label', 'aria-selected', 'aria-checked', 'data-state', 'aria-haspopup', 'aria-disabled']), label: short(node.textContent, 80), rect: { width: Math.round(rect.width), height: Math.round(rect.height) } };
+      });
+    return { composerAncestors, modeControls };
+  });
+  return { evidence, ...structure };
+}
+
 export async function ensureChat(page) {
-  const evidence = await inspectPage(page);
-  const state = connectionStatus(evidence);
-  if (state.error_code) throw Object.assign(coded(state.error_code, state.message), { status: state.status });
-  if (!evidence.composer || evidence.login) throw coded('LOGIN_REQUIRED', '请先在浏览器完成 ChatGPT 登录，再刷新模型。');
-  if (!['chat', 'legacy-chat'].includes(modeFromEvidence(evidence))) {
-    throw coded('CHAT_MODE_UNVERIFIED', '无法确认普通 Chat 模式，已停止发送。请在已授权浏览器打开普通 Chat 后刷新。');
+  const deadline = Date.now() + (page.modeTimeoutMs ?? page.timeoutMs);
+  let evidence;
+  for (;;) {
+    evidence = await inspectPage(page);
+    const state = connectionStatus(evidence);
+    if (state.error_code) throw Object.assign(coded(state.error_code, state.message), { status: state.status });
+    const mode = modeFromEvidence(evidence);
+    // The composer can hydrate before the mode switch. Waiting only observes
+    // DOM state: never click a mode or send anything while the mode is unknown.
+    if (mode === 'work') break;
+    if (!evidence.composer || evidence.login || evidence.authPage) throw coded('LOGIN_REQUIRED', '请先在浏览器完成 ChatGPT 登录，再刷新模型。');
+    if (['chat', 'legacy-chat'].includes(mode)) return evidence;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await page.waitForTimeout(Math.min(page.pollMs, remaining));
   }
-  return evidence;
+  const error = coded('CHAT_MODE_UNVERIFIED', '无法确认普通 Chat 模式，已停止发送。请在已授权浏览器打开普通 Chat 后刷新。');
+  try { error.diagnostic = await inspectCompatibility(page, evidence); } catch { /* Preserve the closed gate if diagnostic inspection fails. */ }
+  throw error;
 }
 
 async function closeMenus(page) {
@@ -147,7 +206,7 @@ async function closeMenus(page) {
 
 async function menuSnapshot(page) {
   return page.evaluate(menuSelector => {
-    const visible = n => n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden';
+    const visible = n => n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden' && !n.closest('[inert],[data-active="false"]');
     const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
     document.querySelectorAll('[data-pdf2zh-native-option]').forEach(n => n.removeAttribute('data-pdf2zh-native-option'));
     const menus = [...document.querySelectorAll(menuSelector)].filter(n => visible(n) && !n.closest('article,[data-message-author-role]'));
@@ -155,7 +214,7 @@ async function menuSnapshot(page) {
     return nodes.map((n, index) => {
       const id = `native-${index}`;
       n.setAttribute('data-pdf2zh-native-option', id);
-      const primary = n.querySelector('[data-testid*="label"],.font-medium');
+      const primary = n.querySelector('.truncate') || n.querySelector('[data-testid*="label"],.font-medium');
       return { id, label: norm(primary?.textContent || n.getAttribute('aria-label') || n.innerText), role: n.getAttribute('role'),
         selected: n.getAttribute('aria-checked') === 'true' || n.getAttribute('aria-selected') === 'true' || ['checked','on'].includes(n.getAttribute('data-state')),
         disabled: n.hasAttribute('disabled') || n.getAttribute('aria-disabled') === 'true' || !!n.closest('[aria-disabled="true"]'),
@@ -236,47 +295,109 @@ async function openSection(page, kind) {
 
 async function readSliderState(page) {
   return page.evaluate(() => {
-    const visible = n => n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden';
-    const roots = [...document.querySelectorAll('[data-model-reasoning-effort-slider]')].filter(n => visible(n) && n.closest('[role="menu"],[data-testid="composer-intelligence-picker-content"]') && !n.closest('[data-active="false"]'));
+    const visible = n => n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden' && !n.closest('[inert],[data-active="false"]');
+    const roots = [...document.querySelectorAll('[data-model-reasoning-effort-slider]')].filter(n => visible(n) && n.closest('[role="menu"],[data-testid="composer-intelligence-picker-content"]'));
     if (roots.length !== 1) return null;
     const root = roots[0];
     const control = root.closest('[role="menuitem"]');
     const thumb = root.querySelector('[role="slider"]');
     if (!control || !thumb || !visible(control)) return null;
     control.setAttribute('data-pdf2zh-native-slider', 'owner');
-    const descriptions = [...new Set([control, thumb].flatMap(n => (n.getAttribute('aria-describedby') || '').split(/\s+/)).filter(Boolean))]
-      .map(id => document.getElementById(id)?.textContent?.trim()).filter(Boolean);
+    const descriptionIds = [...new Set([control, thumb].flatMap(n => (n.getAttribute('aria-describedby') || '').split(/\s+/)).filter(Boolean))];
+    const descriptions = descriptionIds.map(id => document.getElementById(id)?.textContent?.trim()).filter(Boolean);
     const label = (thumb.getAttribute('aria-valuetext') || descriptions[0] || '').split(/[,;，；。\n]/)[0].trim();
+    const announcement = descriptions.join(' ');
+    const ordinal = announcement.match(/第\s*(\d+)\s*[项項]/) || announcement.match(/(?:选项|選項|\bitem\b|\boption\b)\s*(\d+)/i) || announcement.match(/(?:^|[,，]\s*)(\d+)\s+of\s+\d+/i);
+    const total = announcement.match(/共\s*(\d+)\s*[项項]/) || announcement.match(/\bof\s+(\d+)/i);
     const number = name => { const raw = thumb.getAttribute(name); return raw === null || raw.trim() === '' ? NaN : Number(raw); };
-    return { label, value: number('aria-valuenow'), min: number('aria-valuemin'), max: number('aria-valuemax'), disabled: control.getAttribute('aria-disabled') === 'true' || thumb.getAttribute('aria-disabled') === 'true' };
+    const ticks = [...root.querySelectorAll('[data-locked][data-selected]')].map(n => n.getAttribute('data-locked'));
+    return { label, hasLabelSource: thumb.hasAttribute('aria-valuetext') || descriptionIds.length > 0,
+      announcementPosition: ordinal ? Number(ordinal[1]) : null, announcementTotal: total ? Number(total[1]) : null,
+      value: number('aria-valuenow'), min: number('aria-valuemin'), max: number('aria-valuemax'), ticks,
+      hasLocked: root.matches('[data-locked="true"]') || !!root.querySelector('[data-locked="true"]'),
+      disabled: control.getAttribute('aria-disabled') === 'true' || thumb.getAttribute('aria-disabled') === 'true' || !!root.querySelector('[aria-disabled="true"]') };
   });
+}
+
+async function revealSimpleSlider(page) {
+  const rememberedAdvanced = await page.evaluate(() => {
+    const active = node => !!node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0 && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert],[data-active="false"]');
+    return [...document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')].some(menu => {
+      if (!active(menu)) return false;
+      const simple = menu.querySelector('[data-testid="composer-model-picker-slider-simple-view"]');
+      const advanced = menu.querySelector('[data-testid="composer-model-picker-slider-advanced-view"]');
+      return simple && !active(simple) && active(advanced);
+    });
+  });
+  if (!rememberedAdvanced) return;
+  const rows = await menuSnapshot(page);
+  const toggle = rows.find(row => row.role === 'menuitem' && row.expanded === 'true' && !row.disabled && containsWord(row.label, WORDS.model) && !containsWord(row.label, WORDS.effort));
+  if (!toggle) throw coded('PICKER_UNAVAILABLE', '网页模型菜单停留在高级视图，未找到返回推理强度滑块的控件。');
+  await clickRow(page, toggle);
+  await poll(page, () => readSliderState(page), 'PICKER_UNAVAILABLE', '网页未返回推理强度滑块，请刷新模型。');
 }
 
 export async function readSlider(page, requested) {
   let current = await readSliderState(page);
   if (!current) return null;
-  if (!current.label || ![current.min, current.max, current.value].every(Number.isInteger) || current.min < 0 || current.max - current.min > 12 || current.value < current.min || current.value > current.max) {
+  if (!current.hasLabelSource || ![current.min, current.max, current.value].every(Number.isInteger) || current.min < 0 || current.max - current.min > 12 || current.value < current.min || current.value > current.max) {
     throw coded('PICKER_UNAVAILABLE', '网页推理强度滑块没有明确的范围或文字标签，已暂停。');
   }
   const original = current.value;
   const range = { min: current.min, max: current.max };
-  const move = async target => {
+  if ((current.ticks.length && (current.ticks.length !== range.max - range.min + 1 || current.ticks.some(value => !['true', 'false'].includes(value)))) || (current.hasLocked && !current.ticks.length)) {
+    throw coded('PICKER_UNAVAILABLE', '网页推理强度锁定状态不明确，已暂停。');
+  }
+  const available = Array.from({ length: range.max - range.min + 1 }, (_, index) => index + range.min).filter(position => current.ticks[position - range.min] !== 'true');
+  if (!available.includes(original) || available.some((position, index) => index > 0 && position !== available[index - 1] + 1)) {
+    throw coded('OPTION_UNAVAILABLE', '当前推理强度不可用，或可用档位被锁定档位隔开。请在网页选择可用档位后刷新。');
+  }
+  const originalLocks = JSON.stringify(current.ticks);
+  let restoreSafe = true;
+  const synchronized = async (target, previousLabel, requireLabel = true) => {
+    let signature = '';
+    let stableSince = 0;
+    return poll(page, async () => {
+      const next = await readSliderState(page);
+      if (!next || next.min !== range.min || next.max !== range.max || JSON.stringify(next.ticks) !== originalLocks) {
+        restoreSafe = false;
+        throw coded('PICKER_UNAVAILABLE', '网页推理强度范围或锁定状态发生变化，请刷新模型。');
+      }
+      if (!available.includes(next.value)) {
+        restoreSafe = false;
+        throw coded('OPTION_UNAVAILABLE', '网页切换到了不可用推理强度，已停止操作。');
+      }
+      // Keep the newest position even while labels lag, so failure recovery
+      // never sends keys from an obsolete position.
+      current = next;
+      if (next.value !== target) { signature = ''; return null; }
+      if (!requireLabel) return next;
+      const ordinalMatches = next.announcementPosition === null || next.announcementPosition === next.value - range.min + 1;
+      const totalMatches = next.announcementTotal === null || next.announcementTotal === range.max - range.min + 1;
+      if (!next.label || next.label === previousLabel || !ordinalMatches || !totalMatches) { signature = ''; return null; }
+      const candidate = JSON.stringify([next.value, next.label, next.announcementPosition, next.announcementTotal]);
+      if (candidate !== signature) { signature = candidate; stableSince = Date.now(); return null; }
+      return Date.now() - stableSince >= 150 ? next : null;
+    }, 'SELECTION_UNVERIFIED', '网页推理强度的位置与文字标签尚未同步，请稍后刷新。');
+  };
+  const move = async (target, requireLabel = true) => {
+    if (!available.includes(target)) throw coded('OPTION_UNAVAILABLE', '当前账号没有提供该推理强度。');
     for (let step = 0; current.value !== target && step < 15; step++) {
       if (current.disabled) throw coded('OPTION_UNAVAILABLE', '当前账号的推理强度滑块不可用。');
-      const previous = current.value;
-      await page.press(target > current.value ? 'ArrowRight' : 'ArrowLeft', '[data-pdf2zh-native-slider="owner"]');
-      current = await poll(page, async () => {
-        const next = await readSliderState(page);
-        if (!next || next.min !== range.min || next.max !== range.max) throw coded('PICKER_UNAVAILABLE', '网页推理强度范围发生变化，请刷新模型。');
-        return next.value !== previous ? next : null;
-      }, 'SELECTION_UNVERIFIED', '无法确认网页推理强度已改变。');
+      const direction = target > current.value ? 1 : -1;
+      const nextPosition = current.value + direction;
+      const previousLabel = current.label;
+      await page.press(direction > 0 ? 'ArrowRight' : 'ArrowLeft', '[data-pdf2zh-native-slider="owner"]');
+      await synchronized(nextPosition, previousLabel, requireLabel);
     }
     if (current.value !== target) throw coded('SELECTION_UNVERIFIED', '网页没有确认目标推理强度。');
   };
   let destination = original;
   const choices = [];
+  let failure;
   try {
-    for (let position = current.min; position <= current.max; position++) {
+    await synchronized(original);
+    for (const position of available) {
       await move(position);
       if (!current.label) throw coded('PICKER_UNAVAILABLE', '网页没有提供推理强度文字标签。');
       choices.push({ value: current.label, label: current.label, position });
@@ -287,7 +408,15 @@ export async function readSlider(page, requested) {
       if (!selected) throw coded('OPTION_UNAVAILABLE', `当前账号没有提供推理强度：${requested}。`);
       destination = selected.position;
     }
-  } finally { await move(destination); }
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    if (restoreSafe) {
+      try { await move(destination, !failure); }
+      catch (error) { if (!failure) throw error; }
+    }
+  }
   return { options: choices.map(({ value, label }) => ({ value, label })), selected: current.label };
 }
 
@@ -295,6 +424,7 @@ export async function readChoices(page, kind, requested) {
   try {
     if (kind === 'effort') {
       await openPicker(page);
+      await revealSimpleSlider(page);
       const slider = await readSlider(page, requested);
       if (slider) return slider;
     }
@@ -314,12 +444,19 @@ export async function readChoices(page, kind, requested) {
 }
 
 export async function catalog(page, model, effort) {
-  const evidence = await ensureChat(page);
-  const models = await readChoices(page, 'model', model);
-  if (!models.options.length || !models.selected) throw coded('PICKER_UNAVAILABLE', '网页未明确列出可用模型及当前选择，请稍后刷新。');
-  const efforts = await readChoices(page, 'effort', effort);
-  const verified = await readChoices(page, 'model');
-  if (!verified.selected || verified.selected !== models.selected || (efforts.options.length && !efforts.selected)) throw coded('SELECTION_UNVERIFIED', '读取推理强度后模型发生变化或选择不明确，已停止发送。请刷新模型列表。');
-  await ensureChat(page);
-  return { models: verified.options, efforts: efforts.options, model: verified.selected, effort: efforts.selected, mode: modeFromEvidence(evidence) };
+  try {
+    const evidence = await ensureChat(page);
+    const models = await readChoices(page, 'model', model);
+    if (!models.options.length || !models.selected) throw coded('PICKER_UNAVAILABLE', '网页未明确列出可用模型及当前选择，请稍后刷新。');
+    const efforts = await readChoices(page, 'effort', effort);
+    const verified = await readChoices(page, 'model');
+    if (!verified.selected || verified.selected !== models.selected || (efforts.options.length && !efforts.selected)) throw coded('SELECTION_UNVERIFIED', '读取推理强度后模型发生变化或选择不明确，已停止发送。请刷新模型列表。');
+    await ensureChat(page);
+    return { models: verified.options, efforts: efforts.options, model: verified.selected, effort: efforts.selected, mode: modeFromEvidence(evidence) };
+  } catch (error) {
+    if (/^(PICKER|SELECTION|CONTROL)_/.test(error.code || '')) {
+      try { error.diagnostic = await inspectCompatibility(page); } catch { /* Preserve the original error if inspection fails. */ }
+    }
+    throw error;
+  }
 }

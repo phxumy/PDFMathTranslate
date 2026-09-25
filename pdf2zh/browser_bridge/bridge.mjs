@@ -85,6 +85,7 @@ export function createBridge(overrides = {}) {
   const deps = { discover: browserEndpoint, attach: connectToRemoteChromeTarget, scopedAttach: connectOwnedPage, ui: nativeUI,
     submit: submitPrompt, waitAnswer: waitForAssistantResponse, promptReady: ensurePromptReady,
     readUserIds: readUserMessageIds, readFingerprint: readSubmittedPromptFingerprint, userTurn,
+    recoveryNow: Date.now, recoveryPause: pause,
     ...overrides };
   const connections = new Map();
   const pending = new Map();
@@ -237,6 +238,47 @@ export function createBridge(overrides = {}) {
     }
     return persistAnswer(request, journal, answer.text);
   }
+  async function waitForRecoveryIdentity(request, journal, page, runtime) {
+    const deadline = deps.recoveryNow() + Math.min(30000, Math.max(1, request.timeout_seconds || 900) * 1000);
+    let lastModeError;
+    let sawUserTurn = false;
+    do {
+      let turn;
+      try { turn = await deps.userTurn(runtime); }
+      catch (error) {
+        // A navigation can briefly destroy the old execution context. Other
+        // transport failures must escape immediately, never reconnect or resend.
+        if (!/Cannot find (?:default )?(?:execution )?context|Execution context (?:was destroyed|is not available)/i.test(error.message || '')) throw error;
+      }
+      if (turn) {
+        if (journal.conversation_url && conversationURL(turn.url) && turn.url !== journal.conversation_url) {
+          throw coded('RECOVERY_IDENTITY_UNVERIFIED', '恢复页面跳转到了其他会话，已暂停；不会读取该会话的回答。');
+        }
+        const matchingUrl = !journal.conversation_url || turn.url === journal.conversation_url;
+        sawUserTurn ||= Boolean(turn.messageId);
+        const matchingTurn = matchingUrl && turn.messageId && typeof turn.text === 'string' &&
+          browserPromptFingerprint(turn.text, turn.messageId) === journal.submitted_prompt_hash &&
+          (!journal.prompt_normalized_hash || (turn.count === 1 && hash(normalizedPrompt(turn.text)) === journal.prompt_normalized_hash));
+        if (matchingTurn) {
+          try {
+            // Sidebar/mode controls may hydrate after the message and composer.
+            // Only a still-unverified mode is retried; auth/challenge errors stop.
+            await deps.ui.ensureChat(page);
+            return;
+          } catch (error) {
+            if (error.code !== 'CHAT_MODE_UNVERIFIED') throw error;
+            lastModeError = error;
+          }
+        }
+      }
+      const remaining = deadline - deps.recoveryNow();
+      if (remaining <= 0) break;
+      await deps.recoveryPause(Math.min(250, remaining));
+    } while (deps.recoveryNow() <= deadline);
+    if (lastModeError) throw lastModeError;
+    if (sawUserTurn) throw coded('RECOVERY_IDENTITY_UNVERIFIED', '已等待原会话加载，但仍无法确认最后一条请求属于本批次；本批不会重发。');
+    throw coded('RECOVERY_NOT_READY', '原会话的已提交消息尚未加载完成，请稍后恢复同一文件；本批不会重发。');
+  }
   async function recover(request) {
     const journal = await readJournal(request.request_dir);
     if (!journal?.dispatch_started) throw coded('NOT_SUBMITTED', '上次请求尚未提交，可以继续。', { not_submitted: true });
@@ -257,7 +299,7 @@ export function createBridge(overrides = {}) {
     const save = () => writeJson(path.join(request.request_dir, 'journal.json'), journal);
     return withConnection(connection, async page => {
       await deps.promptReady(connection.client.Runtime, 30000, quiet);
-      await deps.ui.ensureChat(page);
+      await waitForRecoveryIdentity(request, journal, page, connection.client.Runtime);
       return capture(request, journal, connection, save);
     });
   }
@@ -360,6 +402,7 @@ export function createBridge(overrides = {}) {
       let unreadable = false;
       const journal = request?.request_dir ? await readJournal(request.request_dir).catch(() => { unreadable = true; return null; }) : null;
       return { ok: false, status: error.status || 'paused', error_code: error.code || 'BROWSER_ERROR', message: error.message,
+        ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}),
         ...(journal ? identity(journal) : {}),
         not_submitted: !unreadable && (error.not_submitted === true || (['translate', 'recover'].includes(request?.op) && !journal?.dispatch_started)) };
     }
