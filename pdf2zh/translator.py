@@ -3356,8 +3356,8 @@ class CodexTranslator(BaseTranslator):
 
         The deterministic path is intentionally narrower than the structured
         model fallback.  It requires a numbered entry, a complete author block,
-        and either protected venue metadata after terminal punctuation or a bare
-        terminal publication year.  Multi-sentence or unusual citations remain
+        and either protected venue metadata after terminal punctuation or complete
+        visible publication fields.  Multi-sentence or unusual citations remain
         on the existing discovery path.
         """
 
@@ -3403,6 +3403,12 @@ class CodexTranslator(BaseTranslator):
         )
         if bare_year is not None:
             boundaries.append(bare_year.start("punct"))
+        for punctuation in re.finditer(r"[.!?,]\s+", tail):
+            metadata_tail = tail[punctuation.end() :].strip()
+            if cls._reference_metadata_tail_is_safe(
+                metadata_tail, require_complete=True
+            ):
+                boundaries.append(punctuation.start())
         # Author/year citations need no punctuation between the title and a
         # protected thesis/venue marker.  Do not consume the metadata itself.
         if re.search(r"\d[a-z]?$", entry[:author_end]):
@@ -3930,6 +3936,19 @@ class CodexTranslator(BaseTranslator):
         )
         return cls.REFERENCE_CACHE_PREFIX + payload
 
+    @staticmethod
+    def _reference_formula_context(cache_context: str) -> dict[str, str]:
+        """Read the converter's existing per-entry font-run cache signature."""
+        return {
+            match.group("marker"): match.group("text")
+            for match in re.finditer(
+                r"(?:^|\|)(?P<marker>\{v\d+\})=(?P<text>.*?)" r"(?=\|\{v\d+\}=|$)",
+                cache_context,
+                re.DOTALL,
+            )
+            if match.group("text") != "<missing>"
+        }
+
     @classmethod
     def _reference_continuation_cache_key(
         cls,
@@ -4183,7 +4202,24 @@ class CodexTranslator(BaseTranslator):
         words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*", compact)
         if not words or len(words) > 14:
             return False
-        connectors = {"a", "an", "and", "for", "in", "of", "on", "the", "to"}
+        connectors = {
+            "a",
+            "an",
+            "and",
+            "for",
+            "in",
+            "of",
+            "on",
+            "the",
+            "to",
+            "de",
+            "del",
+            "der",
+            "des",
+            "du",
+            "und",
+            "et",
+        }
         lowercase_brands = {"elife", "iscience", "npj"}
         venue_signals = {
             "ann",
@@ -4234,9 +4270,17 @@ class CodexTranslator(BaseTranslator):
             for folded in (word.casefold(),)
             for signal in venue_signals
         )
+        # Non-English container names use the same proper-name grammar.  A
+        # connector between two capitalized words is useful structural evidence
+        # without enumerating translated journal names.
+        has_foreign_connector = any(
+            word.casefold() in {"de", "del", "der", "des", "du", "und", "et"}
+            for word in words[1:-1]
+        )
         if not (
             "." in compact
             or has_venue_signal
+            or has_foreign_connector
             or any(word.casefold() in lowercase_brands for word in words)
         ):
             return False
@@ -4413,9 +4457,20 @@ class CodexTranslator(BaseTranslator):
         )
 
     @classmethod
-    def _reference_metadata_tail_is_safe(cls, remaining: str) -> bool:
+    def _reference_metadata_tail_is_safe(
+        cls,
+        remaining: str,
+        *,
+        formula_context: dict[str, str] | None = None,
+        require_complete: bool = False,
+    ) -> bool:
         """Return whether text after a selected title begins bibliography metadata."""
 
+        if (
+            require_complete
+            and re.search(r"\b(?:19|20)\d{2}[a-z]?\s*\)?\.?\s*$", remaining) is None
+        ):
+            return False
         if re.match(
             r"^(?:\d|doi\b|arxiv\b|isbn\b|issn\b|https?://|www\.)",
             remaining,
@@ -4423,13 +4478,19 @@ class CodexTranslator(BaseTranslator):
         ):
             return True
         if re.match(
+            r"^(?:vol(?:ume)?\.?|number|no\.)\s+\d+\s*[.,;]",
+            remaining,
+            re.IGNORECASE,
+        ):
+            return True
+        if not require_complete and re.match(
             r"^(?:preprint\s+at\b|(?:ph\.?\s*d\.?|doctoral|master(?:'s)?)\s+"
             r"thesis\b|dissertation\b|zenodo\b|proceedings\s+of\b|in\s+\S)",
             remaining,
             re.IGNORECASE,
         ):
             return True
-        if re.match(
+        if not require_complete and re.match(
             r"^(?:Nature\b|Science\b|Cell\b|Physical\s+Review\b|"
             r"Phys\.?\s+Rev\.?\b|IEEE\b|ACM\b|"
             r"npj\s+[A-Za-z]|(?:New\s+)?Journal\s+of\b|"
@@ -4447,8 +4508,62 @@ class CodexTranslator(BaseTranslator):
             r"\{\{?v\d+\}?\}",
             remaining,
         )
-        if protected_venue is not None and cls._reference_venue_name_is_plausible(
-            protected_venue.group("venue")
+        if (
+            not require_complete
+            and protected_venue is not None
+            and cls._reference_venue_name_is_plausible(protected_venue.group("venue"))
+        ):
+            return True
+
+        # Read-only font-run context can confirm a volume/page/year suffix even
+        # when the venue is split in the middle of a word.  A scientific-sounding
+        # phrase such as "Physics of {v1}" is not sufficient by itself.
+        if formula_context and cls.FORMULA_TOKEN_RE.search(remaining):
+            resolved = cls.FORMULA_TOKEN_RE.sub(
+                lambda match: formula_context.get(match.group(0), match.group(0)),
+                remaining,
+            )
+            catalogue = re.fullmatch(
+                r"(?P<venue>[^{}\[\]!?\d]{1,160}?),?\s*"
+                r"\d{1,4}(?:\(\d{1,4}\))?"
+                r"(?:\s*[:,]\s*\d+(?:[-–]\d+)?)?"
+                r"\s*,\s*(?:19|20)\d{2}\.?\s*",
+                resolved,
+            )
+            if catalogue is not None and not re.search(
+                r"[.;]", catalogue.group("venue")
+            ):
+                return True
+
+        # Dense volume(issue):page,year syntax is explicit catalogue metadata,
+        # including one-word venues that offer no linguistic type word.
+        issue_pages = re.match(
+            r"^(?P<venue>[^\d{}\[\]:;!?]+?),\s*\d{1,4}\s*\(\d{1,4}\)"
+            r"\s*:\s*\d+(?:[-–]\d+)?\s*,\s*(?:19|20)\d{2}\b",
+            remaining,
+        )
+        if issue_pages is not None:
+            venue = issue_pages.group("venue")
+            if cls._reference_venue_name_is_plausible(venue) or re.fullmatch(
+                r"[A-Z][A-Za-z'’\-]*(?:\s+(?:[A-Z][A-Za-z'’\-]*|"
+                r"and|for|in|of|on|the)){0,8}",
+                venue,
+            ):
+                return True
+
+        # A publisher imprint with a final acronym and a terminal year, or an
+        # explicitly labelled book series, supplies publication evidence even
+        # when there is no journal volume.  Neither rule names a publisher.
+        if re.match(
+            r"^(?:[A-Z][A-Za-z'’\-]+\s+){2,5}[A-Z]{2,6},\s*"
+            r"(?:19|20)\d{2}[a-z]?\.?\s*$",
+            remaining,
+        ):
+            return True
+        if re.match(
+            r"^[^.!?{}\[\]]{1,120}\bSeries\.\s+"
+            r"[^.!?{}\[\]]{1,80},\s*(?:19|20)\d{2}[a-z]?\.?\s*$",
+            remaining,
         ):
             return True
 
@@ -4466,9 +4581,22 @@ class CodexTranslator(BaseTranslator):
             r"^(?P<venue>.+?)\s+\d{1,4}[A-Za-z]?\s*[,;(]",
             remaining,
         )
-        return bool(
-            volume and cls._reference_venue_name_is_plausible(volume.group("venue"))
-        )
+        if volume is None or not cls._reference_venue_name_is_plausible(
+            volume.group("venue")
+        ):
+            return False
+        if re.search(r"\b(?:de|del|der|des|du|und|et)\b", volume.group("venue")):
+            # A foreign connector alone is not a journal type word.  Require
+            # the complete volume, page and year fields for this new grammar.
+            return (
+                re.fullmatch(
+                    r"\d{1,4}[A-Za-z]?\s*,\s*\d+(?:[-–]\d+)?\s*"
+                    r"(?:\((?:19|20)\d{2}\)|,\s*(?:19|20)\d{2})\.?\s*",
+                    remaining[volume.end("venue") :].strip(),
+                )
+                is not None
+            )
+        return True
 
     @classmethod
     def _reference_title_boundary_is_safe(
@@ -4476,6 +4604,8 @@ class CodexTranslator(BaseTranslator):
         entry: str,
         source_title: str,
         peer_source_titles: tuple[str, ...] = (),
+        *,
+        formula_context: dict[str, str] | None = None,
     ) -> bool:
         if source_title != source_title.strip() or entry.count(source_title) != 1:
             return False
@@ -4536,7 +4666,7 @@ class CodexTranslator(BaseTranslator):
         if any(remaining.startswith(peer) for peer in peer_source_titles):
             remaining = ""
         if remaining[:1].isalpha() and not cls._reference_metadata_tail_is_safe(
-            remaining
+            remaining, formula_context=formula_context
         ):
             # A title substring must reach its following punctuation/container
             # boundary; otherwise applying it would leave the unselected title
@@ -4593,6 +4723,8 @@ class CodexTranslator(BaseTranslator):
         self,
         entry: str,
         replacements: list[ExactReplacement] | None,
+        *,
+        formula_context: dict[str, str] | None = None,
     ) -> tuple[str, bool]:
         if replacements is None:
             return entry, False
@@ -4618,6 +4750,7 @@ class CodexTranslator(BaseTranslator):
                         for source in source_titles
                         if source != replacement.source
                     ),
+                    formula_context=formula_context,
                 )
                 or (
                     self._checks_english_residue()
@@ -4688,7 +4821,11 @@ class CodexTranslator(BaseTranslator):
                 batch, title_replacements, strict=True
             ):
                 translated_entry, is_valid = self._apply_reference_title_replacements(
-                    entry, replacements
+                    entry,
+                    replacements,
+                    formula_context=self._reference_formula_context(
+                        cache_contexts[entry_idx]
+                    ),
                 )
                 if not is_valid and replacements:
                     retry_replacements = self._run_reference_title_batch([entry])[0]
@@ -4696,6 +4833,9 @@ class CodexTranslator(BaseTranslator):
                         self._apply_reference_title_replacements(
                             entry,
                             retry_replacements,
+                            formula_context=self._reference_formula_context(
+                                cache_contexts[entry_idx]
+                            ),
                         )
                     )
                 results[entry_idx] = translated_entry

@@ -492,6 +492,42 @@ class ReferencePlanningTests(unittest.TestCase):
         )
         self.assertEqual("".join(part.text for part in plan.parts), source)
 
+    def test_authors_continued_in_next_column_reach_title_only_translation(self):
+        policy = DocumentTranslationPolicy()
+        policy.plan_segment(
+            segment(
+                "[5] A. Alpha, First work. Nature 12, 34 (2020). "
+                "[6] B. Beta, C. Gamma,"
+            )
+        )
+        prefix = (
+            "D. Delta, E. Epsilon, and F. Zeta, A complete scientific title, "
+            "Phys. Rev. Appl. 14, 024070 (2020). "
+        )
+        following = "[7] G. Eta, Another title. Nature 12, 35 (2020)."
+        plan = policy.plan_segment(segment(prefix + following, 1))
+        self.assertEqual([part.role for part in plan.parts], [ROLE_REFERENCE] * 2)
+        self.assertEqual(plan.parts[0].text, prefix)
+        self.assertTrue(plan.parts[1].break_before)
+        self.assertEqual("".join(part.text for part in plan.parts), prefix + following)
+
+    def test_reference_like_preface_does_not_inherit_a_continuation_role(self):
+        prefix = "We compare quantum articles from 2020, Nature, and Science. "
+        following = "[7] A. Alpha, Another title. Nature 12, 35 (2020)."
+        policy = DocumentTranslationPolicy()
+        policy.last_reference_number = 6
+        plan = policy.plan_segment(segment(prefix + following))
+        self.assertNotEqual(plan.parts[0].role, ROLE_REFERENCE)
+        for previous_number, heading in ((None, False), (4, False), (6, True)):
+            with self.subTest(previous_number=previous_number, heading=heading):
+                policy = DocumentTranslationPolicy()
+                policy.last_reference_number = previous_number
+                if heading:
+                    policy.plan_segment(segment("References"))
+                citation = "B. Beta, An earlier result. Nature 12, 34 (2020). "
+                plan = policy.plan_segment(segment(citation + following))
+                self.assertNotEqual(plan.parts[0].role, ROLE_REFERENCE)
+
     def test_explicit_new_reference_heading_may_restart_numbering(self) -> None:
         policy = DocumentTranslationPolicy()
         policy.last_reference_number = 59

@@ -632,8 +632,135 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         self.assertEqual(
             CodexTranslator._structured_reference_title_spans(entry),
-            (),
+            ("On the kolmogorov neural networks",),
         )
+
+    def test_catalogue_structure_identifies_titles_without_venue_name_lists(self):
+        title = "A complete scientific work"
+        tails = (
+            "Annalen der Physik 16, 767 (2007).",
+            "Berichte der Forschung 12, 42 (2020).",
+            "Entropy, 25(1):175, 2023.",
+            "Dynamical Systems, 12(3):456–460, 2021.",
+            "Prentice Hall PTR, 1994.",
+            "Example House ABC, 2022.",
+            "G - Reference,Information and Interdisciplinary Subjects Series. "
+            "World Scientific, 2023.",
+        )
+        for tail in tails:
+            with self.subTest(tail=tail):
+                entry = f"[2] Jane Smith. {title}. {tail}"
+                translator = translator_stub()
+                translator._run_exact_reference_title_batch = lambda titles: [
+                    "完整的科研作品" for _ in titles
+                ]
+                translator._run_discovered_reference_title_batch = lambda entries: (
+                    self.fail("explicit metadata should not require title discovery")
+                )
+                self.assertEqual(
+                    translator.translate_reference_entries([entry]),
+                    [entry.replace(title, "完整的科研作品")],
+                )
+
+    def test_split_venue_needs_readonly_catalogue_evidence(self):
+        title = "A complete scientific work"
+        for tail, context in (
+            (
+                "Mathematics of {v2}.",
+                "{v2}=control,signalsandsystems,2(4):303–314,1989",
+            ),
+            ("Advances in neural informa- {v5}.", "{v5}=tionprocessingsystems,30,2017"),
+            ("Neural Com-{v17}.", "{v17}=putation,5(1):18–20,1993"),
+            ("Neural Net-{v15}.", "{v15}=works,94:103–114,2017"),
+            ("Advances in Neural Information {v2}.", "{v2}=ProcessingSystems,36,2024"),
+        ):
+            with self.subTest(tail=tail):
+                entry = f"[2] Jane Smith. {title}. {tail}"
+                translator = translator_stub()
+                translator._run_reference_title_batch = lambda entries: [
+                    [ExactReplacement(title, "完整的科研作品")]
+                ]
+                self.assertEqual(
+                    translator.translate_reference_entries(
+                        [entry], cache_contexts=[context]
+                    ),
+                    [entry.replace(title, "完整的科研作品")],
+                )
+                self.assertEqual(
+                    translator_stub()._reference_formula_context(context),
+                    dict([context.split("=", 1)]),
+                )
+
+    def test_scientific_title_tail_and_protected_formula_are_not_metadata(self):
+        for tail in (
+            "Physics of {v1}.",
+            "Mathematics of {v1}.",
+            "Volume 2 of {v1}.",
+            "Mechanik der {v1}.",
+        ):
+            for value in ("x+y=2", "Matter. PhysicalReviewA,12:34,2020", "<missing>"):
+                with self.subTest(tail=tail, value=value):
+                    entry = f"[1] Jane Smith. A first sentence. {tail}"
+                    translator = translator_stub()
+                    translator._run_reference_title_batch = lambda entries: [
+                        [ExactReplacement("A first sentence", "第一句话")]
+                    ]
+                    self.assertEqual(
+                        translator.translate_reference_entries(
+                            [entry], cache_contexts=[f"{{v1}}={value}"]
+                        ),
+                        [entry],
+                    )
+                    self.assertEqual(translator.cache.values, {})
+
+    def test_automatic_boundary_does_not_expand_old_metadata_prefix_heuristics(self):
+        for title in (
+            "A first sentence. Nature of complex systems",
+            "A first sentence. Volume 2 of a scientific collection",
+            "A first sentence. Atlas der Methoden",
+        ):
+            entry = f"[1] Jane Smith. {title}. Neural Networks 12, 34 (2020)."
+            self.assertEqual(
+                CodexTranslator._structured_reference_title_spans(entry), ()
+            )
+
+    def test_protected_author_diacritic_does_not_hide_the_title_boundary(self):
+        entry = "[1] Jane Smith and Jernej Barbi{v5}c. A complete work. {v6}."
+        self.assertEqual(
+            CodexTranslator._structured_reference_title_spans(entry),
+            ("A complete work",),
+        )
+
+    def test_book_volume_field_is_kept_outside_the_title(self):
+        entry = (
+            "[23] Carl De Boor. A practical guide to splines, volume 27. "
+            "springer-verlag New York, 1978."
+        )
+        self.assertEqual(
+            CodexTranslator._structured_reference_title_spans(entry),
+            ("A practical guide to splines",),
+        )
+        self.assertTrue(
+            CodexTranslator._reference_title_boundary_is_safe(
+                entry, "A practical guide to splines"
+            )
+        )
+
+    def test_protected_run_does_not_make_an_arbitrary_phrase_a_venue(self):
+        for tail in (
+            "Quantum Circuit Method {v3}.",
+            "An unfinished title about {v3}.",
+            "Quantum circuit method. Neural Net-{v3}.",
+            "A broader perspective, 25(1):175, 2023.",
+            "Another scientific title. Example House ABC, 2022.",
+        ):
+            with self.subTest(tail=tail):
+                entry = f"[1] A. Smith. A first title sentence. {tail}"
+                self.assertFalse(
+                    CodexTranslator._reference_title_boundary_is_safe(
+                        entry, "A first title sentence"
+                    )
+                )
 
     def test_arbitrary_single_word_title_tail_is_not_a_venue(self) -> None:
         translator = translator_stub()

@@ -633,7 +633,7 @@ def looks_like_reference_title_prefix(text: str) -> bool:
     An initials-only prefix (``[17] S. M.``) is not complete: accepting it
     would select the surname as the beginning of the work title.
     """
-    compact = text.strip()
+    compact = _FORMULA_RE.sub("", text).strip()
     compact = re.sub(r",\s+in\s*$", ",", compact, flags=re.IGNORECASE)
     year = re.search(r"\s+(?:19|20)\d{2}[a-z]?\s*$", compact)
     if year:
@@ -928,6 +928,8 @@ class DocumentTranslationPolicy:
             heading_hint=heading_hint,
         )
         if region is not None:
+            preceding_reference_number = self.last_reference_number
+            preceding_reference_prefix = self.last_reference_prefix
             self.pending_reference_heading = 0
             numbers = [
                 marker.number for marker in region.markers if marker.number is not None
@@ -950,10 +952,33 @@ class DocumentTranslationPolicy:
             parts: list[SegmentPart] = []
             prefix = text[: region.start]
             if prefix:
+                # A column may start with the remaining authors and the whole
+                # title of the preceding entry.  Keep it in the title-only
+                # channel when consecutive numbering corroborates that layout.
+                # An unrelated introductory paragraph must not inherit this
+                # role merely because it mentions a journal and a year.
+                is_author_continuation = (
+                    not heading_hint
+                    and preceding_reference_number is not None
+                    and region.markers[0].number == preceding_reference_number + 1
+                    and region.markers[0].prefix == preceding_reference_prefix
+                    and reference_entry_score(
+                        _reference_scoring_text(prefix, formula_texts)
+                    )
+                    >= 3
+                    and any(
+                        looks_like_reference_title_prefix(prefix[: match.end()])
+                        for match in re.finditer(r"[,.;]", prefix)
+                    )
+                )
                 prefix_role = (
-                    ROLE_PRESERVE
-                    if reference_entry_score(prefix) >= 3
-                    else ROLE_TRANSLATE
+                    ROLE_REFERENCE
+                    if is_author_continuation
+                    else (
+                        ROLE_PRESERVE
+                        if reference_entry_score(prefix) >= 3
+                        else ROLE_TRANSLATE
+                    )
                 )
                 parts.append(SegmentPart(prefix_role, prefix))
             for index, marker in enumerate(region.markers):
