@@ -781,6 +781,42 @@ class CodexReferenceTranslationTests(unittest.TestCase):
                 )
                 self.assertEqual(translator.cache.values, {})
 
+    def test_complete_numeric_publication_month_and_year(self):
+        for month in ("1", "01", "6", "11", "12"):
+            with self.subTest(month=month):
+                title = "Illuminating new and known relations between knot invariants"
+                entry = f"[111] Jessica Craven and Mark Hughes. {title}. {month} 2022."
+                self.assertEqual(
+                    CodexTranslator._structured_reference_title_spans(entry), (title,)
+                )
+                self.assertTrue(
+                    CodexTranslator._reference_title_boundary_is_safe(entry, title)
+                )
+
+    def test_invalid_month_and_prose_after_year_are_not_publication_dates(self):
+        for tail in (
+            "0 2022.",
+            "00 2022.",
+            "13 2022.",
+            "111 2022.",
+            "11 2022 methods and applications.",
+            "11 2022 methods. Nature 12, 34 (2020).",
+        ):
+            with self.subTest(tail=tail):
+                self.assertFalse(
+                    CodexTranslator._reference_complete_metadata_tail_is_safe(tail)
+                )
+                entry = f"[1] Jane Smith. A first title sentence. {tail}"
+                self.assertNotEqual(
+                    CodexTranslator._structured_reference_title_spans(entry),
+                    ("A first title sentence",),
+                )
+                self.assertFalse(
+                    CodexTranslator._reference_title_boundary_is_safe(
+                        entry, "A first title sentence"
+                    )
+                )
+
     def test_protected_author_diacritic_does_not_hide_the_title_boundary(self):
         entry = "[1] Jane Smith and Jernej Barbi{v5}c. A complete work. {v6}."
         self.assertEqual(

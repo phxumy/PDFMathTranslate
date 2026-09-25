@@ -4465,6 +4465,11 @@ class CodexTranslator(BaseTranslator):
         )
         if re.fullmatch(terminal_year, remaining) or re.fullmatch(fields, remaining):
             return True
+        # Some bibliographies give only a numeric publication month and year.
+        # Validate the month and consume the entire field so "11 2022 methods"
+        # cannot become an automatic boundary inside a title.
+        if re.fullmatch(rf"(?:0?[1-9]|1[0-2])\s+{terminal_year}", remaining):
+            return True
 
         venue_fields = re.fullmatch(
             rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?)\s*,?\s+{fields}",
