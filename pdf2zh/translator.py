@@ -4701,6 +4701,24 @@ class CodexTranslator(BaseTranslator):
             return False
         title_start = entry.find(source_title)
         title_end = title_start + len(source_title)
+        complete_titles = (
+            cls._quoted_reference_title_spans(entry)
+            or cls._styled_reference_title_spans(entry)
+            or cls._structured_reference_title_spans(entry)
+        )
+        for complete_title in complete_titles:
+            if source_title != complete_title and source_title in complete_title:
+                # A broad publication introducer such as "in" can also occur
+                # inside a title.  Once its complete span is known, require all
+                # title words to be covered before considering metadata.  Keep
+                # support for separate main-title/subtitle replacements.
+                uncovered = complete_title
+                for selected in (source_title, *peer_source_titles):
+                    if selected in complete_title:
+                        uncovered = uncovered.replace(selected, "")
+                uncovered = re.sub(cls.PLACEHOLDER_RE, "", uncovered)
+                if re.search(r"\w", uncovered):
+                    return False
         prefix = entry[:title_start]
         suffix = entry[title_end:]
         if not prefix.strip() or not suffix.strip():

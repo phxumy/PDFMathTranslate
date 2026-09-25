@@ -27,6 +27,99 @@ def translator_stub() -> CodexTranslator:
 
 
 class CodexReferenceTranslationTests(unittest.TestCase):
+    def test_known_complete_title_cannot_be_truncated_before_internal_in(self):
+        for title in (
+            "Theoretical issues in deep networks",
+            "Measuring catastrophic forgetting in neural networks",
+            "Overcoming catastrophic forgetting in neural networks",
+            "Absence of diffusion in certain random lattices",
+            "Strong localization of photons in certain disordered dielectric superlattices",
+            "Reen- trant delocalization transition in one-dimensional photonic quasicrystals",
+        ):
+            partial = title.split(" in ", 1)[0]
+            for visible in (
+                title,
+                f"“{title}”",
+                f"[[PDF2ZH_ITALIC_7_BEGIN]]{title}[[PDF2ZH_ITALIC_7_END]]",
+            ):
+                with self.subTest(title=title, visible=visible):
+                    translator = translator_stub()
+                    entry = f"[1] Jane Smith. {visible}. Nature 12, 34 (2020)."
+                    result, valid = translator._apply_reference_title_replacements(
+                        entry, [ExactReplacement(partial, "只翻译前半题名")]
+                    )
+                    self.assertFalse(valid)
+                    self.assertEqual(result, entry)
+                    result, valid = translator._apply_reference_title_replacements(
+                        entry, [ExactReplacement(title, "完整的中文题名")]
+                    )
+                    self.assertTrue(valid)
+                    self.assertEqual(result, entry.replace(title, "完整的中文题名"))
+
+    def test_in_book_and_proceedings_metadata_remain_legal(self):
+        title = "Learning methods in complex networks"
+        for tail in (
+            "In Proceedings of the Scientific Conference, pages 12–18, 2020.",
+            "In Handbook of Scientific Computing, pages 12–18. Academic Press, 2020.",
+            "In {v2}, pages 12–18. Academic Press, 2020.",
+        ):
+            for visible in (title, f"“{title}”"):
+                with self.subTest(tail=tail, visible=visible):
+                    translator = translator_stub()
+                    entry = f"[1] Jane Smith. {visible}. {tail}"
+                    result, valid = translator._apply_reference_title_replacements(
+                        entry, [ExactReplacement(title, "复杂网络中的学习方法")]
+                    )
+                    self.assertTrue(valid)
+                    self.assertEqual(
+                        result, entry.replace(title, "复杂网络中的学习方法")
+                    )
+
+    def test_known_title_can_be_completely_covered_by_main_and_subtitle(self):
+        main = "Learning in networks"
+        subtitle = "A complete scientific framework"
+        title = f"{main}: {subtitle}"
+        entry = f"[1] Jane Smith. {title}. Nature 12, 34 (2020)."
+        translator = translator_stub()
+        self.assertEqual(translator._structured_reference_title_spans(entry), (title,))
+        result, valid = translator._apply_reference_title_replacements(
+            entry,
+            [
+                ExactReplacement(main, "网络中的学习"),
+                ExactReplacement(subtitle, "完整科学框架"),
+            ],
+        )
+        self.assertTrue(valid)
+        self.assertEqual(result, entry.replace(title, "网络中的学习: 完整科学框架"))
+
+    def test_readonly_title_markers_can_remain_between_complete_fragments(self):
+        main, subtitle = "Learning methods", "complex systems"
+        replacements = [
+            ExactReplacement(main, "学习方法"),
+            ExactReplacement(subtitle, "复杂系统"),
+        ]
+        for marker in ("{v3}", "{{v3}}", "[[PDF2ZH_FLOW_3]]"):
+            for leftover in ("", "for "):
+                with self.subTest(marker=marker, leftover=leftover):
+                    title = f"{main} {marker} {leftover}{subtitle}"
+                    entry = f"[1] Jane Smith. “{title}”. Nature 12, 34 (2020)."
+                    (
+                        result,
+                        valid,
+                    ) = translator_stub()._apply_reference_title_replacements(
+                        entry, replacements
+                    )
+                    self.assertEqual(valid, not bool(leftover))
+                    if valid:
+                        self.assertEqual(
+                            result,
+                            entry.replace(main, "学习方法").replace(
+                                subtitle, "复杂系统"
+                            ),
+                        )
+                    else:
+                        self.assertEqual(result, entry)
+
     def test_author_year_thesis_title_has_safe_exact_boundary(self):
         title = "Metrology of quantum control and measurement in superconducting qubits"
         entry = f"[33] Chen Z 2018 {title} {{v40}} UC Santa Barbara."
