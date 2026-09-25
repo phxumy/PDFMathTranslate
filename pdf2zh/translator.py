@@ -3401,7 +3401,9 @@ class CodexTranslator(BaseTranslator):
             r"(?P<punct>[.!?,])\s+(?=(?:19|20)\d{2}\b)",
             tail,
         )
-        if bare_year is not None:
+        if bare_year is not None and cls._reference_complete_metadata_tail_is_safe(
+            tail[bare_year.end("punct") :].strip()
+        ):
             boundaries.append(bare_year.start("punct"))
         for punctuation in re.finditer(r"[.!?,]\s+", tail):
             metadata_tail = tail[punctuation.end() :].strip()
@@ -4185,7 +4187,9 @@ class CodexTranslator(BaseTranslator):
         return None
 
     @staticmethod
-    def _reference_venue_name_is_plausible(candidate: str) -> bool:
+    def _reference_venue_name_is_plausible(
+        candidate: str, *, allow_foreign_connector: bool = False
+    ) -> bool:
         """Recognize a bibliographic container without enumerating journal names.
 
         Journal tails in extracted PDFs commonly use abbreviated tokens (``Appl.``,
@@ -4280,7 +4284,7 @@ class CodexTranslator(BaseTranslator):
         if not (
             "." in compact
             or has_venue_signal
-            or has_foreign_connector
+            or (allow_foreign_connector and has_foreign_connector)
             or any(word.casefold() in lowercase_brands for word in words)
         ):
             return False
@@ -4457,6 +4461,77 @@ class CodexTranslator(BaseTranslator):
         )
 
     @classmethod
+    def _reference_complete_metadata_tail_is_safe(cls, remaining: str) -> bool:
+        """Certify the whole publication tail for automatic title extraction.
+
+        An initial digit may begin title prose (``3D integration``), not a
+        volume.  Every accepted route must consume the complete metadata tail.
+        """
+        year = r"(?:19|20)\d{2}[a-z]?"
+        number = r"\d{1,7}[A-Za-z]?(?:[-–]\d{1,7})?"
+        terminal_year = rf"(?:\({year}\)|{year})\.?\s*"
+        fields = (
+            rf"\d{{1,4}}[A-Za-z]?(?:\(\d{{1,4}}\))?"
+            rf"\s*[:,]\s*{number}\s*[,;]?\s*{terminal_year}"
+        )
+        if re.fullmatch(terminal_year, remaining) or re.fullmatch(fields, remaining):
+            return True
+
+        venue_fields = re.fullmatch(
+            rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?)\s*,?\s+{fields}",
+            remaining,
+        )
+        if venue_fields is not None and cls._reference_venue_name_is_plausible(
+            venue_fields.group("venue"), allow_foreign_connector=True
+        ):
+            return True
+        dense_issue = re.fullmatch(
+            rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?),\s*{fields}", remaining
+        )
+        if dense_issue is not None and re.fullmatch(
+            r"[A-Z][A-Za-z'’\-]*(?:\s+(?:[A-Z][A-Za-z'’\-]*|"
+            r"and|for|in|of|on|the)){0,8}",
+            dense_issue.group("venue"),
+        ):
+            return True
+
+        paged_venue = re.fullmatch(
+            rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?),\s*(?:pages?|pp?\.?)\s+"
+            rf"{number}\s*,\s*{terminal_year}",
+            remaining,
+            re.IGNORECASE,
+        )
+        if paged_venue is not None and cls._reference_venue_name_is_plausible(
+            paged_venue.group("venue"), allow_foreign_connector=True
+        ):
+            return True
+
+        # A volume label must be followed by an actual publisher field.  It
+        # cannot skip a second title sentence on its way to the final year.
+        if re.fullmatch(
+            rf"(?:vol(?:ume)?\.?|number|no\.)\s+\d+\s*[.,;]\s*"
+            rf"(?P<publisher>[^.!?{{}}\[\]]{{1,100}}),\s*{terminal_year}",
+            remaining,
+            re.IGNORECASE,
+        ) and re.search(
+            r"\b(?:press|publishers?|publishing|verlag)\b", remaining, re.IGNORECASE
+        ):
+            return True
+        if re.fullmatch(
+            rf"(?:[A-Z][A-Za-z'’\-]+\s+){{2,5}}[A-Z]{{2,6}},\s*{terminal_year}",
+            remaining,
+        ):
+            return True
+        return (
+            re.fullmatch(
+                rf"[^.!?{{}}\[\]]{{1,120}}\bSeries\.\s+"
+                rf"[^.!?{{}}\[\]]{{1,80}},\s*{terminal_year}",
+                remaining,
+            )
+            is not None
+        )
+
+    @classmethod
     def _reference_metadata_tail_is_safe(
         cls,
         remaining: str,
@@ -4466,31 +4541,25 @@ class CodexTranslator(BaseTranslator):
     ) -> bool:
         """Return whether text after a selected title begins bibliography metadata."""
 
-        if (
-            require_complete
-            and re.search(r"\b(?:19|20)\d{2}[a-z]?\s*\)?\.?\s*$", remaining) is None
-        ):
+        complete = cls._reference_complete_metadata_tail_is_safe(remaining)
+        if require_complete or complete:
+            return complete
+        if remaining[:1].isdigit():
             return False
         if re.match(
-            r"^(?:\d|doi\b|arxiv\b|isbn\b|issn\b|https?://|www\.)",
+            r"^(?:doi\b|arxiv\b|isbn\b|issn\b|https?://|www\.)",
             remaining,
             re.IGNORECASE,
         ):
             return True
         if re.match(
-            r"^(?:vol(?:ume)?\.?|number|no\.)\s+\d+\s*[.,;]",
-            remaining,
-            re.IGNORECASE,
-        ):
-            return True
-        if not require_complete and re.match(
             r"^(?:preprint\s+at\b|(?:ph\.?\s*d\.?|doctoral|master(?:'s)?)\s+"
             r"thesis\b|dissertation\b|zenodo\b|proceedings\s+of\b|in\s+\S)",
             remaining,
             re.IGNORECASE,
         ):
             return True
-        if not require_complete and re.match(
+        if re.match(
             r"^(?:Nature\b|Science\b|Cell\b|Physical\s+Review\b|"
             r"Phys\.?\s+Rev\.?\b|IEEE\b|ACM\b|"
             r"npj\s+[A-Za-z]|(?:New\s+)?Journal\s+of\b|"
@@ -4508,10 +4577,8 @@ class CodexTranslator(BaseTranslator):
             r"\{\{?v\d+\}?\}",
             remaining,
         )
-        if (
-            not require_complete
-            and protected_venue is not None
-            and cls._reference_venue_name_is_plausible(protected_venue.group("venue"))
+        if protected_venue is not None and cls._reference_venue_name_is_plausible(
+            protected_venue.group("venue")
         ):
             return True
 
@@ -4535,38 +4602,6 @@ class CodexTranslator(BaseTranslator):
             ):
                 return True
 
-        # Dense volume(issue):page,year syntax is explicit catalogue metadata,
-        # including one-word venues that offer no linguistic type word.
-        issue_pages = re.match(
-            r"^(?P<venue>[^\d{}\[\]:;!?]+?),\s*\d{1,4}\s*\(\d{1,4}\)"
-            r"\s*:\s*\d+(?:[-–]\d+)?\s*,\s*(?:19|20)\d{2}\b",
-            remaining,
-        )
-        if issue_pages is not None:
-            venue = issue_pages.group("venue")
-            if cls._reference_venue_name_is_plausible(venue) or re.fullmatch(
-                r"[A-Z][A-Za-z'’\-]*(?:\s+(?:[A-Z][A-Za-z'’\-]*|"
-                r"and|for|in|of|on|the)){0,8}",
-                venue,
-            ):
-                return True
-
-        # A publisher imprint with a final acronym and a terminal year, or an
-        # explicitly labelled book series, supplies publication evidence even
-        # when there is no journal volume.  Neither rule names a publisher.
-        if re.match(
-            r"^(?:[A-Z][A-Za-z'’\-]+\s+){2,5}[A-Z]{2,6},\s*"
-            r"(?:19|20)\d{2}[a-z]?\.?\s*$",
-            remaining,
-        ):
-            return True
-        if re.match(
-            r"^[^.!?{}\[\]]{1,120}\bSeries\.\s+"
-            r"[^.!?{}\[\]]{1,80},\s*(?:19|20)\d{2}[a-z]?\.?\s*$",
-            remaining,
-        ):
-            return True
-
         paged_venue = re.match(
             r"^(?P<venue>.+?),\s*(?:pages?|pp?\.?)\s+\d",
             remaining,
@@ -4585,17 +4620,6 @@ class CodexTranslator(BaseTranslator):
             volume.group("venue")
         ):
             return False
-        if re.search(r"\b(?:de|del|der|des|du|und|et)\b", volume.group("venue")):
-            # A foreign connector alone is not a journal type word.  Require
-            # the complete volume, page and year fields for this new grammar.
-            return (
-                re.fullmatch(
-                    r"\d{1,4}[A-Za-z]?\s*,\s*\d+(?:[-–]\d+)?\s*"
-                    r"(?:\((?:19|20)\d{2}\)|,\s*(?:19|20)\d{2})\.?\s*",
-                    remaining[volume.end("venue") :].strip(),
-                )
-                is not None
-            )
         return True
 
     @classmethod
@@ -4665,7 +4689,7 @@ class CodexTranslator(BaseTranslator):
         remaining = suffix_boundary.lstrip(" \t\r\n\"'’”)]}》」』】.,;:!?—–-")
         if any(remaining.startswith(peer) for peer in peer_source_titles):
             remaining = ""
-        if remaining[:1].isalpha() and not cls._reference_metadata_tail_is_safe(
+        if remaining[:1].isalnum() and not cls._reference_metadata_tail_is_safe(
             remaining, formula_context=formula_context
         ):
             # A title substring must reach its following punctuation/container

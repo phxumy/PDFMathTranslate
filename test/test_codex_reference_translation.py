@@ -718,11 +718,68 @@ class CodexReferenceTranslationTests(unittest.TestCase):
             "A first sentence. Nature of complex systems",
             "A first sentence. Volume 2 of a scientific collection",
             "A first sentence. Atlas der Methoden",
+            "A complete scientific work. volume 2, new methods and applications",
+            "A complete scientific work. number 3, new methods and applications",
+            "A short history, 2020 perspectives on quantum information",
         ):
             entry = f"[1] Jane Smith. {title}. Neural Networks 12, 34 (2020)."
-            self.assertEqual(
-                CodexTranslator._structured_reference_title_spans(entry), ()
+            self.assertIn(
+                CodexTranslator._structured_reference_title_spans(entry), ((), (title,))
             )
+
+    def test_numeric_metadata_must_be_complete_before_automatic_splitting(self):
+        for title, tail in (
+            ("A complete scientific work", "2020."),
+            ("A complete scientific work", "Entropy, 25(1):175, 2023."),
+            (
+                "A scalable framework, 3D integration and its applications",
+                "Nature 12, 34 (2020).",
+            ),
+            (
+                "Molecular control, 2 approaches to scalable systems",
+                "Phys. Rev. A 12, 34 (2020).",
+            ),
+        ):
+            with self.subTest(title=title, tail=tail):
+                entry = f"[1] Jane Smith. {title}. {tail}"
+                translator = translator_stub()
+                seen = []
+
+                def translate(titles):
+                    seen.extend(titles)
+                    return ["完整中文题名" for _ in titles]
+
+                translator._run_exact_reference_title_batch = translate
+                translator._run_discovered_reference_title_batch = (
+                    lambda entries: self.fail("expected a complete deterministic title")
+                )
+                self.assertEqual(
+                    translator.translate_reference_entries([entry]),
+                    [entry.replace(title, "完整中文题名")],
+                )
+                self.assertEqual(seen, [title])
+
+    def test_numeric_and_foreign_subtitles_are_not_accepted_or_cached(self):
+        for tail in (
+            "3D integration and its applications. Nature 12, 34 (2020).",
+            "2 approaches to scalable systems. Phys. Rev. A 12, 34 (2020).",
+            "volume 2, new methods and applications. Example House ABC, 2020.",
+            "number 3, new methods and applications. Example House ABC, 2020.",
+            "Theorie Der Elastizitat {v1}. Springer, 2020.",
+        ):
+            with self.subTest(tail=tail):
+                entry = f"[1] Jane Smith. A first sentence, {tail}"
+                translator = translator_stub()
+                translator._run_reference_title_batch = lambda entries: [
+                    [ExactReplacement("A first sentence", "前半句")]
+                ]
+                self.assertEqual(
+                    translator.translate_reference_entries(
+                        [entry], cache_contexts=["{v1}=x+y"]
+                    ),
+                    [entry],
+                )
+                self.assertEqual(translator.cache.values, {})
 
     def test_protected_author_diacritic_does_not_hide_the_title_boundary(self):
         entry = "[1] Jane Smith and Jernej Barbi{v5}c. A complete work. {v6}."
