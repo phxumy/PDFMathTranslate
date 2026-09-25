@@ -1120,6 +1120,7 @@ class CodexTranslator(BaseTranslator):
         "scientific-crossrefs-v2;theorem-italic-v1;reference-structure-v6"
     )
     REFERENCE_CACHE_PREFIX = "pdf2zh:reference-work-title-only:v6\n"
+    REFERENCE_REPLACEMENTS_CACHE_PREFIX = "pdf2zh:reference-title-replacements:v1\n"
     FORMULA_CONTEXT_CACHE_PREFIX = "pdf2zh:readonly-inline-formula:v3\n"
     STYLED_CACHE_PREFIX = "pdf2zh:styled-italic:v4\n"
     CONTINUATION_CACHE_PREFIX = "pdf2zh:continuation-fragments:v4\n"
@@ -3927,6 +3928,77 @@ class CodexTranslator(BaseTranslator):
         )
         return cls.REFERENCE_CACHE_PREFIX + payload
 
+    @classmethod
+    def _reference_replacements_cache_key(
+        cls, entry: str, cache_context: str = ""
+    ) -> str:
+        # Old processes sharing this database expect a complete translated
+        # string at the legacy key; never place structured records there.
+        return cls.REFERENCE_REPLACEMENTS_CACHE_PREFIX + cls._reference_cache_key(
+            entry, cache_context
+        )
+
+    def _accepted_reference_cache(
+        self,
+        entry: str,
+        cached: object,
+        *,
+        formula_context: dict[str, str] | None = None,
+        legacy: bool = False,
+    ) -> str | None:
+        """Revalidate the whole selected title, including historical caches."""
+        if not isinstance(cached, str) or not cached or cached == entry:
+            return None
+        if legacy:
+            titles = (
+                self._quoted_reference_title_spans(entry)
+                or self._styled_reference_title_spans(entry)
+                or self._structured_reference_title_spans(entry)
+            )
+            # A plain translated entry does not record discovery boundaries.
+            # Only an unambiguous complete title can be recovered safely.
+            if len(titles) != 1 or entry.count(titles[0]) != 1:
+                return None
+            title = titles[0]
+            start = entry.index(title)
+            before, after = entry[:start], entry[start + len(title) :]
+            if (
+                not cached.startswith(before)
+                or not cached.endswith(after)
+                or len(cached) <= len(before) + len(after)
+            ):
+                return None
+            translated_title = cached[
+                len(before) : len(cached) - len(after) if after else len(cached)
+            ]
+            replacements = [ExactReplacement(title, translated_title)]
+        else:
+            try:
+                payload = json.loads(cached)
+            except (TypeError, json.JSONDecodeError):
+                return None
+            if (
+                not isinstance(payload, dict)
+                or payload.get("format") != "reference-title-replacements-v1"
+                or not isinstance(payload.get("replacements"), list)
+            ):
+                return None
+            replacements = []
+            for item in payload["replacements"]:
+                if not isinstance(item, dict) or not all(
+                    isinstance(item.get(key), str) for key in ("source", "translated")
+                ):
+                    return None
+                replacements.append(
+                    ExactReplacement(item["source"], item["translated"])
+                )
+        translated_entry, valid = self._apply_reference_title_replacements(
+            entry, replacements, formula_context=formula_context
+        )
+        if not valid or (legacy and translated_entry != cached):
+            return None
+        return translated_entry
+
     @staticmethod
     def _reference_formula_context(cache_context: str) -> dict[str, str]:
         """Read the converter's existing per-entry font-run cache signature."""
@@ -4812,14 +4884,28 @@ class CodexTranslator(BaseTranslator):
             if self._is_passthrough_text(entry):
                 results[idx] = entry
                 continue
-            cache_key = self._reference_cache_key(entry, cache_contexts[idx])
             if not (self.ignore_cache or ignore_cache):
-                cached = self.cache.get(cache_key)
-                # Ignore legacy no-op cache entries produced by an empty
-                # replacement list so a later, better structured response can
-                # still translate the work title.
-                if cached is not None and cached != entry:
-                    results[idx] = self._normalize_translation_output(cached)
+                formula_context = self._reference_formula_context(cache_contexts[idx])
+                accepted_cache = self._accepted_reference_cache(
+                    entry,
+                    self.cache.get(
+                        self._reference_replacements_cache_key(
+                            entry, cache_contexts[idx]
+                        )
+                    ),
+                    formula_context=formula_context,
+                )
+                if accepted_cache is None:
+                    accepted_cache = self._accepted_reference_cache(
+                        entry,
+                        self.cache.get(
+                            self._reference_cache_key(entry, cache_contexts[idx])
+                        ),
+                        formula_context=formula_context,
+                        legacy=True,
+                    )
+                if accepted_cache is not None:
+                    results[idx] = accepted_cache
                     continue
             pending_items.append((idx, entry))
 
@@ -4846,11 +4932,11 @@ class CodexTranslator(BaseTranslator):
                     ),
                 )
                 if not is_valid and replacements:
-                    retry_replacements = self._run_reference_title_batch([entry])[0]
+                    replacements = self._run_reference_title_batch([entry])[0]
                     translated_entry, is_valid = (
                         self._apply_reference_title_replacements(
                             entry,
-                            retry_replacements,
+                            replacements,
                             formula_context=self._reference_formula_context(
                                 cache_contexts[entry_idx]
                             ),
@@ -4859,8 +4945,25 @@ class CodexTranslator(BaseTranslator):
                 results[entry_idx] = translated_entry
                 if is_valid:
                     self.cache.set(
-                        self._reference_cache_key(entry, cache_contexts[entry_idx]),
-                        translated_entry,
+                        self._reference_replacements_cache_key(
+                            entry, cache_contexts[entry_idx]
+                        ),
+                        json.dumps(
+                            {
+                                "format": "reference-title-replacements-v1",
+                                "replacements": [
+                                    {
+                                        "source": replacement.source,
+                                        "translated": self._normalize_translation_output(
+                                            replacement.translated
+                                        ),
+                                    }
+                                    for replacement in replacements
+                                ],
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                     )
                 elif replacements:
                     logger.warning(
