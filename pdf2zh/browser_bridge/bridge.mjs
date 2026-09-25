@@ -1,350 +1,383 @@
 import fs from 'node:fs/promises';
-import { openSync, closeSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { chromium } from 'playwright-core';
-import { catalog, coded, connectionStatus, ensureChat, inspectPage, prepareLoginPage } from './ui.mjs';
-import { browserEndpoint } from './endpoint.mjs';
+import { connectToRemoteChromeTarget } from './node_modules/@steipete/oracle/dist/src/browser/chromeLifecycle.js';
+import { submitPrompt, waitForAssistantResponse, ensurePromptReady } from './node_modules/@steipete/oracle/dist/src/browser/pageActions.js';
+import { browserPromptFingerprint, readUserMessageIds, readSubmittedPromptFingerprint } from './node_modules/@steipete/oracle/dist/src/browser/promptFingerprint.js';
+import { buildConversationTurnCountExpression } from './node_modules/@steipete/oracle/dist/src/browser/conversationTurns.js';
+import * as nativeUI from './native-ui.mjs';
+import { browserEndpoint, CONNECTION_GUIDANCE } from './endpoint.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ORACLE = path.join(HERE, 'node_modules', '@steipete', 'oracle');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const alive = pid => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
 const hash = value => createHash('sha256').update(value).digest('hex');
-let browser;
-let dispatchLock;
-
+const normalizedPrompt = value => String(value).replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim();
+const coded = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra });
+const alive = pid => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
+const quiet = () => {};
 async function readJson(filename, fallback = null) {
   try { return JSON.parse(await fs.readFile(filename, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
-async function readJournal(requestDir) {
-  const missing = Symbol('missing-journal');
+async function writeJson(filename, value) {
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  const temp = `${filename}.${process.pid}.${randomUUID()}.tmp`;
+  await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  await fs.rename(temp, filename);
+}
+function localPath(value, field) {
+  if (!value || !path.isAbsolute(value)) throw coded('INVALID_REQUEST', `${field} must be an absolute local path.`);
+  return path.resolve(value);
+}
+async function readJournal(directory) {
+  const absent = Symbol();
   let journal;
-  try { journal = await readJson(path.join(requestDir, 'journal.json'), missing); }
+  try { journal = await readJson(path.join(directory, 'journal.json'), absent); }
   catch { throw coded('JOURNAL_UNREADABLE', '本批任务记录损坏或无法读取，已暂停以避免重复提交。'); }
-  if (journal === missing) return null;
+  if (journal === absent) return null;
   if (!journal || typeof journal !== 'object' || Array.isArray(journal) || typeof journal.dispatch_started !== 'boolean') {
     throw coded('JOURNAL_UNREADABLE', '本批任务记录不完整，无法确认是否提交；已暂停以避免重复提交。');
   }
   return journal;
 }
-async function writeJson(filename, value) {
-  await fs.mkdir(path.dirname(filename), { recursive: true });
-  const temp = `${filename}.${process.pid}.tmp`;
-  await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
-  await fs.rename(temp, filename);
-}
-function assertLocalPath(value, field) {
-  if (!value || !path.isAbsolute(value)) throw coded('INVALID_REQUEST', `${field} must be an absolute local path.`);
-  return path.resolve(value);
-}
-function chromeCandidates(request) {
-  return [request.chrome_path, process.env.PDF2ZH_CHATGPT_CHROME_PATH,
-    path.join(process.env.PROGRAMFILES || 'C:/Program Files', 'Google/Chrome/Application/chrome.exe'),
-    path.join(process.env['PROGRAMFILES(X86)'] || 'C:/Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium',
-  ].filter(Boolean);
-}
-async function connect(stateDir) {
-  const live = await browserEndpoint(stateDir);
-  if (!live) throw coded('BROWSER_CLOSED', '翻译专用浏览器已关闭。请点“登录 / 打开浏览器”，然后继续原文件以恢复；不会自动重发。');
-  browser = await chromium.connectOverCDP(live.endpoint, { timeout: 10000 });
-  return { ...live, context: browser.contexts()[0] };
-}
-async function targetId(page) {
-  const session = await page.context().newCDPSession(page);
-  try { return (await session.send('Target.getTargetInfo')).targetInfo.targetId; }
-  finally { await session.detach(); }
-}
-async function findOwnedTab(context, id) {
-  if (!id) return null;
-  for (const page of context.pages()) {
-    if (await targetId(page).catch(() => null) === id) return page;
-  }
-  return null;
-}
-export function setupTabCandidate(pages) {
-  const candidates = pages.filter(page => {
-    try {
-      const url = new URL(page.url());
-      return url.protocol === 'https:' && (['auth.openai.com', 'auth0.openai.com'].includes(url.hostname) ||
-        (url.hostname === 'chatgpt.com' && url.pathname === '/'));
-    } catch { return false; }
-  });
-  return candidates.length === 1 ? candidates[0] : null;
-}
-export async function uiTab(stateDir, context, create = true) {
-  const statePath = path.join(stateDir, 'browser.json');
-  const state = await readJson(statePath, {});
-  let page = await findOwnedTab(context, state.ui_tab);
-  if (!page) {
-    // A restarted browser changes target IDs. Only a unique setup/login page in
-    // our dedicated profile can be adopted, never an existing /c/ conversation.
-    page = setupTabCandidate(context.pages());
-    if (page && create) await writeJson(statePath, { ...state, ui_tab: await targetId(page) });
-  }
-  if (!page && create) {
-    page = await context.newPage();
-    await writeJson(statePath, { ...state, ui_tab: await targetId(page) });
-    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  }
-  return page;
-}
-async function login(request) {
-  if (!await browserEndpoint(request.state_dir)) {
-    const chrome = chromeCandidates(request).find(existsSync);
-    if (!chrome) throw coded('CHROME_NOT_FOUND', '未找到 Google Chrome。请先安装 Chrome 或设置 PDF2ZH_CHATGPT_CHROME_PATH。');
-    const profile = path.join(request.state_dir, 'chrome-profile');
-    await fs.mkdir(profile, { recursive: true });
-    const child = spawn(chrome, [`--user-data-dir=${profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--new-window', 'about:blank'], {
-      detached: true, stdio: 'ignore', windowsHide: false,
-    });
-    let launchError;
-    child.on('error', error => { launchError = error; });
-    child.unref();
-    for (let i = 0; i < 50 && !await browserEndpoint(request.state_dir); i++) {
-      if (launchError) throw launchError;
-      await pause(200);
-    }
-  }
-  const { context } = await connect(request.state_dir);
-  const page = await uiTab(request.state_dir, context);
-  return prepareLoginPage(page);
-}
-
-function oracleEnvironment(stateDir) {
-  // A user's unrelated Oracle configuration and API keys must never select another transport.
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (/^ORACLE_/.test(key) || /^(OPENAI|AZURE|ANTHROPIC|GEMINI|GOOGLE|OPENROUTER).*API_KEY$/.test(key)) delete env[key];
-  }
-  return { ...env, ORACLE_HOME_DIR: path.join(stateDir, 'oracle'), ORACLE_ENGINE: 'browser', NO_COLOR: '1', FORCE_COLOR: '0' };
-}
-
-export function oracleArguments({ port, target, output, slug, timeout = 900 }) {
-  return [path.join(ORACLE, 'dist/bin/oracle-cli.js'), '--engine', 'browser', '--model', 'gpt-5.5',
-    '--remote-chrome', `127.0.0.1:${port}`, '--browser-tab', target, '--browser-model-strategy', 'current',
-    '--browser-attachments', 'never', '--browser-research', 'off', '--browser-archive', 'never',
-    '--no-browser-capture-provider-native', '--browser-keep-browser', '--browser-timeout', `${timeout}s`,
-    '--browser-input-timeout', '30s', '--browser-recheck-delay', '0', '--browser-auto-reattach-delay', '0',
-    '--wait', '--slug', slug, '--write-output', output, '--prompt', '-'];
-}
-
-async function sessionMetadata(stateDir, journal) {
-  const base = path.join(stateDir, 'oracle/sessions');
-  const entries = await fs.readdir(base).catch(() => []);
-  // Exact known session first; otherwise only the unique request slug (never other chats).
-  const names = journal.session_id ? [journal.session_id] : entries.filter(name => name === journal.slug || name.startsWith(`${journal.slug}-`));
-  for (const name of names) {
-    const meta = await readJson(path.join(base, name, 'meta.json')).catch(() => null);
-    if (meta) return { ...meta, id: name };
-  }
-  return null;
-}
-function identityFields(journal) {
+function identity(journal) {
   return { session_id: journal.session_id || null, conversation_url: journal.conversation_url || null };
 }
-async function updateSession(request, journal) {
-  const meta = await sessionMetadata(request.state_dir, journal);
-  if (meta) {
-    journal.session_id = meta.id;
-    const url = meta.browser?.runtime?.tabUrl || meta.browser?.runtime?.conversationUrl || meta.browser?.harvest?.url;
-    if (isConversationUrl(url)) journal.conversation_url = url;
-    journal.submitted_prompt_hash = meta.browser?.runtime?.submittedPromptHash ?? journal.submitted_prompt_hash;
-    journal.oracle_status = meta.status;
-  }
-  return meta;
+function conversationURL(value) {
+  try { const url = new URL(value); return url.origin === 'https://chatgpt.com' && /^\/c\/[a-zA-Z0-9-]+$/.test(url.pathname) && !url.search && !url.hash; } catch { return false; }
 }
-function isConversationUrl(value) {
-  try { const url = new URL(value); return url.origin === 'https://chatgpt.com' && /^\/c\/[a-zA-Z0-9-]+$/.test(url.pathname); } catch { return false; }
+async function evaluation(runtime, expression) {
+  const result = await runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
+  if (result.exceptionDetails) throw coded('PAGE_SCRIPT_ERROR', 'ChatGPT 页面状态读取失败。');
+  return result.result?.value;
 }
-async function completedFile(request, journal) {
-  const answer = await fs.readFile(journal.output_file, 'utf8').catch(() => '');
-  if (!answer.trim()) return null;
-  await pause(120);
-  if (await fs.readFile(journal.output_file, 'utf8').catch(() => '') !== answer) return null;
-  journal.status = 'complete';
-  await writeJson(path.join(request.request_dir, 'journal.json'), journal);
-  return { ok: true, status: 'complete', answer, ...identityFields(journal), model: journal.model, effort: journal.effort };
+async function userTurn(runtime) {
+  return evaluation(runtime, `(() => {
+    const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
+    const last = users.at(-1);
+    return { url: location.href, count: users.length, messageId: last?.getAttribute('data-message-id'), text: last?.textContent };
+  })()`);
 }
 
-async function awaitOracle(request, journal) {
-  const deadline = Date.now() + (request.timeout_seconds || 900) * 1000;
-  const journalPath = path.join(request.request_dir, 'journal.json');
-  while (Date.now() < deadline) {
-    await updateSession(request, journal);
-    const result = await completedFile(request, journal);
-    if (result) return result;
-    await writeJson(journalPath, journal);
-    if (!await browserEndpoint(request.state_dir)) {
-      throw Object.assign(coded('BROWSER_CLOSED', '专用浏览器已关闭；本批可能已提交。重新打开专用浏览器后继续原文件，将先读取原会话，不会重发。'), identityFields(journal));
-    }
-    if (!alive(journal.oracle_pid)) break;
-    await pause(900);
+// Oracle's connection helper reconnects when its shared WebSocket cache is empty.
+// After explicit login, bind new owned page sessions to the existing transport
+// directly: an interrupted socket must fail instead of asking for authorization.
+export async function connectOwnedPage(anchor, targetId) {
+  const root = anchor.client;
+  const { sessionId } = await root.Target.attachToTarget({ targetId, flatten: true });
+  let closed = false;
+  const client = { oraclePageSessionId: sessionId };
+  for (const domain of ['Runtime', 'Page', 'Input', 'DOM', 'Network', 'Emulation']) {
+    client[domain] = new Proxy({}, { get: (_target, method) => params => {
+      if (closed) return Promise.reject(coded('PAGE_CLOSED', '翻译标签页连接已关闭。'));
+      return root.send(`${domain}.${String(method)}`, params || {}, sessionId);
+    } });
   }
-  await updateSession(request, journal);
-  await writeJson(journalPath, journal);
-  const result = await completedFile(request, journal);
-  if (result) return result;
-  throw Object.assign(coded('RECOVERY_REQUIRED', '本批尚未取得完整回答，已保存进度。请继续原文件恢复读取；不会自动重复提交。'), identityFields(journal));
+  return { client, targetId, close: async () => {
+    if (closed) return;
+    closed = true;
+    await root.Target.detachFromTarget({ sessionId }).catch(() => {});
+  } };
 }
 
-async function translate(request) {
-  request.request_dir = assertLocalPath(request.request_dir, 'request_dir');
-  const journalPath = path.join(request.request_dir, 'journal.json');
-  const existing = await readJournal(request.request_dir);
-  if (existing?.dispatch_started) return recover(request);
-  const activePath = path.join(request.state_dir, 'active-request.json');
-  const lockPath = path.join(request.state_dir, 'dispatch.lock');
-  try {
-    const fd = await fs.open(lockPath, 'wx');
-    await fd.writeFile(JSON.stringify({ pid: process.pid }));
-    await fd.close();
-    dispatchLock = lockPath;
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const lock = await readJson(lockPath).catch(() => ({}));
-    if (lock.pid && !alive(lock.pid)) {
-      await fs.unlink(lockPath);
-      return translate(request);
-    }
-    throw coded('BROWSER_BUSY', '翻译浏览器已有操作正在进行，请等待该操作完成。');
+// Dependency injection keeps lifecycle and no-resubmission tests entirely offline.
+export function createBridge(overrides = {}) {
+  const deps = { discover: browserEndpoint, attach: connectToRemoteChromeTarget, scopedAttach: connectOwnedPage, ui: nativeUI,
+    submit: submitPrompt, waitAnswer: waitForAssistantResponse, promptReady: ensurePromptReady,
+    readUserIds: readUserMessageIds, readFingerprint: readSubmittedPromptFingerprint, userTurn,
+    ...overrides };
+  const connections = new Map();
+  const pending = new Map();
+  const active = new Map();
+
+  function connected(stateDir) {
+    const entry = connections.get(stateDir);
+    if (entry?.anchor?.client?._ws && entry.anchor.client._ws.readyState !== 1) entry.authorized = false;
+    if (!entry?.authorized) throw coded('CONNECTION_REQUIRED', CONNECTION_GUIDANCE, { status: 'needs_connection' });
+    return entry;
   }
-  const active = await readJson(activePath);
-  if (active?.request_dir !== request.request_dir && active?.request_dir) {
-    const prior = await readJson(path.join(active.request_dir, 'journal.json'));
-    if (prior?.status !== 'complete' && (alive(prior?.oracle_pid) || alive(active.controller_pid))) {
-      throw coded('BROWSER_BUSY', '上一批仍在专用浏览器中运行或收取回答。请先继续原文件恢复，完成后再开始其他翻译。');
+  async function saveOwners(entry) {
+    await writeJson(path.join(entry.stateDir, 'native-browser.json'), { version: 2,
+      browser_ws: entry.endpoint.browserWSEndpoint, owned_targets: [...entry.owned], ui_tab: entry.uiTarget || null });
+  }
+  async function attachOwned(entry, target) {
+    if (!entry.authorized || !entry.owned.has(target)) throw coded('TAB_NOT_OWNED', '该标签页不属于翻译软件，已拒绝访问。');
+    return deps.scopedAttach(entry.anchor, target);
+  }
+  async function newOwned(entry, url = 'https://chatgpt.com/', login = false) {
+    if (!entry.authorized && !login) throw coded('CONNECTION_REQUIRED', CONNECTION_GUIDANCE, { status: 'needs_connection' });
+    let connection;
+    if (login) {
+      connection = await deps.attach(entry.endpoint.host, entry.endpoint.port, quiet, {
+        browserWSEndpoint: entry.endpoint.browserWSEndpoint, targetUrl: 'about:blank', closeTargetOnDispose: false,
+        approvalWaitMs: 180000,
+      });
+    } else {
+      const created = await entry.anchor.client.Target.createTarget({ url: 'about:blank', background: true });
+      entry.owned.add(created.targetId);
+      await saveOwners(entry);
+      connection = await deps.scopedAttach(entry.anchor, created.targetId);
+    }
+    entry.authorized = true;
+    entry.owned.add(connection.targetId);
+    await saveOwners(entry); // Never navigate before registering ownership.
+    const page = deps.ui.createNativePage(connection.client);
+    await page.goto(url);
+    return connection;
+  }
+  async function withConnection(connection, action) {
+    try { return await action(deps.ui.createNativePage(connection.client), connection); }
+    finally { await connection.close({ preserveTarget: true }).catch(() => {}); }
+  }
+  async function setupConnection(entry, create) {
+    if (entry.uiTarget && entry.owned.has(entry.uiTarget)) {
+      try { return await attachOwned(entry, entry.uiTarget); }
+      catch { if (!create) return null; }
+    }
+    if (!create) return null;
+    const connection = await newOwned(entry);
+    entry.uiTarget = connection.targetId;
+    await saveOwners(entry);
+    return connection;
+  }
+  async function login(request) {
+    let entry = connections.get(request.state_dir);
+    if (!entry?.authorized) {
+      const endpoint = await deps.discover(request.state_dir);
+      const saved = await readJson(path.join(request.state_dir, 'native-browser.json')).catch(() => null);
+      const sameBrowser = saved?.version === 2 && saved.browser_ws === endpoint.browserWSEndpoint;
+      entry = { stateDir: request.state_dir, endpoint, authorized: false,
+        owned: new Set(sameBrowser && Array.isArray(saved.owned_targets) ? saved.owned_targets : []),
+        uiTarget: sameBrowser ? saved.ui_tab : null };
+      // Only explicit login may open a browser WebSocket. A saved target may be
+      // resumed only when its browser WebSocket identity is unchanged.
+      let first;
+      if (entry.uiTarget && entry.owned.has(entry.uiTarget)) {
+        try {
+          first = await deps.attach(endpoint.host, endpoint.port, quiet, {
+            browserWSEndpoint: endpoint.browserWSEndpoint, targetId: entry.uiTarget,
+            closeTargetOnDispose: false, approvalWaitMs: 180000,
+          });
+          entry.authorized = true;
+        } catch (error) {
+          if (!/No target|target.*(?:not found|closed|does not exist)/i.test(error.message || '')) throw error;
+        }
+      }
+      if (!first) first = await newOwned(entry, 'https://chatgpt.com/', true);
+      entry.uiTarget = first.targetId;
+      await saveOwners(entry);
+      // Retain one page session so the approved shared browser connection stays
+      // available to Oracle's session-scoped helpers in this broker process.
+      entry.anchor = first;
+      first.client.on?.('disconnect', () => { entry.authorized = false; });
+      first.client._ws?.on?.('close', () => { entry.authorized = false; });
+      connections.set(request.state_dir, entry);
+      return deps.ui.prepareLoginPage(deps.ui.createNativePage(first.client));
+    }
+    const connection = await setupConnection(entry, true);
+    return withConnection(connection, page => deps.ui.prepareLoginPage(page));
+  }
+
+  async function migrateLegacy(request, journal) {
+    if (journal.version >= 2) return;
+    const base = path.join(request.state_dir, 'oracle/sessions');
+    const names = journal.session_id ? [journal.session_id] :
+      (await fs.readdir(base).catch(() => [])).filter(name => journal.slug && (name === journal.slug || name.startsWith(`${journal.slug}-`)));
+    for (const name of names) {
+      if (path.basename(name) !== name) continue;
+      const meta = await readJson(path.join(base, name, 'meta.json')).catch(() => null);
+      if (!meta) continue;
+      journal.session_id = name;
+      const runtime = meta.browser?.runtime;
+      const url = runtime?.tabUrl || runtime?.conversationUrl || meta.browser?.harvest?.url;
+      if (conversationURL(url)) journal.conversation_url = url;
+      journal.submitted_prompt_hash = runtime?.submittedPromptHash || journal.submitted_prompt_hash;
+      break;
     }
   }
-  await writeJson(activePath, { request_dir: request.request_dir, controller_pid: process.pid });
-  const promptFile = assertLocalPath(request.prompt_file, 'prompt_file');
-  const outputFile = assertLocalPath(request.output_file, 'output_file');
-  const prompt = await fs.readFile(promptFile, 'utf8');
-  if (!prompt.trim()) throw coded('INVALID_REQUEST', 'Empty translation prompt.');
-  const { context, port } = await connect(request.state_dir);
-  const page = await context.newPage();
-  await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
-  await page.locator('#prompt-textarea,textarea[name="prompt-textarea"]').first().waitFor({ state: 'visible', timeout: 30000 });
-  const options = await catalog(page, request.model || undefined, request.effort || undefined);
-  await ensureChat(page);
-  const target = await targetId(page);
-  const requestToken = hash(request.request_id || `${request.request_dir}:${randomUUID()}`).slice(0, 16);
-  const journal = { version: 1, status: 'dispatching', dispatch_started: true, created_at: new Date().toISOString(),
-    slug: `pdf-${requestToken.slice(0, 8)}-${requestToken.slice(8)}`, target_id: target, port,
-    prompt_hash: hash(prompt), output_file: outputFile, model: options.model, effort: options.effort };
-  await fs.mkdir(path.dirname(outputFile), { recursive: true });
-  await fs.mkdir(path.join(request.state_dir, 'oracle'), { recursive: true });
-  // Persist before spawn; a crash from here is ambiguous and must NEVER send again.
-  await writeJson(journalPath, journal);
-  const log = openSync(path.join(request.request_dir, 'oracle.log'), 'a');
-  let child;
-  try {
-    child = spawn(process.execPath, oracleArguments({ port, target, output: outputFile, slug: journal.slug, timeout: request.timeout_seconds || 900 }), {
-      cwd: request.state_dir, env: oracleEnvironment(request.state_dir), detached: true,
-      stdio: ['pipe', log, log], windowsHide: true,
+  async function completed(request, journal) {
+    if (!journal.output_file || !path.isAbsolute(journal.output_file)) return null;
+    const answer = await fs.readFile(journal.output_file, 'utf8').catch(() => '');
+    if (!answer.trim()) return null;
+    // Legacy detached CLI writes are not atomic; do not read its partial output.
+    if (journal.version < 2) {
+      if (alive(journal.oracle_pid)) return null;
+      await pause(120);
+      if (await fs.readFile(journal.output_file, 'utf8').catch(() => '') !== answer) return null;
+    } else if (journal.status !== 'complete') return null;
+    journal.status = 'complete';
+    await writeJson(path.join(request.request_dir, 'journal.json'), journal);
+    return { ok: true, status: 'complete', answer, model: journal.model, effort: journal.effort, ...identity(journal) };
+  }
+  async function persistAnswer(request, journal, answer) {
+    if (typeof answer !== 'string' || !answer.trim()) throw coded('EMPTY_RESPONSE', 'ChatGPT 没有返回可用译文。原批次已保留，不会重发。');
+    const temp = `${journal.output_file}.${process.pid}.tmp`;
+    await fs.mkdir(path.dirname(journal.output_file), { recursive: true });
+    await fs.writeFile(temp, answer, { mode: 0o600 });
+    await fs.rename(temp, journal.output_file);
+    journal.status = 'complete';
+    await writeJson(path.join(request.request_dir, 'journal.json'), journal);
+    return completed(request, journal);
+  }
+  async function capture(request, journal, connection, save) {
+    const Runtime = connection.client.Runtime;
+    const before = await deps.userTurn(Runtime);
+    if (conversationURL(before.url)) journal.conversation_url = before.url;
+    const matches = before.messageId && typeof before.text === 'string' && journal.submitted_prompt_hash &&
+      browserPromptFingerprint(before.text, before.messageId) === journal.submitted_prompt_hash &&
+      (!journal.prompt_normalized_hash || (before.count === 1 && hash(normalizedPrompt(before.text)) === journal.prompt_normalized_hash));
+    if (!matches) throw coded('RECOVERY_IDENTITY_UNVERIFIED', '无法确认该页面最后一条请求属于本批次，已暂停；不会重发或读取其他会话的回答。');
+    await save();
+    const conversationId = journal.conversation_url?.split('/').at(-1);
+    const answer = await deps.waitAnswer(Runtime, (request.timeout_seconds || 900) * 1000, quiet, journal.baseline_turns ?? 0, conversationId);
+    const after = await deps.userTurn(Runtime);
+    if (after.messageId !== before.messageId || browserPromptFingerprint(after.text, after.messageId) !== journal.submitted_prompt_hash ||
+        (journal.conversation_url && after.url !== journal.conversation_url)) {
+      throw coded('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时页面会话发生变化，已暂停。');
+    }
+    return persistAnswer(request, journal, answer.text);
+  }
+  async function recover(request) {
+    const journal = await readJournal(request.request_dir);
+    if (!journal?.dispatch_started) throw coded('NOT_SUBMITTED', '上次请求尚未提交，可以继续。', { not_submitted: true });
+    await migrateLegacy(request, journal);
+    const ready = await completed(request, journal);
+    if (ready) return ready;
+    if (journal.version < 2 && alive(journal.oracle_pid)) throw coded('BROWSER_BUSY', '旧版翻译进程仍在收取原回答，请等待后继续原文件；本批没有重发。');
+    if (!journal.submitted_prompt_hash) throw coded('RECOVERY_UNAVAILABLE', '本批已开始提交，但缺少可核验的请求记录。已保留原任务，不会再次发送。');
+    const entry = connected(request.state_dir);
+    let connection;
+    if (journal.browser_ws === entry.endpoint.browserWSEndpoint && entry.owned.has(journal.target_id)) {
+      connection = await attachOwned(entry, journal.target_id).catch(() => null);
+    }
+    if (!connection && conversationURL(journal.conversation_url)) connection = await newOwned(entry, journal.conversation_url);
+    if (!connection) throw coded('RECOVERY_UNAVAILABLE', '未能找回本批的软件标签页或已保存会话地址，已暂停以避免重复提交。');
+    journal.target_id = connection.targetId;
+    journal.browser_ws = entry.endpoint.browserWSEndpoint;
+    const save = () => writeJson(path.join(request.request_dir, 'journal.json'), journal);
+    return withConnection(connection, async page => {
+      await deps.promptReady(connection.client.Runtime, 30000, quiet);
+      await deps.ui.ensureChat(page);
+      return capture(request, journal, connection, save);
     });
-    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-    journal.oracle_pid = child.pid;
-    journal.status = 'running';
-    await writeJson(journalPath, journal);
-    child.stdin.on('error', () => {});
-    child.stdin.end(prompt);
-    child.unref();
-  } catch (error) {
-    // Only spawn failure proves that the prompt has never left this process.
-    if (!child?.pid) {
-      journal.dispatch_started = false;
-      journal.status = 'not_submitted';
-      await writeJson(journalPath, journal);
-      throw Object.assign(error, { not_submitted: true });
+  }
+  async function translate(request) {
+    const existing = await readJournal(request.request_dir);
+    if (existing?.dispatch_started) return recover(request);
+    const entry = connected(request.state_dir);
+    const prompt = await fs.readFile(localPath(request.prompt_file, 'prompt_file'), 'utf8');
+    if (!prompt.trim()) throw coded('INVALID_REQUEST', 'Empty translation prompt.');
+    const output = localPath(request.output_file, 'output_file');
+    const prior = await readJson(path.join(request.state_dir, 'active-request.json'));
+    if (prior?.request_dir && prior.request_dir !== request.request_dir) {
+      const legacy = await readJournal(prior.request_dir);
+      if (legacy?.dispatch_started && legacy.status !== 'complete' && alive(legacy.oracle_pid)) throw coded('BROWSER_BUSY', '上一批旧版翻译仍在运行，请先恢复原文件。');
     }
-    throw error;
-  } finally { closeSync(log); }
-  return awaitOracle(request, journal);
+    const connection = await newOwned(entry);
+    return withConnection(connection, async page => {
+      const { Runtime, Input } = connection.client;
+      await deps.promptReady(Runtime, 30000, quiet);
+      const selection = await deps.ui.catalog(page, request.model || undefined, request.effort || undefined);
+      await deps.ui.ensureChat(page);
+      const previousIds = await deps.readUserIds(Runtime, 5000);
+      const baseline = await evaluation(Runtime, buildConversationTurnCountExpression());
+      // Every submission uses an empty software-owned chat. A user moving that
+      // tab to another conversation must never append a translation there.
+      if (!Array.isArray(previousIds) || previousIds.length || baseline !== 0) throw coded('NEW_CHAT_REQUIRED', '翻译标签页不是空白新聊天，请重新连接后重试。');
+      const journal = { version: 2, transport: 'native-page', status: 'dispatching', dispatch_started: true,
+        created_at: new Date().toISOString(), session_id: `pdf-${randomUUID()}`, target_id: connection.targetId,
+        browser_ws: entry.endpoint.browserWSEndpoint, port: entry.endpoint.port, prompt_hash: hash(prompt), prompt_normalized_hash: hash(normalizedPrompt(prompt)),
+        output_file: output, model: selection.model, effort: selection.effort, baseline_turns: baseline, prompt_submitted: false };
+      const save = () => writeJson(path.join(request.request_dir, 'journal.json'), journal);
+      await save(); // A crash from here is ambiguous: never resubmit.
+      await writeJson(path.join(request.state_dir, 'active-request.json'), { request_dir: request.request_dir, controller_pid: process.pid });
+      const rememberSubmission = async timeout => {
+        const fingerprint = await deps.readFingerprint(Runtime, previousIds, timeout);
+        const current = await deps.userTurn(Runtime);
+        if (current.count !== 1 || typeof current.text !== 'string' || !current.messageId ||
+            hash(normalizedPrompt(current.text)) !== journal.prompt_normalized_hash ||
+            browserPromptFingerprint(current.text, current.messageId) !== fingerprint ||
+            browserPromptFingerprint(prompt, current.messageId) !== fingerprint) {
+          throw coded('RECOVERY_IDENTITY_UNVERIFIED', '网页上的已发送文字与本批翻译不匹配，已暂停且不会重发。');
+        }
+        journal.submitted_prompt_hash = fingerprint;
+        if (conversationURL(current.url)) journal.conversation_url = current.url;
+      };
+      try {
+        // Use only Oracle's page-bound helpers. runBrowserMode performs global
+        // cookie cleanup and tab discovery; neither belongs in a shared browser.
+        // This call is intentionally never wrapped in a submission retry.
+        // No Page argument: Oracle otherwise calls bringToFront for each batch.
+        await deps.submit({ runtime: Runtime, input: Input, baselineTurns: baseline,
+          inputTimeoutMs: 30000, attachmentNames: [], webSearch: false,
+          onPromptSubmitted: async () => { journal.prompt_submitted = true; journal.status = 'running'; await save(); },
+        }, prompt, quiet);
+        await rememberSubmission(30000);
+        await save();
+        return await capture(request, journal, connection, save);
+      } catch (error) {
+        // The callback may run before the user turn commits. Harvest its identity
+        // after a failed wait when possible, but never issue another submission.
+        if (!journal.submitted_prompt_hash) await rememberSubmission(0).catch(() => {});
+        const current = await deps.userTurn(Runtime).catch(() => null);
+        if (conversationURL(current?.url)) journal.conversation_url = current.url;
+        journal.status = 'paused';
+        await save();
+        throw error;
+      }
+    });
+  }
+  async function dispatch(request) {
+    if (!request || typeof request !== 'object') throw coded('INVALID_REQUEST', 'JSON request object required.');
+    request.state_dir = localPath(request.state_dir, 'state_dir');
+    if (['translate', 'recover'].includes(request.op)) request.request_dir = localPath(request.request_dir, 'request_dir');
+    const ongoing = active.get(request.state_dir);
+    if (ongoing) {
+      if (ongoing === request.request_dir && pending.has(ongoing)) return pending.get(ongoing);
+      throw coded('BROWSER_BUSY', '上一批仍在浏览器中运行或收取回答，请先继续原文件。');
+    }
+    if (request.op === 'login') return login(request);
+    if (['translate', 'recover'].includes(request.op)) {
+      active.set(request.state_dir, request.request_dir);
+      const work = (request.op === 'translate' ? translate(request) : recover(request));
+      pending.set(request.request_dir, work);
+      try { return await work; }
+      finally { pending.delete(request.request_dir); active.delete(request.state_dir); }
+    }
+    if (!['status', 'catalog', 'select'].includes(request.op)) throw coded('INVALID_REQUEST', 'Unknown operation.');
+    const entry = connected(request.state_dir);
+    const connection = await setupConnection(entry, request.op !== 'status');
+    if (!connection) return { ok: true, status: 'needs_login', message: '翻译软件的标签页已关闭，请点击“连接已登录的 Chrome”重新打开。' };
+    return withConnection(connection, async page => {
+      if (request.op === 'status') return deps.ui.connectionStatus(await deps.ui.inspectPage(page));
+      const result = await deps.ui.catalog(page, request.model || undefined, request.effort || undefined);
+      return { ok: true, status: 'ready', message: '已从已登录账号读取可用模型和推理强度。', ...result };
+    });
+  }
+  async function run(request) {
+    try { return await dispatch({ ...request }); }
+    catch (error) {
+      let unreadable = false;
+      const journal = request?.request_dir ? await readJournal(request.request_dir).catch(() => { unreadable = true; return null; }) : null;
+      return { ok: false, status: error.status || 'paused', error_code: error.code || 'BROWSER_ERROR', message: error.message,
+        ...(journal ? identity(journal) : {}),
+        not_submitted: !unreadable && (error.not_submitted === true || (['translate', 'recover'].includes(request?.op) && !journal?.dispatch_started)) };
+    }
+  }
+  return { run };
 }
 
-async function recover(request) {
-  request.request_dir = assertLocalPath(request.request_dir, 'request_dir');
-  const journalPath = path.join(request.request_dir, 'journal.json');
-  const journal = await readJournal(request.request_dir);
-  if (!journal?.dispatch_started) throw Object.assign(coded('NOT_SUBMITTED', '上次请求尚未提交，可以继续。'), { not_submitted: true });
-  await updateSession(request, journal);
-  const ready = await completedFile(request, journal);
-  if (ready) return ready;
-  const { context, port } = await connect(request.state_dir);
-  if (journal.oracle_pid && alive(journal.oracle_pid) && journal.port === port) return awaitOracle(request, journal);
-  let page = await findOwnedTab(context, journal.target_id);
-  if (!page && isConversationUrl(journal.conversation_url)) {
-    page = await context.newPage();
-    await page.goto(journal.conversation_url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(1200);
-    journal.target_id = await targetId(page);
-  }
-  if (!page) throw Object.assign(coded('RECOVERY_UNAVAILABLE', '未能找回已提交批次的会话地址。为避免重复扣额，本批没有重发；详情保存在本地 oracle.log。'), identityFields(journal));
-  const { harvestChatGptTab } = await import(pathToFileURL(path.join(ORACLE, 'dist/src/browser/liveTabs.js')).href);
-  const { browserPromptFingerprint } = await import(pathToFileURL(path.join(ORACLE, 'dist/src/browser/promptFingerprint.js')).href);
-  const deadline = Date.now() + (request.timeout_seconds || 900) * 1000;
-  while (Date.now() < deadline) {
-    const harvested = await harvestChatGptTab({ host: '127.0.0.1', port, ref: journal.target_id });
-    if (isConversationUrl(harvested.url)) journal.conversation_url = harvested.url;
-    const answer = harvested.lastAssistantMarkdown || harvested.lastAssistantText;
-    const matching = journal.submitted_prompt_hash && harvested.lastUserMessageId &&
-      [harvested.lastUserTextRaw, harvested.lastUserContentText].some(text => typeof text === 'string' && browserPromptFingerprint(text, harvested.lastUserMessageId) === journal.submitted_prompt_hash);
-    if (!harvested.stopExists && harvested.assistantFollowsLatestUser && answer?.trim() && matching) {
-      await fs.writeFile(journal.output_file, answer, { mode: 0o600 });
-      return completedFile(request, journal);
-    }
-    if (!harvested.authenticated || harvested.loginButtonExists) throw coded('LOGIN_REQUIRED', '登录已失效，请重新登录后恢复原批次。');
-    if (!harvested.stopExists && answer?.trim() && !matching) throw Object.assign(coded('RECOVERY_IDENTITY_UNVERIFIED', '原回答与本批的对应关系无法确认，已暂停；不会重发或采用其他会话的回答。'), identityFields(journal));
-    await writeJson(journalPath, journal);
-    await pause(1500);
-  }
-  throw Object.assign(coded('RECOVERY_REQUIRED', '原会话仍未完成，请稍后继续恢复。'), identityFields(journal));
-}
-
-export async function run(request) {
-  request.state_dir = assertLocalPath(request.state_dir, 'state_dir');
-  await fs.mkdir(request.state_dir, { recursive: true });
-  if (request.op === 'login') return login(request);
-  if (request.op === 'translate') return translate(request);
-  if (request.op === 'recover') return recover(request);
-  if (!['status', 'catalog', 'select'].includes(request.op)) throw coded('INVALID_REQUEST', 'Unknown operation.');
-  const { context } = await connect(request.state_dir);
-  const page = await uiTab(request.state_dir, context, request.op !== 'status');
-  if (request.op === 'status') {
-    if (!page) return { ok: true, status: 'needs_login', message: '专用登录标签页已关闭。请点“登录 ChatGPT / 打开登录窗口”重新打开。' };
-    const evidence = await inspectPage(page);
-    return connectionStatus(evidence);
-  }
-  const result = await catalog(page, request.model || undefined, request.effort || undefined);
-  return { ok: true, status: 'ready', message: '已从当前登录账号的网页读取可用模型和推理强度。', ...result };
-}
+export const run = createBridge().run;
 
 async function main() {
-  let request;
   try {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
-    request = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, ''));
-    const result = await run(request);
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    const request = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, ''));
+    const { invokeBroker } = await import('./broker.mjs');
+    process.stdout.write(`${JSON.stringify(await invokeBroker(request))}\n`);
   } catch (error) {
-    let journalUnreadable = false;
-    const journal = request?.request_dir ? await readJournal(request.request_dir).catch(() => { journalUnreadable = true; return null; }) : null;
-    process.stdout.write(`${JSON.stringify({ ok: false, status: error.status || 'paused', error_code: error.code || 'BROWSER_ERROR', message: error.message,
-      ...(journal ? identityFields(journal) : {}), ...(error.session_id ? { session_id: error.session_id } : {}),
-      ...(error.conversation_url ? { conversation_url: error.conversation_url } : {}),
-      not_submitted: !journalUnreadable && (error.not_submitted === true || ((request?.op === 'translate' || request?.op === 'recover') && !journal?.dispatch_started)),
-    })}\n`);
-  } finally {
-    // For a CDP connection Playwright closes its connection only, not the user's browser.
-    if (browser) await browser.close().catch(() => {});
-    if (dispatchLock) await fs.unlink(dispatchLock).catch(() => {});
+    process.stdout.write(`${JSON.stringify({ ok: false, status: 'paused', error_code: error.code || 'BROKER_ERROR', message: error.message, not_submitted: false })}\n`);
   }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

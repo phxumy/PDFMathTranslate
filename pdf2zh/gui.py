@@ -912,11 +912,11 @@ with gr.Blocks(
                 )
             with gr.Column(visible=False) as chatgpt_panel:
                 with gr.Row():
-                    chatgpt_login_btn = gr.Button("登录 ChatGPT / 打开登录窗口")
+                    chatgpt_login_btn = gr.Button("连接已登录的 Chrome")
                     chatgpt_refresh_btn = gr.Button("刷新模型与连接状态")
                 chatgpt_status = gr.Textbox(
                     label="ChatGPT 连接状态",
-                    value="请打开登录窗口；登录完成后点击刷新模型。",
+                    value="请先在普通 Chrome 登录 ChatGPT，开启远程调试，再点击连接并允许 Chrome 弹窗。",
                     interactive=False,
                     lines=2,
                 )
@@ -925,7 +925,7 @@ with gr.Blocks(
                     choices=[],
                     value=None,
                     interactive=False,
-                    info="从当前账号网页读取可用模型，登录后刷新。",
+                    info="从已连接 Chrome 的当前账号读取可用模型。",
                 )
                 chatgpt_effort = gr.Dropdown(
                     label="推理强度",
@@ -935,8 +935,12 @@ with gr.Blocks(
                     info="随模型变化；网页未提供此选项时保持空白。",
                 )
                 gr.Markdown(
-                    "独立浏览器保存登录，翻译时请保持运行。登录有效时下次可直接连接。"
-                    "中断后重新连接，并对同一文件点击翻译，可续用已保存译文。"
+                    "首次连接：在普通 **Google Chrome** 登录 ChatGPT，"
+                    "在地址栏输入 `chrome://inspect/#remote-debugging` 并开启远程调试。"
+                    "点击上方连接按钮后，在 Chrome 弹窗选择**允许**，再刷新模型。\n\n"
+                    "翻译时保持 Chrome 运行。软件使用自己的翻译标签，不操作已有聊天；"
+                    "账号和部分模型偏好会共享。关闭软件不清除登录，重新连接可能再次要求允许。"
+                    "中断后重新连接，对同一文件点击翻译可恢复已有批次。"
                 )
             with gr.Row():
                 lang_from = gr.Dropdown(

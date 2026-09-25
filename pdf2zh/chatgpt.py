@@ -1,8 +1,8 @@
 """ChatGPT's signed-in browser transport, with durable, non-resubmitting recovery.
 
-The companion owns a dedicated Chrome profile. This module never reads browser
-cookies or Codex credentials, and never calls a model API. Scientific translation
-and PDF layout continue to use the same rules as the existing Codex backend.
+The companion attaches to Chrome through its user-approved local connection.
+It never copies browser cookies or Codex credentials, and never calls a model
+API. Scientific translation and PDF layout keep the existing shared rules.
 """
 
 from __future__ import annotations
@@ -202,8 +202,8 @@ def _invoke_bridge(
         ) from exc
     finally:
         if process is not None and process.poll() is None:
-            # Stop only this controller. Chrome and any submitted Oracle capture
-            # are independently owned and can be recovered from the journal.
+            # Stop only this client. The persistent local connection worker can
+            # finish collecting a submitted turn and save it for recovery.
             process.terminate()
             try:
                 process.communicate(timeout=3)
@@ -216,7 +216,9 @@ def _invoke_bridge(
 def _ui_operation(op: str, *, cancellable=False, **kwargs) -> dict:
     try:
         result = _invoke_bridge(
-            {"op": op, **kwargs}, timeout=75, cancellable=cancellable
+            {"op": op, **kwargs},
+            timeout=210 if op == "login" else 120,
+            cancellable=cancellable,
         )
         result.setdefault("models", [])
         result.setdefault("efforts", [])

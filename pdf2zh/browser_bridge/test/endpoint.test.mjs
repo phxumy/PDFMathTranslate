@@ -1,34 +1,29 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import os from 'node:os';
-import http from 'node:http';
-import { browserEndpoint } from '../endpoint.mjs';
+import { browserEndpoint, validateNativeEndpoint } from '../endpoint.mjs';
 
-test('stale Chrome port file recovers only through owned-process discovery and caches socket identity', async () => {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'pdf2zh-endpoint-'));
-  const profile = path.join(state, 'chrome-profile');
-  const server = http.createServer((req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ Browser: 'Chrome/153.0', webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/owned` }));
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  try {
-    await fs.mkdir(profile);
-    const port = server.address().port;
-    await fs.writeFile(path.join(profile, 'DevToolsActivePort'), `${port}\n/devtools/browser/old-instance`);
-    assert.equal(await browserEndpoint(state, { discover: async () => [] }), null);
-    let discoveries = 0;
-    const discover = async candidate => { assert.equal(candidate, profile); discoveries++; return [port]; };
-    assert.equal((await browserEndpoint(state, { discover })).port, port);
-    assert.equal((await browserEndpoint(state, { discover })).socketPath, '/devtools/browser/owned');
-    assert.equal(discoveries, 1);
-    await fs.writeFile(path.join(state, 'browser-endpoint.json'), JSON.stringify({ port, socketPath: '/devtools/browser/wrong' }));
-    assert.equal(await browserEndpoint(state, { discover: async () => [] }), null);
-  } finally {
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
-    await fs.rm(state, { recursive: true, force: true });
+test('native discovery accepts loopback browser WebSocket without HTTP probing or profile copying', async () => {
+  let calls = 0;
+  const endpoint = await browserEndpoint('unused', { port: 9222, resolve: async config => {
+    calls++;
+    assert.equal(config.attachRunning, true);
+    assert.deepEqual(config.remoteChrome, { host: '127.0.0.1', port: 9222 });
+    return { host: '127.0.0.1', port: 9222, browserWSEndpoint: 'ws://127.0.0.1:9222/devtools/browser/native-fixture', profileRoot: 'not copied' };
+  } });
+  assert.equal(calls, 1);
+  assert.equal(endpoint.browserWSEndpoint, 'ws://127.0.0.1:9222/devtools/browser/native-fixture');
+  assert.equal('profileRoot' in endpoint, false);
+});
+test('native discovery fails closed for nonlocal, credentialed, wrong-port or wrong-target endpoints', () => {
+  for (const browserWSEndpoint of ['ws://example.com:9222/devtools/browser/x', 'ws://127.0.0.1:9000/devtools/browser/x', 'ws://a:b@127.0.0.1:9222/devtools/browser/x', 'ws://127.0.0.1:9222/devtools/page/x', 'ws://127.0.0.1:9222/devtools/browser/x?token=x']) {
+    assert.equal(validateNativeEndpoint({ host: '127.0.0.1', port: 9222, browserWSEndpoint }, 9222), null);
   }
+});
+test('disabled native debugging returns actionable guidance and cannot launch Chrome', async () => {
+  await assert.rejects(browserEndpoint('unused', { port: 9222, resolve: async () => { throw new Error('not listening'); } }), error => {
+    assert.equal(error.code, 'NATIVE_DEBUGGING_REQUIRED');
+    assert.equal(error.status, 'needs_connection');
+    assert.match(error.message, /chrome:\/\/inspect\/#remote-debugging/);
+    return true;
+  });
 });
