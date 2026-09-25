@@ -52,6 +52,7 @@ export async function inspectPage(page) {
     const authError = Boolean(authPage && !composer && (routeError || genericAuthError));
     return {
       url: location.href, home: location.pathname === '/', composer, login,
+      automatedBrowser: navigator.webdriver === true,
       authPage, authError, authHttpStatus: authError && Number(verifyStatus) === 403 ? 403 : null,
       chatSelected: !!selected(chat), workSelected: !!selected(work), hasModeControls: !!(chat || work),
       workPath: /^\/(work|agent)(\/|$)/i.test(location.pathname),
@@ -64,7 +65,9 @@ export async function inspectPage(page) {
 }
 
 export function connectionStatus(evidence) {
-  if (evidence.challenge) return { ok: false, status: 'verification_required', error_code: 'VERIFY_REQUIRED', message: 'ChatGPT 正在等待网页人机验证，翻译尚未开始。请在浏览器完成验证；若反复回到此页面，请先检查同一网络下日常浏览器能否访问，不要反复点击登录或刷新。' };
+  if (evidence.challenge) return { ok: false, status: 'verification_required', error_code: 'VERIFY_REQUIRED', message: evidence.automatedBrowser
+    ? 'ChatGPT 停在网页人机验证，当前浏览器被识别为程序控制环境。此接入方式尚未通过网站验证，翻译已暂停；请勿反复点击登录或刷新。'
+    : 'ChatGPT 正在等待网页人机验证，翻译尚未开始。请在浏览器完成验证；若反复回到此页面，请先检查同一网络下日常浏览器能否访问，不要反复点击登录或刷新。' };
   if (evidence.authError) {
     return { ok: false, status: 'auth_error', error_code: 'AUTH_PAGE_ERROR',
       message: evidence.authHttpStatus === 403

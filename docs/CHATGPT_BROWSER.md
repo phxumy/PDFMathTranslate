@@ -21,6 +21,8 @@
 
 如果停留在“请稍候…”人机验证页，软件会暂停并显示等待验证。即使页面同时保留旧错误信息，点击登录也不会重新加载正在验证的页面。验证反复出现时，浏览器接入尚不可用；界面测试通过不代表网站一定接受当前浏览器会话。Cloudflare 的[官方排错说明](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)列出了网络、浏览器配置和检测误判等原因；其[浏览器支持说明](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/)也明确指出不支持自动化浏览器完成生产环境验证。
 
+本机在 2026-09-25 使用[Cloudflare 官方兼容性检测](https://debug.challenges.cloudflare.com/)得到 `Automated Browser Detected`，确认专用浏览器暴露程序控制状态。普通浏览器可打开 ChatGPT，但本模式真实登录仍被验证拦住。当前版本保留此实验入口并暂停翻译，未伪装浏览器或绕过验证。
+
 Windows 下，如果 Chrome 重启后保存的调试端口过期，程序会从使用本软件专用配置的 Chrome 主进程查找实际监听端口，并校验连接身份。不会接管日常浏览器。
 
 ## 关闭、取消与继续

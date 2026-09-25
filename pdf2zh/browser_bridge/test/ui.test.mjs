@@ -122,6 +122,7 @@ test('localized challenge takes precedence over auth errors and Login does not r
     });
     await page.goto('https://auth.openai.com/log-in/password');
     assert.equal(connectionStatus(await inspectPage(page)).status, 'verification_required');
+    assert.match(connectionStatus(await inspectPage(page)).message, /程序控制环境/);
     assert.equal((await prepareLoginPage(page)).status, 'verification_required');
     assert.equal(navigations, 1);
     await page.setContent('<title>请稍等</title><h1>正在验证</h1>');
