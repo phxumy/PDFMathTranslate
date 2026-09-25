@@ -16,11 +16,12 @@ from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 from pdfminer.utils import Matrix, apply_matrix_pt, mult_matrix
 from pymupdf import Font
-from tenacity import retry, wait_fixed, stop_after_attempt
+from tenacity import retry, retry_if_exception, wait_fixed, stop_after_attempt
 
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.identity_layout import orcid_list_chars
+from pdf2zh.codex_errors import CodexPermanentError
 from pdf2zh.source_spelling import normalize_source_wraps
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
@@ -93,6 +94,10 @@ from pdf2zh.reading_flow import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _retryable_translation_error(error: BaseException) -> bool:
+    return isinstance(error, Exception) and not isinstance(error, CodexPermanentError)
 
 
 ITALIC_TAG_PREFIX = "[[PDF2ZH_ITALIC_"
@@ -3085,7 +3090,9 @@ class TranslateConverter(PDFConverterEx):
             )
         sstk, literal_replacements = self._mask_protected_literal_batch(sstk)
 
-        @retry(wait=wait_fixed(1))
+        @retry(
+            wait=wait_fixed(1), retry=retry_if_exception(_retryable_translation_error)
+        )
         def worker(s: str):
             if self._is_passthrough_text(s):
                 return s
@@ -3098,7 +3105,11 @@ class TranslateConverter(PDFConverterEx):
                     log.exception(e, exc_info=False)
                 raise e
 
-        @retry(wait=wait_fixed(1), stop=stop_after_attempt(3))
+        @retry(
+            wait=wait_fixed(1),
+            stop=stop_after_attempt(3),
+            retry=retry_if_exception(_retryable_translation_error),
+        )
         def batch_worker(texts: list[str]):
             try:
                 translated = self.translator.translate_batch(texts)
@@ -3114,7 +3125,11 @@ class TranslateConverter(PDFConverterEx):
                     log.exception(e, exc_info=False)
                 raise e
 
-        @retry(wait=wait_fixed(1), stop=stop_after_attempt(3))
+        @retry(
+            wait=wait_fixed(1),
+            stop=stop_after_attempt(3),
+            retry=retry_if_exception(_retryable_translation_error),
+        )
         def contextual_batch_worker(
             texts: list[str],
             contexts: list[dict[str, str]],
@@ -3220,7 +3235,11 @@ class TranslateConverter(PDFConverterEx):
             normalized_entries
         )
 
-        @retry(wait=wait_fixed(1), stop=stop_after_attempt(3))
+        @retry(
+            wait=wait_fixed(1),
+            stop=stop_after_attempt(3),
+            retry=retry_if_exception(_retryable_translation_error),
+        )
         def reference_worker(
             texts: list[str], contexts: list[str]
         ) -> list[str]:

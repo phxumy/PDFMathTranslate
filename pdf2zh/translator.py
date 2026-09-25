@@ -28,6 +28,12 @@ from tencentcloud.tmt.v20180321.models import (
 from tencentcloud.tmt.v20180321.tmt_client import TmtClient
 
 from pdf2zh.cache import TranslationCache
+from pdf2zh.codex_errors import (
+    CodexPermanentError,
+    CodexTimeoutError,
+    CodexOutputError,
+    codex_cli_error,
+)
 from pdf2zh.source_segmentation import scientific_sentence_parts, safe_chunk_boundary
 from pdf2zh.config import ConfigManager
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START
@@ -1745,7 +1751,7 @@ class CodexTranslator(BaseTranslator):
                     preserve_edge_whitespace=True,
                 ),
             )
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             return None
 
     def _build_styled_batch_prompt(
@@ -2014,12 +2020,17 @@ class CodexTranslator(BaseTranslator):
 
     def _load_json_output(self, output_path: str) -> dict:
         if not os.path.exists(output_path):
-            raise RuntimeError("Codex translator did not produce an output file.")
+            raise CodexOutputError("Codex translator did not produce an output file.")
         try:
             with open(output_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                payload = json.load(f)
+                if not isinstance(payload, dict):
+                    raise CodexOutputError(
+                        "Codex translator output must be a JSON object."
+                    )
+                return payload
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex translator returned invalid JSON output."
             ) from exc
 
@@ -2027,7 +2038,7 @@ class CodexTranslator(BaseTranslator):
         payload = self._load_json_output(output_path)
         translation = payload.get("translation")
         if not isinstance(translation, str) or not translation.strip():
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex translator output is missing the required 'translation' field."
             )
         return self._normalize_translation_output(translation.strip())
@@ -2042,15 +2053,17 @@ class CodexTranslator(BaseTranslator):
         payload = self._load_json_output(output_path)
         translations = payload.get("translations")
         if not isinstance(translations, list):
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex translator output is missing the required 'translations' field."
             )
         if len(translations) != expected_count:
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex translator batch output must have the same length as the input."
             )
         if any(not isinstance(item, str) or not item.strip() for item in translations):
-            raise RuntimeError("Codex translator batch output contains empty items.")
+            raise CodexOutputError(
+                "Codex translator batch output contains empty items."
+            )
         return [
             self._normalize_translation_output(
                 item if preserve_edge_whitespace else item.strip()
@@ -2063,21 +2076,23 @@ class CodexTranslator(BaseTranslator):
     ) -> list[list[ExactReplacement]]:
         payload = self._load_json_output(output_path)
         if not isinstance(payload, dict):
-            raise RuntimeError("Codex reference-title output must be a JSON object.")
+            raise CodexOutputError(
+                "Codex reference-title output must be a JSON object."
+            )
         items = payload.get("title_translations")
         if not isinstance(items, list):
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex reference-title output is missing 'title_translations'."
             )
         if len(items) != expected_count:
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex reference-title output must have the same length as the input."
             )
 
         indexed_replacements: dict[int, list[ExactReplacement]] = {}
         for item in items:
             if not isinstance(item, dict):
-                raise RuntimeError(
+                raise CodexOutputError(
                     "Codex reference-title output contains an invalid item."
                 )
             index = item.get("index")
@@ -2088,13 +2103,13 @@ class CodexTranslator(BaseTranslator):
                 or not isinstance(replacements, list)
                 or index in indexed_replacements
             ):
-                raise RuntimeError(
+                raise CodexOutputError(
                     "Codex reference-title output contains invalid fields."
                 )
             parsed_replacements: list[ExactReplacement] = []
             for replacement in replacements:
                 if not isinstance(replacement, dict):
-                    raise RuntimeError(
+                    raise CodexOutputError(
                         "Codex reference-title output contains an invalid replacement."
                     )
                 source_title = replacement.get("source_title")
@@ -2105,7 +2120,7 @@ class CodexTranslator(BaseTranslator):
                     or not isinstance(translated_title, str)
                     or not translated_title
                 ):
-                    raise RuntimeError(
+                    raise CodexOutputError(
                         "Codex reference-title output contains invalid title fields."
                     )
                 parsed_replacements.append(
@@ -2115,7 +2130,7 @@ class CodexTranslator(BaseTranslator):
 
         expected_indices = set(range(1, expected_count + 1))
         if set(indexed_replacements) != expected_indices:
-            raise RuntimeError(
+            raise CodexOutputError(
                 "Codex reference-title output contains invalid or missing indices."
             )
         return [indexed_replacements[index] for index in range(1, expected_count + 1)]
@@ -2154,11 +2169,11 @@ class CodexTranslator(BaseTranslator):
                         **codex_subprocess_window_kwargs(),
                     )
                 except FileNotFoundError as exc:
-                    raise RuntimeError(
+                    raise CodexPermanentError(
                         f"codex executable not found: {self.codex_bin}"
                     ) from exc
                 except subprocess.TimeoutExpired as exc:
-                    raise RuntimeError(
+                    raise CodexTimeoutError(
                         f"Codex translator timed out after {self.timeout} seconds."
                     ) from exc
 
@@ -2170,9 +2185,7 @@ class CodexTranslator(BaseTranslator):
                 detail = (
                     result.stderr.strip() or result.stdout.strip() or "unknown error"
                 )
-                last_error = RuntimeError(
-                    f"Codex translator failed with exit code {result.returncode}: {detail}"
-                )
+                last_error = codex_cli_error(result.returncode, detail)
                 if (
                     mode == "fast"
                     and "compat" in modes
@@ -2282,7 +2295,7 @@ class CodexTranslator(BaseTranslator):
                     output_path, len(texts)
                 ),
             )
-        except RuntimeError as exc:
+        except (CodexOutputError, CodexTimeoutError):
             if len(texts) == 1:
                 return [
                     self._run_single_translation(
@@ -2290,14 +2303,6 @@ class CodexTranslator(BaseTranslator):
                         require_complete_translation=require_complete_translation,
                     )
                 ]
-            detail = str(exc)
-            if (
-                "translations" not in detail
-                and "same length" not in detail
-                and "empty items" not in detail
-                and "timed out" not in detail
-            ):
-                raise
             midpoint = len(texts) // 2
             return self._run_batch_translation(
                 texts[:midpoint],
@@ -2351,7 +2356,7 @@ class CodexTranslator(BaseTranslator):
                     len(texts),
                 ),
             )
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             if len(texts) == 1:
                 logger.warning(
                     "Codex could not return a valid formula-context translation; "
@@ -2423,7 +2428,7 @@ class CodexTranslator(BaseTranslator):
                 [source],
                 require_complete_translation=True,
             )[0]
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             ordinary = None
         accepted = self._accepted_contextual_translation(
             source,
@@ -2477,7 +2482,7 @@ class CodexTranslator(BaseTranslator):
                 prose_spans,
                 require_complete_translation=True,
             )
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             return None
         if len(translated_spans) != len(prose_spans):
             return None
@@ -2532,7 +2537,7 @@ class CodexTranslator(BaseTranslator):
                 [masked_source],
                 require_complete_translation=True,
             )[0]
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             return None
         accepted_masked = self._accepted_translation(
             masked_source,
@@ -3131,7 +3136,7 @@ class CodexTranslator(BaseTranslator):
                     len(texts),
                 ),
             )
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             if len(texts) == 1:
                 logger.warning(
                     "Codex could not return a valid styled translation; "
@@ -3429,7 +3434,7 @@ class CodexTranslator(BaseTranslator):
                     len(titles),
                 ),
             )
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             if len(titles) == 1:
                 logger.warning(
                     "Codex could not safely translate an exact quoted reference "
@@ -3453,7 +3458,7 @@ class CodexTranslator(BaseTranslator):
                     output_path, len(entries)
                 ),
             )
-        except RuntimeError:
+        except (CodexOutputError, CodexTimeoutError):
             if len(entries) == 1:
                 logger.warning(
                     "Codex could not safely identify a reference title; "
@@ -3524,7 +3529,7 @@ class CodexTranslator(BaseTranslator):
                         fallback_sources,
                         require_complete_translation=True,
                     )
-                except RuntimeError:
+                except (CodexOutputError, CodexTimeoutError):
                     fallback_titles = [None] * len(fallback_sources)
                 for index, fallback_title in zip(
                     fallback_indices,
@@ -3793,7 +3798,7 @@ class CodexTranslator(BaseTranslator):
                     text,
                     require_complete_translation=require_complete_translation,
                 )
-            except RuntimeError:
+            except (CodexOutputError, CodexTimeoutError):
                 if require_complete_translation:
                     raise
                 continue
