@@ -668,6 +668,155 @@ def _should_attach_unlabelled_closing_punctuation(
     )
 
 
+def _touching_text_glyphs(
+    left: LTChar, right: LTChar, *, max_gap: float = 0.12
+) -> bool:
+    """Recognize horizontal glyphs from one continuous, same-font text run."""
+
+    size = float(left.size)
+    return (
+        size > 0
+        and left.fontname == right.fontname
+        and abs(float(right.size) - size) <= 0.05 * size
+        and abs(float(right.y0) - float(left.y0)) <= 0.10 * size
+        and all(
+            not _is_non_horizontal_text_matrix(char.matrix) for char in (left, right)
+        )
+        and -0.05 * size <= float(right.x0) - float(left.x1) <= max_gap * size
+    )
+
+
+def _recover_detector_boundary_text(
+    chars: list[LTChar],
+    layout: np.ndarray,
+    region_types: dict[int, str],
+    protected_ids: set[int],
+    is_formula: Callable[[str, str], bool],
+) -> dict[int, int]:
+    """Recover complete words and reference labels clipped by text-box edges.
+
+    Detector edges are not linguistic boundaries. Only bridge touching source
+    glyphs between plain-text/background regions; never move protected glyphs,
+    formulas, other region types, or text across a real source space.
+    """
+
+    height, width = layout.shape
+    classes = [
+        int(
+            layout[
+                min(max(int(c.y0), 0), height - 1), min(max(int(c.x0), 0), width - 1)
+            ]
+        )
+        for c in chars
+    ]
+
+    def eligible(index: int) -> bool:
+        char = chars[index]
+        cls = classes[index]
+        return (
+            object_id(char) not in protected_ids
+            and (cls == 1 or (cls > 1 and region_types.get(cls) == "plain text"))
+            and not is_formula(char.fontname, char.get_text())
+            and not getattr(char, "_pdf2zh_scan_fragment", False)
+        )
+
+    recovered: dict[int, int] = {}
+    for index, char in enumerate(chars):
+        if char.get_text() != "[" or classes[index] != 1 or not eligible(index):
+            continue
+        # A full numbered marker followed by an author-like capital is required;
+        # arbitrary parentheses and mathematical bracket expressions stay put.
+        cursor = index + 1
+        digits = 0
+        target_class = classes[cursor] if cursor < len(chars) else 1
+        while cursor < len(chars) and digits < 4:
+            candidate = chars[cursor]
+            if (
+                re.fullmatch(r"[0-9]", candidate.get_text()) is None
+                or classes[cursor] != target_class
+                or not eligible(cursor)
+                or not _touching_text_glyphs(chars[cursor - 1], candidate)
+            ):
+                break
+            digits += 1
+            cursor += 1
+        if (
+            digits == 0
+            or target_class <= 1
+            or cursor + 1 >= len(chars)
+            or chars[cursor].get_text() != "]"
+            or classes[cursor] != target_class
+            or not eligible(cursor)
+            or not _touching_text_glyphs(chars[cursor - 1], chars[cursor])
+        ):
+            continue
+        following = cursor + 1
+        while following < len(chars) and chars[following].get_text() == " ":
+            following += 1
+        if (
+            following < len(chars)
+            and re.fullmatch(r"[A-Z]", chars[following].get_text())
+            and classes[following] == target_class
+            and eligible(following)
+            and _touching_text_glyphs(chars[cursor], chars[following], max_gap=0.8)
+            and float(chars[following].x0) - float(chars[cursor].x1)
+            >= 0.15 * chars[cursor].size
+        ):
+            recovered[object_id(char)] = target_class
+
+    index = 0
+    while index < len(chars):
+        start = index
+        if (
+            not eligible(index)
+            or re.fullmatch(r"[A-Za-z]", chars[index].get_text()) is None
+        ):
+            index += 1
+            continue
+        index += 1
+        while (
+            index < len(chars)
+            and eligible(index)
+            and re.fullmatch(r"[A-Za-z]", chars[index].get_text()) is not None
+            and _touching_text_glyphs(chars[index - 1], chars[index])
+        ):
+            index += 1
+        run_classes = classes[start:index]
+        word = "".join(char.get_text() for char in chars[start:index])
+        if (
+            len(word) < 3
+            or not any(c.islower() for c in word)
+            or len(set(run_classes)) < 2
+        ):
+            continue
+        target_class = next((cls for cls in run_classes if cls > 1), None)
+        if target_class is None:
+            continue
+        # Require preceding prose on the same source line. An isolated Roman
+        # mathematical label must not become prose merely by touching a box.
+        previous = start - 1
+        while previous >= 0 and chars[previous].get_text() == " ":
+            previous -= 1
+        if (
+            previous < 1
+            or not eligible(previous)
+            or not eligible(previous - 1)
+            or classes[previous] != target_class
+            or classes[previous - 1] != target_class
+            or any(
+                re.fullmatch(r"[A-Za-z]", chars[pos].get_text()) is None
+                for pos in (previous - 1, previous)
+            )
+            or not _touching_text_glyphs(chars[previous - 1], chars[previous])
+            or not _touching_text_glyphs(chars[previous], chars[start], max_gap=0.8)
+            or float(chars[start].x0) - float(chars[previous].x1)
+            < 0.15 * chars[start].size
+        ):
+            continue
+        recovered.update((object_id(char), target_class) for char in chars[start:index])
+    return recovered
+
+
 def _should_bridge_cross_class_inline_script(
     previous: LTChar | None,
     candidate: LTChar,
@@ -3928,6 +4077,16 @@ class TranslateConverter(PDFConverterEx):
         # A. 原文档解析
         code_chars = code_block_chars(ltpage)
         identity_chars = orcid_list_chars(ltpage)
+        boundary_text_classes = _recover_detector_boundary_text(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            self.layout[ltpage.pageid],
+            region_types,
+            {object_id(char) for char in code_chars | identity_chars}
+            | set(toc_layout.omitted_chars)
+            | set(toc_layout.page_number_chars)
+            | set(toc_layout.entry_by_char),
+            vflag,
+        )
         for child in ltpage:
             if isinstance(child, LTChar):
                 if object_id(child) in toc_layout.omitted_chars and child not in code_chars:
@@ -3948,6 +4107,8 @@ class TranslateConverter(PDFConverterEx):
                     cls = toc_class_start + toc_entry_index
                 elif object_id(child) in toc_layout.page_number_chars:
                     cls = 0
+                elif object_id(child) in boundary_text_classes:
+                    cls = boundary_text_classes[object_id(child)]
                 actual_cls = int(cls)
                 child._pdf2zh_layout_class = actual_cls
                 candidate_region_kind = region_types.get(actual_cls, "")
