@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { createNativePage, inspectPage, inspectCompatibility, connectionStatus, ensureChat, catalog, readChoices, modeFromEvidence } from '../native-ui.mjs';
+import { PICKER, effortKey } from '../ui.mjs';
 
 const chrome = ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].find(existsSync);
 
@@ -21,6 +22,8 @@ async function fixture(html, run, pathname = '/') {
 }
 
 const chat = '<button role="radio" aria-checked="true">Chat</button><button role="radio" aria-checked="false">Work</button><div id="prompt-textarea" contenteditable="true"> </div>';
+const chatgptComposer = '<form data-chatgpt-composer><div data-composer-markdown contenteditable="true"> </div></form>';
+const chatgptPicker = '<button type="button" id="picker" data-codex-intelligence-trigger data-composer-navigation-target="reasoning" data-selected-reasoning-effort="none" aria-label="选择 ChatGPT 模型">即时</button>';
 
 test('native CDP wrapper uses bound target Runtime and trusted mouse/keyboard input', { skip: !chrome }, async () => {
   await fixture('<button id="select">Select</button><button id="focus">Focus</button><script>window.events=[];document.querySelector("#select").onclick=e=>events.push(["click",e.isTrusted]);document.querySelector("#focus").onkeydown=e=>events.push([e.key,e.isTrusted]);</script>', async page => {
@@ -30,6 +33,27 @@ test('native CDP wrapper uses bound target Runtime and trusted mouse/keyboard in
     assert.equal(await page.evaluate(arg => arg.value, { value: 'literal ` $() 中文' }), 'literal ` $() 中文');
     await assert.rejects(() => page.evaluate(() => { throw new Error('sensitive page data'); }), error => error.code === 'DOM_EVALUATION_FAILED' && !error.message.includes('sensitive'));
     await assert.rejects(() => page.goto('https://example.com/'), error => error.code === 'INVALID_URL');
+  });
+});
+
+test('native DOM menu dispatcher triggers pointerdown handlers and rejects composer, send and unscoped controls', { skip: !chrome }, async () => {
+  const html = `${chat}<button id="picker" class="__composer-pill" aria-haspopup="menu">Model</button>
+    <button id="outside" data-pdf2zh-native-option="native-9">Outside</button>
+    <div role="menu" id="menu" hidden><button id="model" role="menuitemradio" aria-checked="false" data-pdf2zh-native-option="native-0">Alpha</button>
+      <button id="send" data-testid="send-button" data-pdf2zh-native-option="native-1">Send</button>
+      <button id="disabled" role="menuitemradio" aria-disabled="true" data-pdf2zh-native-option="native-3">Disabled</button></div>
+    <script>window.events=[];document.querySelector('#picker').onpointerdown=()=>document.querySelector('#menu').hidden=false;document.querySelector('#model').onpointerdown=e=>e.currentTarget.setAttribute('aria-checked','true');document.addEventListener('pointerdown',e=>events.push({id:e.target.id,trusted:e.isTrusted}));</script>`;
+  await fixture(html, async page => {
+    await page.domMenuClick(PICKER);
+    assert.equal(await page.evaluate(() => document.querySelector('#menu').hidden), false);
+    await page.domMenuClick('[data-pdf2zh-native-option="native-0"]');
+    assert.equal(await page.evaluate(() => document.querySelector('#model').getAttribute('aria-checked')), 'true');
+    for (const selector of ['#prompt-textarea', '#send', '[data-testid="send-button"]', '[data-pdf2zh-native-option="native-1"]', '[data-pdf2zh-native-option="native-3"]', '[data-pdf2zh-native-option="native-9"]']) {
+      await assert.rejects(() => page.domMenuClick(selector), error => error.code === 'CONTROL_UNAVAILABLE');
+    }
+    assert.deepEqual(await page.evaluate(() => window.events), [{ id: 'picker', trusted: false }, { id: 'model', trusted: false }]);
+    assert.equal(page.interactionCounts.domMenuClicks, 2);
+    assert.equal(page.interactionCounts.pointerClicks, 0);
   });
 });
 
@@ -66,6 +90,29 @@ test('native existing-conversation evidence matches only renderer-owned sidebar 
   }, '/c/current');
 });
 
+test('native ChatGPT composer proves ordinary Chat and respects Work and message boundaries', { skip: !chrome }, async () => {
+  for (const pathname of ['/', '/c/current']) {
+    await fixture(chatgptComposer, async page => {
+      const evidence = await ensureChat(page);
+      assert.equal(evidence.chatgptComposer, true);
+      assert.equal(connectionStatus(evidence).status, 'ready');
+      assert.equal(modeFromEvidence(evidence), 'chat');
+    }, pathname);
+  }
+  for (const html of [
+    `${chatgptComposer}<div data-mode="work">Work</div>`,
+    `${chatgptComposer}<button role="radio" aria-checked="true">Work</button>`,
+    `<div id="prompt-textarea" contenteditable="true"> </div><div data-chatgpt-search-unit-key="quoted">${chatgptComposer}${chat}</div>`,
+  ]) {
+    await fixture(html, async page => {
+      await assert.rejects(() => ensureChat(page), error => error.code === 'CHAT_MODE_UNVERIFIED');
+    });
+  }
+  await fixture(chatgptComposer, async page => {
+    await assert.rejects(() => ensureChat(page), error => error.code === 'CHAT_MODE_UNVERIFIED');
+  }, '/work');
+});
+
 test('native Chat verification waits for delayed mode hydration without input and rejects explicit blockers immediately', { skip: !chrome }, async () => {
   const delayed = '<main><header id="mode"></header><div id="prompt-textarea" contenteditable="true"> </div></main><script>setTimeout(()=>document.querySelector("#mode").innerHTML=\'<button role="radio" aria-checked="true">对话</button><button role="radio" aria-checked="false">工作</button>\',450)</script>';
   await fixture(delayed, async page => {
@@ -100,6 +147,7 @@ test('native compatibility diagnostics contain only mode chrome and no private p
     <form id="composer-form" data-mode="unknown"><div class="composer-container"><div id="prompt-textarea" contenteditable="true">PROMPT_SECRET</div><input value="INPUT_SECRET"><button class="__composer-pill">即时</button><button class="changed-picker">Observed selector</button></div></form>
     <article><button data-testid="model-secret">MESSAGE_SECRET</button></article>
     <div data-message-author-role="assistant"><button data-testid="mode-secret">ANSWER_SECRET</button></div>
+    <div data-chatgpt-search-unit-key="quoted">${chatgptComposer}<button data-codex-intelligence-trigger data-composer-navigation-target="reasoning">SHELL_MESSAGE_SECRET</button><div role="menu"><button role="menuitemradio" data-testid="model-secret">MENU_SECRET</button></div></div>
     <aside><button data-testid="mode-secret">SIDEBAR_SECRET</button></aside>
     <div data-testid="sidebar"><button data-testid="mode-secret">HISTORY_SECRET</button></div>
     <div data-testid="profile"><button data-testid="mode-secret">PROFILE_SECRET</button></div>
@@ -152,6 +200,102 @@ function menuFixture() {
     </script>`;
 }
 
+function powerMenuFixture() {
+  return `${chatgptComposer.replace('</form>', `${chatgptPicker}</form>`)}
+    <div role="menu" id="power-menu" hidden><div data-model-picker-view="simple">
+      <div role="menuitem" data-model-picker-view-toggle="true" aria-label="选择模型" tabindex="0"><span class="truncate">高</span></div>
+      <div id="simple" data-active="true"><span id="power-description">高，第 3 项，共 3 项。</span>
+        <div role="menuitem" data-reasoning-slider="true" aria-label="强度" aria-describedby="power-description" tabindex="0">
+          <div data-model-picker-power-slider style="width:200px;height:15px"><span role="slider" aria-hidden="true" aria-valuemin="0" aria-valuemax="2" aria-valuenow="2"></span></div>
+        </div>
+      </div>
+      <div id="power-models" data-active="false" aria-hidden="true">
+        <div role="menuitemradio" aria-checked="true"><span class="truncate">Alpha</span></div>
+        <div role="menuitemradio" aria-checked="false"><span class="truncate">Beta</span></div>
+      </div>
+    </div></div>
+    <script>
+      let position=2, modelsVisible=false;window.viewClicks=0;
+      const menu=document.querySelector('#power-menu'),view=document.querySelector('[data-model-picker-view]'),toggle=document.querySelector('[data-model-picker-view-toggle]');
+      window.togglePointerDowns=0;toggle.onpointerdown=()=>window.togglePointerDowns++;
+      const close=()=>menu.hidden=true;
+      document.querySelector('#picker').onclick=()=>menu.hidden=false;
+      document.onkeydown=e=>{if(e.key==='Escape')close()};
+      toggle.onclick=()=>{window.viewClicks++;modelsVisible=!modelsVisible;view.setAttribute('data-model-picker-view',modelsVisible?'models':'simple');document.querySelector('#simple').setAttribute('data-active',!modelsVisible);document.querySelector('#power-models').setAttribute('data-active',modelsVisible);document.querySelector('#power-models').setAttribute('aria-hidden',!modelsVisible);toggle.setAttribute('aria-label',modelsVisible?'返回':'选择模型')};
+      document.querySelector('#power-models').onclick=e=>{const row=e.target.closest('[role="menuitemradio"]');if(!row)return;document.querySelectorAll('[role="menuitemradio"]').forEach(n=>n.setAttribute('aria-checked',n===row));close()};
+      document.querySelector('[data-reasoning-slider]').onkeydown=e=>{if(e.key==='ArrowRight')position=Math.min(2,position+1);if(e.key==='ArrowLeft')position=Math.max(0,position-1);document.querySelector('[role="slider"]').setAttribute('aria-valuenow',position);document.querySelector('#power-description').textContent=['即时','标准','高'][position]+'，第 '+(position+1)+' 项，共 3 项。'};
+    </script>`;
+}
+
+test('native power slider reads semantic view toggle and visible model rows, retaining actual effort labels', { skip: !chrome }, async () => {
+  await fixture(powerMenuFixture(), async page => {
+    const initial = await catalog(page);
+    assert.deepEqual(initial.models.map(row => row.value), ['Alpha', 'Beta']);
+    assert.deepEqual(initial.efforts.map(row => row.value), ['即时', '标准', '高']);
+    assert.equal(initial.effort, '高');
+    const changed = await catalog(page, 'Beta', '即時');
+    assert.equal(changed.model, 'Beta');
+    assert.equal(changed.effort, '即时');
+    assert.equal((await readChoices(page, 'effort', '標準')).selected, '标准');
+    assert.ok(await page.evaluate(() => window.viewClicks) > 0);
+    assert.equal(await page.evaluate(() => window.togglePointerDowns), 0);
+  });
+  await fixture(powerMenuFixture().replace('data-model-picker-view-toggle="true" aria-label="选择模型"', 'data-model-picker-view-toggle="false" aria-label="Unknown"'), async page => {
+    page.timeoutMs = 150;
+    await assert.rejects(() => readChoices(page, 'model'), error => error.code === 'PICKER_UNAVAILABLE');
+  });
+});
+
+test('effort keys normalize only the four known Simplified and Traditional label pairs', () => {
+  for (const [simple, traditional] of [['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度']]) {
+    assert.equal(effortKey(simple), traditional);
+    assert.equal(effortKey(traditional), traditional);
+  }
+  for (const label of ['高', 'Alpha', '即時 Pro', 'Custom', '']) assert.equal(effortKey(label), label);
+});
+
+test('native shell without a return toggle confirms only the uniquely selected model once', { skip: !chrome }, async () => {
+  const base = powerMenuFixture()
+    .replace("let position=2, modelsVisible=false;", "let position=2, modelsVisible=false;window.modelConfirmations=0;")
+    .replace("toggle.setAttribute('aria-label',modelsVisible?'返回':'选择模型')", "toggle.setAttribute('aria-label',modelsVisible?'返回':'选择模型');toggle.hidden=modelsVisible")
+    .replace("if(!row)return;document.querySelectorAll", "if(!row)return;window.modelConfirmations++;document.querySelectorAll");
+  const restored = base.replace("n.setAttribute('aria-checked',n===row));close()", "n.setAttribute('aria-checked',n===row));modelsVisible=false;view.setAttribute('data-model-picker-view','simple');document.querySelector('#simple').setAttribute('data-active','true');document.querySelector('#power-models').setAttribute('data-active','false');document.querySelector('#power-models').setAttribute('aria-hidden','true');toggle.hidden=false;close()");
+  await fixture(restored, async page => {
+    const result = await catalog(page);
+    assert.equal(result.model, 'Alpha');
+    assert.equal(result.effort, '高');
+    assert.equal(await page.evaluate(() => window.modelConfirmations), 1);
+  });
+  await fixture(restored.replace('role="menuitemradio" aria-checked="true"', 'role="menuitemradio" aria-checked="false"'), async page => {
+    await readChoices(page, 'model');
+    await assert.rejects(() => readChoices(page, 'effort'), error => error.code === 'PICKER_UNAVAILABLE' && error.diagnostic.openMenu.selectedModelReturnAttempted === false);
+    assert.equal(await page.evaluate(() => window.modelConfirmations), 0);
+  });
+  await fixture(base, async page => {
+    page.timeoutMs = 200;
+    await readChoices(page, 'model');
+    await assert.rejects(() => readChoices(page, 'effort'), error => error.code === 'PICKER_UNAVAILABLE' && error.diagnostic.openMenu.selectedModelReturnAttempted === true && error.diagnostic.openMenu.lastMenuStructure.includes('Alpha'));
+    assert.equal(await page.evaluate(() => window.modelConfirmations), 1);
+  });
+});
+
+test('native model view reopens a confirmed closed picker at most once', { skip: !chrome }, async () => {
+  const base = powerMenuFixture().replace("document.querySelector('#picker').onclick=()=>menu.hidden=false;", "window.pickerOpens=0;document.querySelector('#picker').onclick=()=>{window.pickerOpens++;menu.hidden=false};");
+  const switching = base.replace("toggle.setAttribute('aria-label',modelsVisible?'返回':'选择模型')", "toggle.setAttribute('aria-label',modelsVisible?'返回':'选择模型');if(modelsVisible)close()");
+  await fixture(switching, async page => {
+    assert.equal((await readChoices(page, 'model')).selected, 'Alpha');
+    assert.equal(await page.evaluate(() => window.pickerOpens), 2);
+    assert.equal(await page.evaluate(() => window.viewClicks), 1);
+  });
+  const closing = base.replace('toggle.onclick=()=>{window.viewClicks++;', 'toggle.onclick=()=>{window.viewClicks++;close();return;');
+  await fixture(closing, async page => {
+    page.timeoutMs = 250;
+    await assert.rejects(() => readChoices(page, 'model'), error => error.code === 'PICKER_UNAVAILABLE' && error.diagnostic.openMenu.menuReopens === 1);
+    assert.equal(await page.evaluate(() => window.pickerOpens), 2);
+    assert.equal(await page.evaluate(() => window.viewClicks), 2);
+  });
+});
+
 test('native model and unlabeled-slider menus are discovered dynamically and restored', { skip: !chrome }, async () => {
   await fixture(menuFixture(), async page => {
     const initial = await catalog(page);
@@ -165,6 +309,70 @@ test('native model and unlabeled-slider menus are discovered dynamically and res
     assert.equal(await page.evaluate(() => document.querySelector('[role="slider"]').getAttribute('aria-valuenow')), '2');
     await assert.rejects(() => readChoices(page, 'effort', 'invented'), error => error.code === 'OPTION_UNAVAILABLE');
     assert.equal(await page.evaluate(() => document.querySelector('[role="slider"]').getAttribute('aria-valuenow')), '2');
+  });
+});
+
+test('native ChatGPT shell picker uses existing dynamic model and effort menus', { skip: !chrome }, async () => {
+  const html = menuFixture().replace(chat, chatgptComposer.replace('</form>', `${chatgptPicker}</form>`))
+    .replace('<button class="__composer-pill" aria-haspopup="menu" id="picker">即时</button>', '')
+    .replace('选择模型', '選擇模型');
+  await fixture(html, async page => {
+    page.click = page.bringToFront = () => assert.fail('Shell menus must use target-scoped DOM events without foregrounding');
+    const initial = await catalog(page);
+    assert.equal(initial.mode, 'chat');
+    assert.deepEqual(initial.models.map(item => item.value), ['Alpha', 'Beta 即将于某日停用']);
+    assert.deepEqual(initial.efforts.map(item => item.value), ['即时', '普通', '深入', '最强']);
+    assert.equal(initial.model, 'Alpha');
+    assert.equal(initial.effort, '普通');
+    assert.equal(page.interactionCounts.pointerClicks, 0);
+    assert.ok(page.interactionCounts.domMenuClicks > 0);
+  });
+});
+
+test('native unsupported menu diagnostics capture only picker-owned controls before cleanup', { skip: !chrome }, async () => {
+  const picker = chatgptPicker.replace('id="picker"', 'id="picker" aria-controls="menu"');
+  const html = `${chatgptComposer.replace('</form>', `${picker}</form>`)}
+    <div role="menu" id="menu" hidden><button>Observed section</button>
+      <div data-chatgpt-search-unit-key="quoted"><button>MESSAGE_SECRET</button></div>
+      <div data-testid="profile"><button>PROFILE_SECRET</button></div>
+      <button><span contenteditable="true">DRAFT_SECRET</span></button>
+    </div><div role="menu" id="unowned" hidden><button>ACCOUNT_SECRET</button></div>
+    <script>document.querySelector('#picker').onclick=()=>document.querySelectorAll('[role="menu"]').forEach(n=>n.hidden=false);document.onkeydown=e=>{if(e.key==='Escape')document.querySelectorAll('[role="menu"]').forEach(n=>n.hidden=true)};</script>`;
+  await fixture(html, async page => {
+    page.timeoutMs = 150;
+    await assert.rejects(() => catalog(page), error => {
+      assert.equal(error.code, 'PICKER_UNAVAILABLE');
+      assert.deepEqual(error.diagnostic.openMenu.rows.map(row => row.label), ['Observed section']);
+      assert.equal(error.diagnostic.openMenu.menuCount, 1);
+      assert.equal(error.diagnostic.openMenu.kind, 'model');
+      assert.deepEqual(error.diagnostic.openMenu.initialRows.map(row => row.label), ['Observed section']);
+      assert.deepEqual(error.diagnostic.openMenu.lastRows.map(row => row.label), ['Observed section']);
+      assert.equal(error.diagnostic.openMenu.advancedClicked, false);
+      assert.equal(error.diagnostic.openMenu.sectionClicked, false);
+      assert.doesNotMatch(JSON.stringify(error.diagnostic.openMenu), /SECRET/);
+      return true;
+    });
+    assert.equal(await page.evaluate(() => document.querySelector('#menu').hidden), true);
+  });
+});
+
+test('native menu diagnostics retain initial and latest rows when a section click removes the menu', { skip: !chrome }, async () => {
+  const html = `${chatgptComposer.replace('</form>', `${chatgptPicker}</form>`)}
+    <div role="menu" id="menu" hidden><button role="menuitem" id="advanced">Advanced</button></div>
+    <script>document.querySelector('#picker').onclick=()=>document.querySelector('#menu').hidden=false;document.querySelector('#advanced').onclick=()=>document.querySelector('#menu').remove();</script>`;
+  await fixture(html, async page => {
+    page.timeoutMs = 150;
+    await assert.rejects(() => readChoices(page, 'model'), error => {
+      assert.equal(error.code, 'PICKER_UNAVAILABLE');
+      const menu = error.diagnostic.openMenu;
+      assert.equal(menu.menuCount, 0);
+      assert.deepEqual(menu.rows, []);
+      assert.deepEqual(menu.initialRows.map(row => row.label), ['Advanced']);
+      assert.deepEqual(menu.lastRows.map(row => row.label), ['Advanced']);
+      assert.equal(menu.advancedClicked, true);
+      assert.equal(menu.sectionClicked, false);
+      return true;
+    });
   });
 });
 
@@ -364,7 +572,7 @@ test('native target-scoped menu input stays on the owned target in a two-tab loc
   const browser = await chromium.launch({ executablePath: chrome, headless: true });
   try {
     const context = await browser.newContext();
-    const html = '<button id="picker">Picker</button><div role="menu" id="menu" hidden><button role="menuitemradio" aria-checked="true">Alpha</button></div><script>window.events=[];document.querySelector("#picker").onclick=e=>{events.push(e.isTrusted);document.querySelector("#menu").hidden=false}</script>';
+    const html = '<button id="picker" class="__composer-pill" aria-haspopup="menu">Picker</button><div role="menu" id="menu" hidden><button role="menuitemradio" aria-checked="true">Alpha</button></div><script>window.events=[];document.querySelector("#picker").onpointerdown=e=>{events.push(e.isTrusted);document.querySelector("#menu").hidden=false}</script>';
     await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body: html }));
     const foreground = await context.newPage();
     await foreground.goto('https://chatgpt.com/foreground-fixture');
@@ -384,8 +592,8 @@ test('native target-scoped menu input stays on the owned target in a two-tab loc
     await page.click('#picker');
     assert.equal(await owned.evaluate(() => !document.querySelector('#menu').hidden), true);
     assert.deepEqual(await owned.evaluate(() => window.events), [true]);
-    // Evaluate the ordinary DOM alternative without changing product behavior.
-    await page.evaluate(() => { document.querySelector('#menu').hidden = true; document.querySelector('#picker').click(); });
+    await page.evaluate(() => { document.querySelector('#menu').hidden = true; });
+    await page.domMenuClick(PICKER);
     assert.deepEqual(await owned.evaluate(() => window.events), [true, false]);
     assert.deepEqual(await foreground.evaluate(() => window.events), []);
     assert.deepEqual(await foreground.evaluate(() => ({ focus: document.hasFocus(), visibility: document.visibilityState })), before);

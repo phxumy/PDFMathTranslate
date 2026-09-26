@@ -34,6 +34,14 @@ _browser_lock = threading.Lock()
 _cancel_wait = threading.Event()
 
 
+def _effort_key(value):
+    # Keep existing request/task identities across a web UI language change.
+    # These are label aliases, never a list of available account options.
+    return {"即时": "即時", "标准": "標準", "扩展": "擴展", "轻度": "輕度"}.get(
+        value, value
+    )
+
+
 @contextmanager
 def _request_lock(path: Path):
     """OS-owned lock; survives controller crashes without leaving stale locks."""
@@ -279,8 +287,22 @@ class ChatGPTTranslator(ScientificTranslator):
     CustomPrompt = True
 
     def __init__(
-        self, lang_in, lang_out, model=None, envs=None, prompt=None, ignore_cache=False
+        self,
+        lang_in,
+        lang_out,
+        model=None,
+        envs=None,
+        prompt=None,
+        ignore_cache=False,
+        *,
+        task_id=None,
     ):
+        if task_id is not None and (
+            not isinstance(task_id, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id) is None
+        ):
+            raise TranslationAbortedError("ChatGPT 任务标识必须是有效的哈希或 UUID。")
+        self.task_seed = task_id or uuid.uuid4().hex
         _cancel_wait.clear()
         self.set_envs(envs)
         requested_model = model or self.envs.get("CHATGPT_MODEL")
@@ -306,12 +328,27 @@ class ChatGPTTranslator(ScientificTranslator):
             raise TranslationAbortedError(
                 "网页未确认所选 ChatGPT 模型，请刷新后重新选择。"
             )
-        if requested_effort and actual_effort != requested_effort:
+        if requested_effort and _effort_key(actual_effort) != _effort_key(requested_effort):
             raise TranslationAbortedError("网页未确认所选推理强度，请刷新后重新选择。")
+        actual_effort = _effort_key(actual_effort)
         super().__init__(
             lang_in, lang_out, actual_model, prompt=prompt, ignore_cache=ignore_cache
         )
         self.reasoning_effort = actual_effort
+        self.task_id = hashlib.sha256(
+            json.dumps(
+                {
+                    "task": self.task_seed,
+                    "model": actual_model,
+                    "effort": actual_effort,
+                    "lang_in": self.lang_in,
+                    "lang_out": self.lang_out,
+                    "prompt": getattr(prompt, "template", prompt),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
         self.add_cache_impact_parameters("reasoning_effort", actual_effort)
         self.add_cache_impact_parameters("transport", "oracle-browser-v1")
         self._request_root = chatgpt_state_dir() / "requests"
@@ -336,18 +373,78 @@ class ChatGPTTranslator(ScientificTranslator):
             "model": self.model,
             "effort": self.reasoning_effort,
         }
+        legacy_digest = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        identity["task_id"] = self.task_id
         digest = hashlib.sha256(
             json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
+        legacy_dir = self._request_root / legacy_digest
         request_dir = self._request_root / digest
-        request_dir.mkdir(parents=True, exist_ok=True)
-        with _request_lock(request_dir / "request.lock"):
-            return self._execute_browser_request(
-                request_dir, digest, prompt_text, response_loader
+        # Keep the old request's OS lock while inspecting/claiming it, so two
+        # upgraded controllers cannot both adopt a previously submitted batch.
+        with _request_lock(legacy_dir / "request.lock"):
+            # A new task-scoped attempt can exist only after the old request was
+            # resolved or proved unsent. It supersedes an older cached answer.
+            if (request_dir / "request.json").exists():
+                with _request_lock(request_dir / "request.lock"):
+                    return self._execute_browser_request(
+                        request_dir, digest, prompt_text, response_loader
+                    )
+            saved = _read_json(legacy_dir / "request.json")
+            status = saved.get("status")
+            if saved and status not in {
+                "pending",
+                "paused",
+                "invalid",
+                "complete",
+                "ready",
+            }:
+                raise TranslationAbortedError(
+                    "旧版 ChatGPT 任务状态不明确，已暂停以避免重复提交。"
+                )
+            if not saved and any(legacy_dir.glob("attempt-*/journal.json")):
+                raise TranslationAbortedError(
+                    "旧版 ChatGPT 任务缺少批次记录，已暂停以避免重复提交。"
+                )
+            needs_legacy = status in {"pending", "paused", "invalid"} or (
+                status == "complete" and not self.ignore_cache
             )
+            if (
+                status == "invalid"
+                and saved.get("legacy_recovery_complete")
+                and self.ignore_cache
+            ):
+                needs_legacy = False
+            if needs_legacy:
+                if status != "complete" and saved.get("task_id") not in {
+                    None,
+                    self.task_id,
+                }:
+                    raise TranslationAbortedError(
+                        "旧版已发送批次属于另一个文档任务，请先恢复该任务；本次没有重新发送。"
+                    )
+                return self._execute_browser_request(
+                    legacy_dir,
+                    legacy_digest,
+                    prompt_text,
+                    response_loader,
+                    legacy_recovery=True,
+                )
+            with _request_lock(request_dir / "request.lock"):
+                return self._execute_browser_request(
+                    request_dir, digest, prompt_text, response_loader
+                )
 
     def _execute_browser_request(
-        self, request_dir, digest, prompt_text, response_loader
+        self,
+        request_dir,
+        digest,
+        prompt_text,
+        response_loader,
+        *,
+        legacy_recovery=False,
     ):
         manifest_path = request_dir / "request.json"
         saved = _read_json(manifest_path)
@@ -362,7 +459,11 @@ class ChatGPTTranslator(ScientificTranslator):
             and not self.ignore_cache
         ):
             return response_loader(str(answer_path))
-        if saved.get("status") in {"complete", "invalid"} and self.ignore_cache:
+        if (
+            saved.get("status") in {"complete", "invalid"}
+            and self.ignore_cache
+            and not legacy_recovery
+        ):
             attempt = "attempt-" + str(int(attempt.split("-")[1]) + 1)
             attempt_dir = request_dir / attempt
             saved = {}
@@ -373,12 +474,17 @@ class ChatGPTTranslator(ScientificTranslator):
         prompt_path.write_text(prompt_text, encoding="utf-8")
         # Any controller crash after this durable marker recovers instead of
         # issuing a new prompt. The companion can prove pre-submission failures.
-        recover = saved.get("status") in {"pending", "paused", "invalid"}
+        recover = legacy_recovery or saved.get("status") in {
+            "pending",
+            "paused",
+            "invalid",
+        }
         record = {
             "attempt": attempt,
             "status": "pending",
             "model": self.model,
             "effort": self.reasoning_effort,
+            "task_id": self.task_id,
         }
         if saved.get("session_id"):
             record["session_id"] = saved["session_id"]
@@ -387,6 +493,7 @@ class ChatGPTTranslator(ScientificTranslator):
             "op": "recover" if recover else "translate",
             "request_dir": str(attempt_dir),
             "request_id": digest + "-" + attempt,
+            "task_id": self.task_id,
             "model": self.model,
             "effort": self.reasoning_effort,
             "prompt_file": str(prompt_path),
@@ -420,6 +527,8 @@ class ChatGPTTranslator(ScientificTranslator):
                 raise TranslationAbortedError(
                     "ChatGPT 尚未返回完整回答。" + RESUME_MESSAGE
                 )
+            if legacy_recovery:
+                record["legacy_recovery_complete"] = True
             output_path.write_text(answer, encoding="utf-8")
             try:
                 parsed = _clean_json_answer(answer)

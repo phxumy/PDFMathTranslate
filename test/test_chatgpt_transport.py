@@ -1,5 +1,6 @@
 """No real browser/account/model calls; exercise durable transport boundaries."""
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -58,6 +59,31 @@ def test_initialization_never_probes_codex(translator, monkeypatch):
     assert not hasattr(other, "codex_bin")
     assert other.cache.params["model"] == "actual-web-model"
     assert other.cache.params["reasoning_effort"] == "actual-effort"
+
+
+def test_ui_language_change_preserves_pending_request_and_target_language(translator, monkeypatch):
+    selection = {"ok": True, "model": "actual-web-model", "effort": "即時"}
+    monkeypatch.setattr(cg, "refresh_chatgpt_options", lambda *a, **kw: selection)
+    old = cg.ChatGPTTranslator("en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即時"})
+    bridge = Mock(side_effect=[
+        {"ok": False, "not_submitted": False, "message": "interrupted"},
+        {"ok": True, "answer": '{"translations":["traduction"]}'},
+    ])
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    with pytest.raises(TranslationAbortedError):
+        execute(old)
+    original = bridge.call_args.args[0]
+    selection["effort"] = "即时"
+    new = cg.ChatGPTTranslator("en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即时"})
+    assert new.lang_out == "fr"
+    assert new.task_id == old.task_id
+    assert execute(new) == ["traduction"]
+    resumed = bridge.call_args.args[0]
+    assert resumed["op"] == "recover"
+    assert resumed["request_dir"] == original["request_dir"]
+    selection["effort"] = "高"
+    with pytest.raises(TranslationAbortedError):
+        cg.ChatGPTTranslator("en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即时"})
 
 
 def test_completed_answer_reused_without_resubmission(translator, monkeypatch):
@@ -263,3 +289,231 @@ def test_request_lock_rejects_concurrent_same_batch_and_releases(tmp_path):
                 pytest.fail("a duplicate submission got the lock")
     with cg._request_lock(path):
         pass
+
+
+def test_document_task_continues_across_batches_and_translator_instances(
+    translator, monkeypatch
+):
+    bridge = Mock(return_value={"ok": True, "answer": '{"translations":["译文"]}'})
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    first = cg.ChatGPTTranslator("en", "zh", task_id="document-a")
+    resumed = cg.ChatGPTTranslator("en", "zh", task_id="document-a")
+    execute(first)
+    first._execute_codex_request("second batch", {"type": "object"}, load)
+    resumed._execute_codex_request("third batch", {"type": "object"}, load)
+    payloads = [call.args[0] for call in bridge.call_args_list]
+    assert len({payload["task_id"] for payload in payloads}) == 1
+    assert len({payload["request_dir"] for payload in payloads}) == 3
+    for payload in payloads:
+        manifest = Path(payload["request_dir"]).parent / "request.json"
+        assert (
+            json.loads(manifest.read_text(encoding="utf-8"))["task_id"] == first.task_id
+        )
+
+
+def test_different_documents_do_not_share_identical_batch_request(
+    translator, monkeypatch
+):
+    bridge = Mock(return_value={"ok": True, "answer": '{"translations":["译文"]}'})
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    execute(cg.ChatGPTTranslator("en", "zh", task_id="document-a"))
+    execute(cg.ChatGPTTranslator("en", "zh", task_id="document-b"))
+    first, second = [call.args[0] for call in bridge.call_args_list]
+    assert first["task_id"] != second["task_id"]
+    assert first["request_dir"] != second["request_dir"]
+
+
+def test_explicit_task_restores_pending_request_after_new_instance(
+    translator, monkeypatch
+):
+    bridge = Mock(
+        side_effect=[
+            {"ok": False, "message": "closed after submission"},
+            {"ok": True, "answer": '{"translations":["恢复"]}'},
+        ]
+    )
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    with pytest.raises(TranslationAbortedError):
+        execute(cg.ChatGPTTranslator("en", "zh", task_id="document-a"))
+    execute(cg.ChatGPTTranslator("en", "zh", task_id="document-a"))
+    first, resumed = [call.args[0] for call in bridge.call_args_list]
+    assert resumed["op"] == "recover"
+    assert resumed["task_id"] == first["task_id"]
+    assert resumed["request_dir"] == first["request_dir"]
+
+
+def test_task_configuration_and_implicit_tasks_have_distinct_identities(
+    translator, monkeypatch
+):
+    first = cg.ChatGPTTranslator("en", "zh", task_id="document-a")
+    same = cg.ChatGPTTranslator(
+        "en", "zh", task_id="document-a", envs={"CHATGPT_TIMEOUT": "120"}
+    )
+    assert first.task_id == same.task_id
+    assert (
+        cg.ChatGPTTranslator("en", "zh").task_id
+        != cg.ChatGPTTranslator("en", "zh").task_id
+    )
+    monkeypatch.setattr(
+        cg,
+        "refresh_chatgpt_options",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "model": "other-web-model",
+            "effort": "actual-effort",
+        },
+    )
+    assert (
+        cg.ChatGPTTranslator("en", "zh", task_id="document-a").task_id != first.task_id
+    )
+    monkeypatch.setattr(
+        cg,
+        "refresh_chatgpt_options",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "model": "actual-web-model",
+            "effort": "other-effort",
+        },
+    )
+    assert (
+        cg.ChatGPTTranslator("en", "zh", task_id="document-a").task_id != first.task_id
+    )
+
+
+@pytest.mark.parametrize("task_id", ["", "../outside", "含中文", "a" * 129, 123])
+def test_invalid_task_identity_is_rejected_before_browser_access(
+    translator, monkeypatch, task_id
+):
+    refresh = Mock(side_effect=AssertionError("must not open browser"))
+    monkeypatch.setattr(cg, "refresh_chatgpt_options", refresh)
+    with pytest.raises(TranslationAbortedError, match="任务标识"):
+        cg.ChatGPTTranslator("en", "zh", task_id=task_id)
+    refresh.assert_not_called()
+
+
+def legacy_request(translator, status, **extra):
+    schema = {"type": "object"}
+    prompt = (
+        "one batch\n\nRequired output JSON schema (return only the matching JSON object):\n"
+        + json.dumps(schema, ensure_ascii=False, sort_keys=True)
+    )
+    identity = {
+        "prompt": prompt,
+        "schema": schema,
+        "model": translator.model,
+        "effort": translator.reasoning_effort,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    directory = translator._request_root / digest
+    cg._write_json(
+        directory / "request.json",
+        {
+            "status": status,
+            "attempt": "attempt-2",
+            "session_id": "previously-submitted",
+            **extra,
+        },
+    )
+    return directory
+
+
+@pytest.mark.parametrize("status", ["pending", "paused", "invalid"])
+@pytest.mark.parametrize("ignore_cache", [False, True])
+def test_legacy_submitted_request_is_recovered_before_new_task_send(
+    translator, monkeypatch, status, ignore_cache
+):
+    old = legacy_request(translator, status)
+    translator.ignore_cache = ignore_cache
+    bridge = Mock(
+        return_value={"ok": True, "answer": '{"translations":["旧请求恢复"]}'}
+    )
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    assert execute(translator) == ["旧请求恢复"]
+    payload = bridge.call_args.args[0]
+    assert payload["op"] == "recover"
+    assert Path(payload["request_dir"]) == old / "attempt-2"
+    assert payload["task_id"] == translator.task_id
+    assert payload["session_id"] == "previously-submitted"
+    assert json.loads((old / "request.json").read_text(encoding="utf-8"))[
+        "legacy_recovery_complete"
+    ]
+
+
+def test_legacy_completed_answer_can_be_reused_without_creating_a_chat(
+    translator, monkeypatch
+):
+    old = legacy_request(translator, "complete")
+    cg._write_json(old / "attempt-2" / "validated.json", {"translations": ["旧译文"]})
+    bridge = Mock(
+        side_effect=AssertionError("completed answer should not be submitted")
+    )
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    assert execute(translator) == ["旧译文"]
+    bridge.assert_not_called()
+
+
+def test_legacy_ready_uses_new_task_scoped_request(translator, monkeypatch):
+    old = legacy_request(translator, "ready")
+    bridge = Mock(return_value={"ok": True, "answer": '{"translations":["新译文"]}'})
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    execute(translator)
+    payload = bridge.call_args.args[0]
+    assert payload["op"] == "translate"
+    assert Path(payload["request_dir"]).parent != old
+
+
+def test_legacy_claimed_pending_request_cannot_be_reassigned(translator, monkeypatch):
+    legacy_request(translator, "paused", task_id="another-document")
+    bridge = Mock()
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    with pytest.raises(TranslationAbortedError, match="另一个文档任务"):
+        execute(translator)
+    bridge.assert_not_called()
+
+
+def test_unreadable_legacy_manifest_cannot_be_skipped_for_new_task(
+    translator, monkeypatch
+):
+    old = legacy_request(translator, "paused")
+    (old / "request.json").write_text("broken", encoding="utf-8")
+    bridge = Mock()
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    with pytest.raises(TranslationAbortedError, match="记录无法读取"):
+        execute(translator)
+    bridge.assert_not_called()
+
+
+def test_new_task_attempt_supersedes_legacy_completed_cache(translator, monkeypatch):
+    old = legacy_request(translator, "complete")
+    cg._write_json(old / "attempt-2" / "validated.json", {"translations": ["旧译文"]})
+    bridge = Mock(return_value={"ok": True, "answer": '{"translations":["新译文"]}'})
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    translator.ignore_cache = True
+    assert execute(translator) == ["新译文"]
+    translator.ignore_cache = False
+    assert execute(translator) == ["新译文"]
+    assert bridge.call_count == 1
+
+
+def test_legacy_invalid_recovery_precedes_explicit_new_attempt(translator, monkeypatch):
+    old = legacy_request(translator, "invalid")
+    translator.ignore_cache = True
+    bridge = Mock(
+        side_effect=[
+            {"ok": True, "answer": "still invalid"},
+            {"ok": True, "answer": '{"translations":["重译"]}'},
+        ]
+    )
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    with pytest.raises(TranslationAbortedError):
+        execute(translator)
+    assert bridge.call_args.args[0]["op"] == "recover"
+    assert Path(bridge.call_args.args[0]["request_dir"]) == old / "attempt-2"
+    assert execute(translator) == ["重译"]
+    assert bridge.call_args.args[0]["op"] == "translate"
+    assert Path(bridge.call_args.args[0]["request_dir"]).parent != old
+    translator.ignore_cache = False
+    assert execute(translator) == ["重译"]
+    assert bridge.call_count == 2

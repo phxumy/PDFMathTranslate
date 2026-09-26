@@ -3109,6 +3109,7 @@ class TranslateConverter(PDFConverterEx):
         envs: Dict = None,
         prompt: Template = None,
         ignore_cache: bool = False,
+        chatgpt_task_id: str = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -3131,7 +3132,8 @@ class TranslateConverter(PDFConverterEx):
             translators.append(ChatGPTTranslator)
         for translator in translators:
             if service_name == translator.name:
-                self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache)
+                task_options = {"task_id": chatgpt_task_id} if service_name == "chatgpt-browser" and chatgpt_task_id is not None else {}
+                self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache, **task_options)
         if not self.translator:
             raise ValueError("Unsupported translation service")
         if _supports_scientific_translation(self.translator):

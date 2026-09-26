@@ -1,7 +1,9 @@
 """Functions that can be used for the most common use-cases for pdf2zh.six"""
 
 import asyncio
+import hashlib
 import io
+import json
 import os
 import re
 import sys
@@ -260,6 +262,46 @@ def _build_layout_mask(
     return layout_box, region_types
 
 
+def _chatgpt_document_task_id(
+    stream: bytes,
+    *,
+    pages=None,
+    lang_in="",
+    lang_out="",
+    prompt=None,
+    vfont="",
+    vchar="",
+    model=None,
+    compatible=False,
+) -> str:
+    """Identify original document/settings, independently of temporary PDF paths."""
+    layout_model = None
+    if model is not None:
+        layout_model = {"type": f"{type(model).__module__}.{type(model).__qualname__}"}
+        model_path = getattr(model, "model_path", None)
+        if model_path and Path(model_path).is_file():
+            digest = hashlib.sha256()
+            with Path(model_path).open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            layout_model["sha256"] = digest.hexdigest()
+    identity = {
+        "version": 1,
+        "source_sha256": hashlib.sha256(stream).hexdigest(),
+        "pages": sorted(set(pages)) if pages else None,
+        "lang_in": lang_in.lower(),
+        "lang_out": lang_out.lower(),
+        "prompt": getattr(prompt, "template", prompt),
+        "vfont": vfont or "",
+        "vchar": vchar or "",
+        "layout_model": layout_model,
+        "compatible": bool(compatible),
+    }
+    return hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def translate_patch(
     inf: BinaryIO,
     pages: Optional[list[int]] = None,
@@ -280,6 +322,7 @@ def translate_patch(
     ignore_cache: bool = False,
     latin: Font = None,
     latin_name: str = LATIN_NAME,
+    chatgpt_task_id: str = None,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
@@ -299,6 +342,7 @@ def translate_patch(
         envs,
         prompt,
         ignore_cache,
+        chatgpt_task_id=chatgpt_task_id,
     )
     device.layout_region_types = layout_region_types
     device.latin = latin
@@ -377,8 +421,22 @@ def translate_stream(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
+    chatgpt_task_id: str = None,
     **kwarg: Any,
 ):
+    if service.split(":", 1)[0] == "chatgpt-browser" and chatgpt_task_id is None:
+        # Compute before MuPDF rewrites bytes or injects fonts/object IDs.
+        chatgpt_task_id = _chatgpt_document_task_id(
+            stream,
+            pages=pages,
+            lang_in=lang_in,
+            lang_out=lang_out,
+            prompt=prompt,
+            vfont=vfont,
+            vchar=vchar,
+            model=model,
+            compatible=kwarg.get("compatible", False),
+        )
     font_list = [("tiro", None, None)]
 
     font_path = prepare_pdf_text_font(download_remote_fonts(lang_out.lower()))
@@ -568,6 +626,22 @@ def translate(
                     f"Errors occur in downloading the PDF file. Please check the link(s).\nError:\n{e}"
                 )
         filename = os.path.splitext(os.path.basename(file))[0]
+
+        # PDF/A conversion can rewrite metadata. Preserve the original identity
+        # across reruns even when that optional conversion is enabled.
+        chatgpt_task_id = None
+        if compatible and service.split(":", 1)[0] == "chatgpt-browser":
+            chatgpt_task_id = _chatgpt_document_task_id(
+                Path(file).read_bytes(),
+                pages=pages,
+                lang_in=lang_in,
+                lang_out=lang_out,
+                prompt=prompt,
+                vfont=vfont,
+                vchar=vchar,
+                model=model,
+                compatible=True,
+            )
 
         # If the commandline has specified converting to PDF/A format
         # --compatible / -cp

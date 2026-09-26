@@ -1,14 +1,17 @@
 // Target-scoped CDP DOM adapter. The caller owns connection/authorization.
 // This module neither starts browsers nor changes browser-identification flags.
 import {
-  WORDS, PICKER, coded, filterOptions, normalize,
+  WORDS, PICKER, coded, filterOptions, normalize, effortKey,
   inspectPage as inspectLegacyPage, connectionStatus as legacyConnectionStatus,
 } from './ui.mjs';
+import { buildClickDispatcher } from '@steipete/oracle/dist/src/browser/actions/domEvents.js';
 
 export { coded };
 
 const MENU = '[role="menu"],[role="listbox"],[data-testid="composer-intelligence-picker-content"]';
 const KEY_CODES = { Escape: 27, ArrowLeft: 37, ArrowRight: 39, ArrowUp: 38, ArrowDown: 40, Enter: 13, Home: 36, End: 35 };
+const MENU_CLICK_DISPATCHER = buildClickDispatcher('dispatchMenuClick');
+const isMenuSelector = selector => selector === PICKER || /^\[data-pdf2zh-native-option="native-\d+"\]$/.test(selector) || selector === '[data-pdf2zh-native-slider="owner"]';
 
 export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 30000, pollMs = 150 } = {}) {
   if (!client?.Runtime?.evaluate || !client?.Input?.dispatchMouseEvent || !client?.Input?.dispatchKeyEvent) {
@@ -16,7 +19,7 @@ export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 300
   }
   const page = {
     client, timeoutMs, modeTimeoutMs, pollMs,
-    interactionCounts: { pointerClicks: 0, keyPresses: 0, pickerRetries: 0 },
+    interactionCounts: { pointerClicks: 0, domMenuClicks: 0, keyPresses: 0, pickerRetries: 0 },
     async evaluate(fn, arg) {
       const expression = `(${fn.toString()})(${arg === undefined ? '' : JSON.stringify(arg)})`;
       const result = await client.Runtime.evaluate({ expression, awaitPromise: true, returnByValue: true });
@@ -43,6 +46,39 @@ export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 300
       await client.Input.dispatchMouseEvent({ type: 'mouseMoved', ...point });
       await client.Input.dispatchMouseEvent({ type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
       await client.Input.dispatchMouseEvent({ type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    },
+    async domMenuClick(selector) {
+      if (!isMenuSelector(selector)) throw coded('CONTROL_UNAVAILABLE', 'DOM 交互仅限模型菜单控件。');
+      const activate = ({ selector, picker, menus }) => {
+        const node = [...document.querySelectorAll(selector)].find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && getComputedStyle(candidate).visibility !== 'hidden'
+            && !candidate.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key],[inert],[data-active="false"],[hidden],[aria-hidden="true"],#prompt-textarea,input,textarea,[contenteditable="true"],[data-testid="send-button"],[data-testid*="stop-button"]');
+        });
+        if (!node || node.disabled || node.closest('[aria-disabled="true"]') || node.querySelector('#prompt-textarea,input,textarea,[contenteditable="true"],[data-testid="send-button"],[data-testid*="stop-button"]')) return false;
+        const isPicker = selector === picker && node.matches(picker);
+        const isRow = node.hasAttribute('data-pdf2zh-native-option') && node.closest(menus);
+        const isSlider = node.getAttribute('data-pdf2zh-native-slider') === 'owner' && node.closest(menus) && node.querySelector('[data-model-reasoning-effort-slider],[data-model-picker-power-slider]');
+        if (!isPicker && !isRow && !isSlider) return false;
+        // The shell's view toggle owns its click handler; an extra pointerdown
+        // can also reach the menu's close handler before the view has changed.
+        if (isRow && node.getAttribute('data-model-picker-view-toggle') === 'true') { node.click(); return true; }
+        return dispatchMenuClick(node);
+      };
+      // Oracle's ordinary DOM menu events work on a hidden target without
+      // activating it. This dispatcher is never used for prompts or Send.
+      const expression = `(() => { ${MENU_CLICK_DISPATCHER}; return (${activate.toString()})(${JSON.stringify({ selector, picker: PICKER, menus: MENU })}); })()`;
+      const result = await client.Runtime.evaluate({ expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails || result.result?.value !== true) throw coded('CONTROL_UNAVAILABLE', '网页模型菜单控件不可用。');
+      page.interactionCounts.domMenuClicks++;
+    },
+    async menuClick(selector) {
+      if (!isMenuSelector(selector)) throw coded('CONTROL_UNAVAILABLE', '交互仅限模型菜单控件。');
+      const useDOM = await page.evaluate(() => document.visibilityState === 'hidden' ||
+        [...document.querySelectorAll('form[data-chatgpt-composer] button[data-codex-intelligence-trigger][data-composer-navigation-target="reasoning"]')]
+          .some(node => !node.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key],[hidden],[inert]') && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0));
+      if (useDOM) return page.domMenuClick(selector);
+      return page.click(selector);
     },
     async press(key, selector) {
       if (!(key in KEY_CODES)) throw coded('INVALID_KEY', '不支持的浏览器按键。');
@@ -87,7 +123,7 @@ export async function inspectPage(page) {
   const extra = await page.evaluate(() => {
     const visible = n => !!n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden';
     const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
-    const outsideMessages = n => !n.closest('article,[data-message-author-role]');
+    const outsideMessages = n => !n.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key]');
     const modeControls = [...document.querySelectorAll('button[role="radio"],[role="tab"],button[data-testid*="mode"]')].filter(n => visible(n) && outsideMessages(n));
     const selected = n => n && (n.getAttribute('aria-checked') === 'true' || n.getAttribute('aria-selected') === 'true' || ['on','active','checked'].includes(n.getAttribute('data-state')));
     const chatControl = modeControls.find(n => /^(Chat|聊天|聊天模式|对话|對話|チャット)$/i.test(norm(n.textContent)));
@@ -112,6 +148,7 @@ export async function inspectPage(page) {
 export function modeFromEvidence(evidence) {
   if (evidence.workSelected || evidence.workPath || evidence.historyWork) return 'work';
   if (evidence.chatSelected || evidence.historyChat) return 'chat';
+  if (evidence.chatgptComposer && !evidence.workMarker) return 'chat';
   if (evidence.hasModeControls || evidence.conversation) return 'unknown';
   if (evidence.home && evidence.legacyPicker && evidence.composer && !evidence.workMarker) return 'legacy-chat';
   return 'unknown';
@@ -137,14 +174,14 @@ export async function prepareLoginPage(page) {
 export async function inspectCompatibility(page, knownEvidence) {
   const source = knownEvidence || await inspectPage(page);
   const evidence = Object.fromEntries([
-    'home', 'composer', 'login', 'challenge', 'authError', 'legacyPicker',
+    'home', 'composer', 'chatgptComposer', 'login', 'challenge', 'authError', 'legacyPicker',
     'workPath', 'workMarker', 'chatSelected', 'workSelected', 'hasModeControls',
     'profileControl', 'historyPresent', 'historyWork', 'historyChat', 'conversation',
   ].map(key => [key, !!source[key]]));
   const structure = await page.evaluate(() => {
     const visible = n => !!n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden';
     const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
-    const excluded = 'article,aside,nav,[role="navigation"],[data-message-author-role],[data-message-id],[data-testid*="conversation-turn"],input,textarea,select,[contenteditable="true"],[data-testid*="sidebar" i],[id*="sidebar" i],[class*="sidebar" i],[data-testid*="profile" i],[id*="profile" i],[class*="profile" i],[data-testid*="account" i],[id*="account" i],[class*="account" i]';
+    const excluded = 'article,aside,nav,[role="navigation"],[data-message-author-role],[data-message-id],[data-chatgpt-search-unit-key],[data-testid*="conversation-turn"],input,textarea,select,[contenteditable="true"],[data-testid*="sidebar" i],[id*="sidebar" i],[class*="sidebar" i],[data-testid*="profile" i],[id*="profile" i],[class*="profile" i],[data-testid*="account" i],[id*="account" i],[class*="account" i]';
     const privateLabel = /profile|account|personal|个人资料|账户|账号|プロフィール|アカウント/i;
     const safeNode = n => {
       if (n.closest(excluded)) return false;
@@ -155,7 +192,7 @@ export async function inspectCompatibility(page, knownEvidence) {
     };
     const short = (value, limit = 160) => norm(value).slice(0, limit);
     const attrs = (node, names) => Object.fromEntries(names.map(name => [name, short(node.getAttribute(name))]));
-    const composer = [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"]')].find(visible);
+    const composer = [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"],form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"]')].find(visible);
     const composerAncestors = [];
     for (let node = composer?.parentElement; node && node !== document.body && composerAncestors.length < 12; node = node.parentElement) {
       if (!safeNode(node)) continue;
@@ -178,7 +215,7 @@ export async function inspectCompatibility(page, knownEvidence) {
     return { composerAncestors, modeControls, visibilityState: document.visibilityState, hasFocus: document.hasFocus() };
   });
   const picker = await pickerSnapshot(page);
-  const interactions = Object.fromEntries(['pointerClicks', 'keyPresses', 'pickerRetries'].map(key => [key, Number(page.interactionCounts?.[key] || 0)]));
+  const interactions = Object.fromEntries(['pointerClicks', 'domMenuClicks', 'keyPresses', 'pickerRetries'].map(key => [key, Number(page.interactionCounts?.[key] || 0)]));
   return { evidence, ...structure, picker, interactions };
 }
 
@@ -209,18 +246,28 @@ async function closeMenus(page) {
   await page.press('Escape');
 }
 
-async function menuSnapshot(page) {
-  return page.evaluate(menuSelector => {
+async function menuSnapshot(page, captureStructure = false) {
+  return page.evaluate(({ menuSelector, captureStructure }) => {
     const visible = n => n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden' && !n.closest('[inert],[data-active="false"]');
     const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
     document.querySelectorAll('[data-pdf2zh-native-option]').forEach(n => n.removeAttribute('data-pdf2zh-native-option'));
-    const menus = [...document.querySelectorAll(menuSelector)].filter(n => visible(n) && !n.closest('article,[data-message-author-role]'));
-    const nodes = [...new Set(menus.flatMap(menu => [...menu.querySelectorAll('[role="radio"],[role="menuitemradio"],[role="option"],[role="menuitem"],button')]))].filter(visible);
-    return nodes.map((n, index) => {
+    const privateArea = 'aside,nav,input,textarea,[contenteditable="true"],[data-testid*="sidebar" i],[data-testid*="profile" i],[data-testid*="account" i],[id*="profile" i],[id*="account" i],article,[data-message-author-role],[data-chatgpt-search-unit-key]';
+    const privateLabel = /profile|account|personal|个人资料|账户|账号|個人資料|帳戶|帳號|プロフィール|アカウント/i;
+    const diagnosticSafe = node => {
+      if (node.closest(privateArea) || node.querySelector(privateArea) || privateLabel.test(node.textContent || '')) return false;
+      for (let parent = node; parent && parent !== document.body; parent = parent.parentElement) if (privateLabel.test(parent.getAttribute('aria-label') || '')) return false;
+      return true;
+    };
+    const outsideMessages = n => !n.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key]');
+    const menus = [...document.querySelectorAll(menuSelector)].filter(n => visible(n) && outsideMessages(n));
+    const nodes = [...new Set(menus.flatMap(menu => [...menu.querySelectorAll('[role="radio"],[role="menuitemradio"],[role="option"],[role="menuitem"],button')]))].filter(n => visible(n) && outsideMessages(n));
+    const rows = nodes.map((n, index) => {
       const id = `native-${index}`;
       n.setAttribute('data-pdf2zh-native-option', id);
       const primary = n.querySelector('.truncate') || n.querySelector('[data-testid*="label"],.font-medium');
-      return { id, label: norm(primary?.textContent || n.getAttribute('aria-label') || n.innerText), role: n.getAttribute('role'),
+      return { id, label: norm(primary?.textContent || n.getAttribute('aria-label') || n.innerText), ariaLabel: norm(n.getAttribute('aria-label')), role: n.getAttribute('role'), diagnosticSafe: diagnosticSafe(n),
+        modelViewToggle: n.getAttribute('data-model-picker-view-toggle') === 'true',
+        fullText: captureStructure && diagnosticSafe(n) ? norm(n.innerText).slice(0, 2000) : undefined,
         selected: n.getAttribute('aria-checked') === 'true' || n.getAttribute('aria-selected') === 'true' || ['checked','on'].includes(n.getAttribute('data-state')),
         disabled: n.hasAttribute('disabled') || n.getAttribute('aria-disabled') === 'true' || !!n.closest('[aria-disabled="true"]'),
         submenu: n.getAttribute('aria-haspopup') === 'menu', expanded: n.getAttribute('aria-expanded'), controls: n.getAttribute('aria-controls'),
@@ -229,20 +276,67 @@ async function menuSnapshot(page) {
         menu: menus.findLastIndex(menu => menu.contains(n)),
       };
     });
-  }, MENU);
+    if (captureStructure && rows.length) {
+      const fragments = menus.filter(menu => !menu.closest(privateArea) && !privateLabel.test(menu.getAttribute('aria-label') || '')).slice(0, 4).map(menu => {
+        const clone = menu.cloneNode(true);
+        clone.querySelectorAll(`${privateArea},svg,path,style,script,select`).forEach(node => node.remove());
+        for (const node of [clone, ...clone.querySelectorAll('*')]) {
+          if (privateLabel.test(node.getAttribute('aria-label') || '') || (!node.childElementCount && privateLabel.test(node.textContent || ''))) { node.remove(); continue; }
+          for (const attr of [...node.attributes]) if (!/^(?:id|class|role|type|disabled|aria-[\w-]+|data-[\w-]+)$/.test(attr.name)) node.removeAttribute(attr.name);
+        }
+        return clone.outerHTML;
+      });
+      rows[0].menuStructure = fragments.join('\n').slice(0, 12000);
+    }
+    return rows;
+  }, { menuSelector: MENU, captureStructure });
 }
 
 async function clickRow(page, row) {
-  await page.click(`[data-pdf2zh-native-option="${row.id}"]`);
+  await page.menuClick(`[data-pdf2zh-native-option="${row.id}"]`);
   await page.waitForTimeout(page.pollMs);
 }
 
+async function openMenuDiagnostic(page, kind) {
+  return page.evaluate(({ picker, menus, kind }) => {
+    const excluded = 'article,aside,nav,[data-message-author-role],[data-chatgpt-search-unit-key],[data-message-id],input,textarea,[contenteditable="true"],[data-testid*="sidebar" i],[data-testid*="profile" i],[data-testid*="account" i]';
+    const privateLabel = /profile|account|personal|个人资料|账户|账号|個人資料|帳戶|帳號|プロフィール|アカウント/i;
+    const safe = node => {
+      if (node.closest(excluded)) return false;
+      for (let parent = node; parent && parent !== document.body; parent = parent.parentElement) {
+        if (privateLabel.test(parent.getAttribute('aria-label') || '')) return false;
+      }
+      return true;
+    };
+    const visible = node => safe(node) && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0 && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[hidden],[inert],[aria-hidden="true"],[data-active="false"]');
+    const triggers = [...document.querySelectorAll(picker)].filter(visible);
+    const panels = [...document.querySelectorAll(menus)].filter(visible);
+    const owns = (control, panel) => (control.getAttribute('aria-controls') || '').split(/\s+/).some(id => id && document.getElementById(id)?.contains(panel)) ||
+      !!control.id && (panel.getAttribute('aria-labelledby') || '').split(/\s+/).includes(control.id);
+    const owned = new Set(panels.filter(panel => panel.matches('[data-testid="composer-intelligence-picker-content"]') || triggers.some(trigger => owns(trigger, panel))));
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const panel of panels) if (!owned.has(panel) && [...owned].some(parent => parent.contains(panel) || [...parent.querySelectorAll('[aria-controls]')].filter(safe).some(control => owns(control, panel)))) {
+        owned.add(panel); changed = true;
+      }
+    }
+    const short = value => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const nodes = [...new Set([...owned].flatMap(panel => [...panel.querySelectorAll('button,[role="menuitem"],[role="menuitemradio"],[role="radio"],[role="option"],[role="slider"]')]))]
+      .filter(node => visible(node) && !node.querySelector(excluded) && !privateLabel.test(node.getAttribute('aria-label') || node.textContent || ''));
+    return { kind, menuCount: owned.size, rows: nodes.slice(0, 48).map(node => ({
+      tag: node.tagName.toLowerCase(), ...Object.fromEntries(['role', 'data-testid', 'aria-haspopup', 'aria-expanded', 'aria-checked', 'aria-selected', 'aria-disabled', 'data-state'].map(name => [name, short(node.getAttribute(name))])),
+      label: short(node.getAttribute('aria-label') || node.textContent),
+    })) };
+  }, { picker: PICKER, menus: MENU, kind });
+}
+
 const containsWord = (label, words) => words.some(word => normalize(label).toLowerCase().includes(word));
+const rowContainsWord = (row, words) => containsWord(row.ariaLabel, words) || containsWord(row.label, words);
 const radioRows = rows => rows.filter(row => ['radio', 'menuitemradio', 'option'].includes(row.role));
 
 async function pickerSnapshot(page) {
   return page.evaluate(({ picker, menus }) => {
-    const eligible = node => !node.closest('article,[data-message-author-role],[inert],[data-active="false"]');
+    const eligible = node => !node.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key],[inert],[data-active="false"]');
     const displayed = node => {
       if (!eligible(node) || node.closest('[hidden],[aria-hidden="true"]') || getComputedStyle(node).visibility === 'hidden') return false;
       for (let parent = node; parent; parent = parent.parentElement) if (getComputedStyle(parent).display === 'none') return false;
@@ -263,16 +357,16 @@ async function openPicker(page) {
   await closeMenus(page);
   // The composer is often available several seconds before React mounts the picker.
   await poll(page, () => page.evaluate(selector => [...document.querySelectorAll(selector)].some(n => n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden'), PICKER), 'PICKER_UNAVAILABLE', '网页模型选择器尚未准备好，请稍后刷新。');
-  await page.click(PICKER);
+  await page.menuClick(PICKER);
   let clickedAt = Date.now();
   return poll(page, async () => {
-    const rows = await menuSnapshot(page);
+    const rows = await menuSnapshot(page, true);
     if (rows.length) return rows;
     // A server-rendered pill can precede React's event handlers. Retry only
     // while there is no open menu; never click an already open picker closed.
     if (Date.now() - clickedAt > 800 && !(await pickerSnapshot(page)).open) {
       if (page.interactionCounts) page.interactionCounts.pickerRetries++;
-      await page.click(PICKER);
+      await page.menuClick(PICKER);
       clickedAt = Date.now();
     }
     return null;
@@ -281,12 +375,30 @@ async function openPicker(page) {
 
 async function openSection(page, kind) {
   let rows = await openPicker(page);
+  const initialMenuStructure = rows[0]?.menuStructure || '';
+  const diagnosticRows = items => items.filter(row => row.diagnosticSafe !== false).slice(0, 48).map(row => Object.fromEntries(
+    ['label', 'ariaLabel', 'modelViewToggle', 'fullText', 'role', 'testid', 'group', 'selected', 'disabled', 'submenu', 'expanded', 'parentSection', 'menu'].map(key =>
+      [key, typeof row[key] === 'string' ? row[key].slice(0, key === 'fullText' ? 2000 : 120) : row[key]])));
+  const initialRows = diagnosticRows(rows);
+  let lastRows = initialRows;
   let advancedClicked = false;
   let sectionClicked = false;
+  let menuReopens = 0;
   return poll(page, async () => {
     rows = await menuSnapshot(page);
+    if (!rows.length && menuReopens === 0 && !(await pickerSnapshot(page)).open) {
+      menuReopens++;
+      rows = await openPicker(page);
+      advancedClicked = false;
+      sectionClicked = false;
+    }
+    if (rows.length) lastRows = diagnosticRows(rows);
     const groupRows = radioRows(rows).filter(row => containsWord(row.group, WORDS[kind]));
     if (groupRows.length) return filterOptions(groupRows);
+    if (kind === 'model' && rows.some(row => row.modelViewToggle)) {
+      const visibleModels = radioRows(rows).filter(row => !containsWord(row.group, WORDS.effort) && !/effort|thinking-time/.test(row.testid));
+      if (visibleModels.length) return filterOptions(visibleModels);
+    }
     if (sectionClicked) {
       const candidates = radioRows(rows);
       if (candidates.length) {
@@ -294,7 +406,7 @@ async function openSection(page, kind) {
         return filterOptions(candidates.filter(row => row.menu === last));
       }
     }
-    const section = rows.find(row => row.role === 'menuitem' && !row.disabled && containsWord(row.label, WORDS[kind]) && !(kind === 'model' && containsWord(row.label, WORDS.effort)));
+    const section = rows.find(row => row.role === 'menuitem' && !row.disabled && ((kind === 'model' && row.modelViewToggle) || rowContainsWord(row, WORDS[kind])) && !(kind === 'model' && rowContainsWord(row, WORDS.effort)));
     if (section && !sectionClicked) {
       const inline = radioRows(rows).filter(row => row.parentSection === section.id);
       if (inline.length) return filterOptions(inline);
@@ -304,7 +416,7 @@ async function openSection(page, kind) {
       sectionClicked = true;
       return null;
     }
-    const advanced = rows.find(row => containsWord(row.label, WORDS.advanced));
+    const advanced = rows.find(row => rowContainsWord(row, WORDS.advanced));
     if (advanced && !advancedClicked && advanced.expanded !== 'true') {
       await clickRow(page, advanced);
       advancedClicked = true;
@@ -318,13 +430,18 @@ async function openSection(page, kind) {
       return { absent: true };
     }
     return null;
-  }, 'PICKER_UNAVAILABLE', '网页选项结构暂不受支持，没有猜测可用模型或推理强度。');
+  }, 'PICKER_UNAVAILABLE', '网页选项结构暂不受支持，没有猜测可用模型或推理强度。').catch(async error => {
+    let current = { kind };
+    try { current = await openMenuDiagnostic(page, kind); } catch { /* Retain rows already read if the page disappears. */ }
+    error.diagnostic = { ...error.diagnostic, openMenu: { ...current, initialRows, lastRows, initialMenuStructure, advancedClicked, sectionClicked, menuReopens } };
+    throw error;
+  });
 }
 
 async function readSliderState(page) {
   return page.evaluate(() => {
     const visible = n => n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden' && !n.closest('[inert],[data-active="false"]');
-    const roots = [...document.querySelectorAll('[data-model-reasoning-effort-slider]')].filter(n => visible(n) && n.closest('[role="menu"],[data-testid="composer-intelligence-picker-content"]'));
+    const roots = [...document.querySelectorAll('[data-model-reasoning-effort-slider],[data-model-picker-power-slider]')].filter(n => visible(n) && !n.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key]') && n.closest('[role="menu"],[data-testid="composer-intelligence-picker-content"]'));
     if (roots.length !== 1) return null;
     const root = roots[0];
     const control = root.closest('[role="menuitem"]');
@@ -350,16 +467,40 @@ async function readSliderState(page) {
 async function revealSimpleSlider(page) {
   const rememberedAdvanced = await page.evaluate(() => {
     const active = node => !!node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0 && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert],[data-active="false"]');
-    return [...document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')].some(menu => {
+    const legacy = [...document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')].some(menu => {
       if (!active(menu)) return false;
       const simple = menu.querySelector('[data-testid="composer-model-picker-slider-simple-view"]');
       const advanced = menu.querySelector('[data-testid="composer-model-picker-slider-advanced-view"]');
       return simple && !active(simple) && active(advanced);
     });
+    const shell = [...document.querySelectorAll('[data-model-picker-view]')].some(view => active(view) && view.getAttribute('data-model-picker-view') !== 'simple' &&
+      [...view.querySelectorAll('[role="menuitemradio"],[role="radio"],[role="option"]')].some(active));
+    return { legacy, shell };
   });
-  if (!rememberedAdvanced) return;
-  const rows = await menuSnapshot(page);
-  const toggle = rows.find(row => row.role === 'menuitem' && row.expanded === 'true' && !row.disabled && containsWord(row.label, WORDS.model) && !containsWord(row.label, WORDS.effort));
+  if (!rememberedAdvanced.legacy && !rememberedAdvanced.shell) return;
+  const rows = await menuSnapshot(page, true);
+  const toggle = rows.find(row => row.role === 'menuitem' && !row.disabled && (rememberedAdvanced.shell ? row.modelViewToggle :
+    row.expanded === 'true' && rowContainsWord(row, WORDS.model) && !rowContainsWord(row, WORDS.effort)));
+  if (!toggle && rememberedAdvanced.shell) {
+    let selectedModelReturnAttempted = false;
+    try {
+      const selected = radioRows(rows).filter(row => row.selected);
+      if (selected.length !== 1 || selected[0].disabled) throw coded('PICKER_UNAVAILABLE', '高级模型列表没有唯一且可用的已选模型，无法返回推理强度滑块。');
+      selectedModelReturnAttempted = true;
+      await clickRow(page, selected[0]);
+      await openPicker(page);
+      await poll(page, () => readSliderState(page), 'PICKER_UNAVAILABLE', '确认当前模型后网页未返回推理强度滑块，已停止。');
+      return;
+    } catch (error) {
+      const current = await menuSnapshot(page, true).catch(() => []);
+      const snapshot = items => items.filter(row => row.diagnosticSafe !== false).slice(0, 48).map(row => ({
+        label: row.label.slice(0, 120), ariaLabel: row.ariaLabel.slice(0, 120), role: row.role, selected: row.selected, disabled: row.disabled,
+      }));
+      error.diagnostic = { ...error.diagnostic, openMenu: { kind: 'effort', selectedModelReturnAttempted,
+        initialRows: snapshot(rows), lastRows: snapshot(current), initialMenuStructure: rows[0]?.menuStructure || '', lastMenuStructure: current[0]?.menuStructure || '' } };
+      throw error;
+    }
+  }
   if (!toggle) throw coded('PICKER_UNAVAILABLE', '网页模型菜单停留在高级视图，未找到返回推理强度滑块的控件。');
   await clickRow(page, toggle);
   await poll(page, () => readSliderState(page), 'PICKER_UNAVAILABLE', '网页未返回推理强度滑块，请刷新模型。');
@@ -492,7 +633,7 @@ export async function readSlider(page, requested) {
     }
     if (new Set(choices.map(item => item.value)).size !== choices.length) throw coded('PICKER_UNAVAILABLE', '网页推理强度标签无法区分，已暂停。');
     if (requested) {
-      const selected = choices.find(item => item.value === requested);
+      const selected = choices.find(item => effortKey(item.value) === effortKey(requested));
       if (!selected) throw coded('OPTION_UNAVAILABLE', `当前账号没有提供推理强度：${requested}。`);
       destination = selected.position;
     }
@@ -527,13 +668,14 @@ export async function readChoices(page, kind, requested) {
     let options = await openSection(page, kind);
     if (options.absent) options = [];
     if (requested) {
-      const selected = options.find(item => item.value === requested);
+      const matches = item => kind === 'effort' ? effortKey(item.value) === effortKey(requested) : item.value === requested;
+      const selected = options.find(matches);
       if (!selected) throw coded('OPTION_UNAVAILABLE', `当前账号的网页没有可用选项：${requested}。请刷新列表重新选择。`);
       if (!selected.selected) {
         await clickRow(page, selected);
         options = await openSection(page, kind);
       }
-      if (!Array.isArray(options) || !options.some(item => item.value === requested && item.selected)) throw coded('SELECTION_UNVERIFIED', `网页未确认 ${requested} 已被选中。`);
+      if (!Array.isArray(options) || !options.some(item => matches(item) && item.selected)) throw coded('SELECTION_UNVERIFIED', `网页未确认 ${requested} 已被选中。`);
     }
     return { options: options.map(({ value, label }) => ({ value, label })), selected: options.find(item => item.selected)?.value || '' };
   } finally { await closeMenus(page); }

@@ -16,7 +16,7 @@ const samePath = (a, b) => process.platform === 'win32' ? path.resolve(a).toLowe
 
 export async function workerVersion() {
   const hash = createHash('sha256');
-  for (const name of ['broker.mjs', 'bridge.mjs', 'endpoint.mjs', 'native-ui.mjs', 'ui.mjs', 'package-lock.json']) {
+  for (const name of ['broker.mjs', 'bridge.mjs', 'shell-page.mjs', 'endpoint.mjs', 'native-ui.mjs', 'ui.mjs', 'package-lock.json']) {
     hash.update(name);
     hash.update(await fs.readFile(path.join(HERE, name)).catch(() => Buffer.from('missing')));
   }

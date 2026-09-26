@@ -4,10 +4,15 @@ export const WORDS = {
   model: ['model', '模型', 'モデル', '모델', 'modelo', 'modèle', 'modell'],
   effort: ['effort', 'thinking', 'reasoning', '强度', '強度', '思考', '推理', '推論レベル', '추론', 'aufwand', 'esfuerzo'],
 };
-export const PICKER = '[data-testid="model-switcher-dropdown-button"],button.__composer-pill[aria-haspopup="menu"]';
+export const PICKER = '[data-testid="model-switcher-dropdown-button"],button.__composer-pill[aria-haspopup="menu"],button[data-codex-intelligence-trigger][data-composer-navigation-target="reasoning"]';
 
 export function normalize(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+const EFFORT_KEYS = new Map([['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度']]);
+export function effortKey(value) {
+  return EFFORT_KEYS.get(value) ?? value;
 }
 
 export function filterOptions(rows) {
@@ -21,6 +26,7 @@ export function filterOptions(rows) {
 export function modeFromEvidence(evidence) {
   if (evidence.workSelected || evidence.workPath) return 'work';
   if (evidence.chatSelected) return 'chat';
+  if (evidence.chatgptComposer && !evidence.workMarker) return 'chat';
   if (evidence.hasModeControls) return 'unknown';
   // Support the classic site only with a positively identified legacy header picker.
   if (evidence.home && evidence.legacyPicker && evidence.composer && !evidence.workMarker) return 'legacy-chat';
@@ -28,15 +34,17 @@ export function modeFromEvidence(evidence) {
 }
 
 export async function inspectPage(page) {
-  return page.evaluate(() => {
+  return page.evaluate(picker => {
     const visible = n => !!n && n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().height > 0 && getComputedStyle(n).visibility !== 'hidden';
     const norm = t => String(t || '').replace(/\s+/g, ' ').trim();
-    const controls = [...document.querySelectorAll('button[role="radio"], [role="tab"], button[data-testid*="mode"]')].filter(visible);
+    const outsideMessages = n => !n.closest('article,[data-message-author-role],[data-chatgpt-search-unit-key]');
+    const controls = [...document.querySelectorAll('button[role="radio"], [role="tab"], button[data-testid*="mode"]')].filter(n => visible(n) && outsideMessages(n));
     const selected = n => n && ['true', 'on', 'active'].includes(n.getAttribute('aria-checked') || n.getAttribute('aria-selected') || n.getAttribute('data-state'));
     const chat = controls.find(n => /^(Chat|聊天|聊天模式|チャット)$/i.test(norm(n.textContent)));
     const work = controls.find(n => /^(Work|工作|工作模式|ワーク)$/i.test(norm(n.textContent)));
-    const composer = [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"]')].some(visible);
-    const login = [...document.querySelectorAll('button,a')].some(n => visible(n) && /^(Log in|Sign in|登录|登入|ログイン)$/i.test(norm(n.textContent)));
+    const chatgptComposer = [...document.querySelectorAll('form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"]')].some(n => visible(n) && outsideMessages(n));
+    const composer = chatgptComposer || [...document.querySelectorAll('#prompt-textarea,textarea[name="prompt-textarea"]')].some(n => visible(n) && outsideMessages(n));
+    const login = [...document.querySelectorAll('button,a')].some(n => visible(n) && outsideMessages(n) && /^(Log in|Sign in|登录|登入|ログイン)$/i.test(norm(n.textContent)));
     const authPage = ['auth.openai.com', 'auth0.openai.com'].includes(location.hostname) ||
       (location.hostname === 'chatgpt.com' && /^\/(auth|login|log-in)(\/|$)/.test(location.pathname));
     // Inspect rendered error labels only, never input values, cookies or request bodies.
@@ -51,17 +59,17 @@ export async function inspectPage(page) {
     })?.responseStatus : undefined;
     const authError = Boolean(authPage && !composer && (routeError || genericAuthError));
     return {
-      url: location.href, home: location.pathname === '/', composer, login,
+      url: location.href, home: location.pathname === '/', composer, chatgptComposer, login,
       automatedBrowser: navigator.webdriver === true,
       authPage, authError, authHttpStatus: authError && Number(verifyStatus) === 403 ? 403 : null,
       chatSelected: !!selected(chat), workSelected: !!selected(work), hasModeControls: !!(chat || work),
       workPath: /^\/(work|agent)(\/|$)/i.test(location.pathname),
-      workMarker: [...document.querySelectorAll('[data-testid*="work"], [data-mode="work"]')].some(visible),
+      workMarker: [...document.querySelectorAll('[data-testid*="work"], [data-mode="work"]')].some(n => visible(n) && outsideMessages(n)),
       legacyPicker: visible(document.querySelector('[data-testid="model-switcher-dropdown-button"]')),
-      modelPill: [...document.querySelectorAll('[data-testid="model-switcher-dropdown-button"],button.__composer-pill[aria-haspopup="menu"]')].filter(visible).map(n => norm(n.innerText)).join(' / '),
+      modelPill: [...document.querySelectorAll(picker)].filter(n => visible(n) && outsideMessages(n)).map(n => norm(n.innerText)).join(' / '),
       challenge: !composer && /just a moment|please wait|verify you are human|请稍候|请稍等|验证您是真人|しばらくお待ち/i.test(document.title),
     };
-  });
+  }, PICKER);
 }
 
 export function connectionStatus(evidence) {
@@ -234,7 +242,7 @@ async function readSlider(page, requested) {
     }
     if (new Set(values.map(v => v.value)).size !== values.length) throw coded('PICKER_UNAVAILABLE', '网页推理强度标签无法区分，已暂停。');
     if (requested) {
-      const wanted = values.find(value => value.value === requested);
+      const wanted = values.find(value => effortKey(value.value) === effortKey(requested));
       if (!wanted) throw coded('OPTION_UNAVAILABLE', `当前账号的网页没有可用推理强度：${requested}。`);
       destination = wanted.position;
     }
@@ -251,13 +259,14 @@ export async function readChoices(page, kind, requested) {
   }
   let options = await openSection(page, kind);
   if (requested) {
-    const choice = options.find(item => item.value === requested);
+    const matches = item => kind === 'effort' ? effortKey(item.value) === effortKey(requested) : item.value === requested;
+    const choice = options.find(matches);
     if (!choice) throw coded('OPTION_UNAVAILABLE', `当前账号的网页没有可用选项：${requested}。请刷新列表重新选择。`);
     if (!choice.selected) {
       await clickMarked(page, choice);
       options = await openSection(page, kind);
     }
-    if (!options.find(item => item.value === requested)?.selected) {
+    if (!options.find(matches)?.selected) {
       throw coded('SELECTION_UNVERIFIED', `无法确认网页已选择 ${requested}，已停止发送。`);
     }
   }

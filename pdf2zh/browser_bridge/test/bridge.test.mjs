@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import { createBridge, connectOwnedPage, OWNED_PAGE_NOTRANSLATE_SCRIPT, installOwnedPageTranslationHints, translatedHomeState } from '../bridge.mjs';
+import { createHash } from 'node:crypto';
+import { createBridge, connectOwnedPage, textSubmissionInput, OWNED_PAGE_NOTRANSLATE_SCRIPT, installOwnedPageTranslationHints, translatedHomeState, structuredUserContent, userTurn, submissionDiagnostic } from '../bridge.mjs';
 import { browserPromptFingerprint } from '../node_modules/@steipete/oracle/dist/src/browser/promptFingerprint.js';
 
 async function temporary(fn) {
@@ -24,7 +25,7 @@ function fixture() {
       if (options.targetId && !tabs.has(id)) throw new Error('No target with given id found');
       const state = tabs.get(id) || { url: 'about:blank', count: 0 };
       tabs.set(id, state);
-      const client = { Runtime: { state, evaluate: async () => ({ result: { value: 0 } }) }, Input: {}, Page: { reload: async () => calls.reloads.push(id) }, on: () => {},
+      const client = { Runtime: { state, evaluate: async () => ({ result: { value: (state.count || 0) * 2 } }) }, Input: {}, Page: { reload: async () => calls.reloads.push(id) }, on: () => {},
         _ws: { readyState: 1, on: () => {} },
         Target: { createTarget: async options => { assert.deepEqual(options, { url: 'about:blank', background: true }); const targetId = `owned-${++next}`; tabs.set(targetId, { url: 'about:blank', count: 0 }); return { targetId }; } } };
       return { client, targetId: id, close: async options => { calls.close.push({ id, options }); } };
@@ -36,13 +37,19 @@ function fixture() {
       ensureChat: async () => {},
       catalog: async (_page, model, effort) => { calls.catalog++; return { model: model || 'actual-account-model', effort: effort || 'actual-effort', models: [], efforts: [] }; },
     },
-    promptReady: async () => {}, readUserIds: async runtime => runtime.state.messageId ? [runtime.state.messageId] : [],
+    promptReady: async () => {}, readUserIds: async runtime => runtime.state.userIds || (runtime.state.messageId ? [runtime.state.messageId] : []),
     readFingerprint: async runtime => runtime.state.messageId ? browserPromptFingerprint(runtime.state.text, runtime.state.messageId) : undefined,
     userTurn: async runtime => ({ ...runtime.state }),
     submit: async (options, prompt) => {
       assert.equal(options.page, undefined, 'submission cannot bring the browser tab to the foreground');
+      assert.equal(options.input.dispatchMouseEvent, undefined, 'the first and only send uses Oracle DOM click, never an ineffective background mouse then fallback');
+      assert.equal(typeof options.input.insertText, 'function');
+      assert.equal(typeof options.input.dispatchKeyEvent, 'function');
       calls.submit++;
-      Object.assign(options.runtime.state, { messageId: 'submitted-user', text: prompt, count: 1, url: 'https://chatgpt.com/c/our-request' });
+      const state = options.runtime.state;
+      const messageId = `submitted-user-${calls.submit}`;
+      Object.assign(state, { messageId, text: prompt, renderedText: prompt, count: (state.count || 0) + 1,
+        userIds: [...(state.userIds || []), messageId], url: 'https://chatgpt.com/c/our-request' });
       await options.onPromptSubmitted();
     },
     waitAnswer: async () => ({ text: '{"translation":"离线测试译文"}' }),
@@ -53,7 +60,7 @@ function fixture() {
     calls.scoped.push(targetId);
     const state = tabs.get(targetId);
     if (!state) throw new Error('No target with given id found');
-    return { targetId, client: { Runtime: { state, evaluate: async () => ({ result: { value: 0 } }) }, Input: {}, Page: { reload: async () => calls.reloads.push(targetId) } }, close: async options => { calls.close.push({ id: targetId, options }); } };
+    return { targetId, client: { Runtime: { state, evaluate: async () => ({ result: { value: (state.count || 0) * 2 } }) }, Input: {}, Page: { reload: async () => calls.reloads.push(targetId) } }, close: async options => { calls.close.push({ id: targetId, options }); } };
   };
   return { deps, calls, tabs };
 }
@@ -134,6 +141,74 @@ test('failed capture resumes only the same verified user turn without resubmissi
   const recovered = await bridge.run({ ...req, op: 'recover' });
   assert.equal(recovered.answer, 'recovered'); assert.equal(f.calls.submit, 1);
 }));
+
+test('shell rollout rebinds changed DOM text only with exact saved ID, URL, baseline and original full prompt', async () => temporary(async directory => {
+  for (const condition of ['valid', 'wrong-id', 'wrong-prompt', 'wrong-url', 'missing-file']) {
+    const dir = path.join(directory, condition); const f = fixture(); let captures = 0, clock = 0;
+    f.deps.recoveryNow = () => clock; f.deps.recoveryPause = async ms => { clock += ms; };
+    f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('original wait interrupted'); return { text: 'recovered original' }; };
+    const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: dir });
+    const req = await request(dir); await bridge.run(req);
+    const state = f.tabs.get('owned-2'); const original = state.text;
+    Object.assign(state, { shell: true, text: original + ' UI changed', renderedText: original, structuredText: original });
+    if (condition === 'wrong-id') { state.messageId = 'another'; state.userIds = ['another']; }
+    if (condition === 'wrong-prompt') { state.renderedText = 'different'; state.structuredText = 'different'; }
+    if (condition === 'wrong-url') state.url = 'https://chatgpt.com/c/another';
+    if (condition === 'missing-file') await fs.unlink(req.prompt_file);
+    const result = await bridge.run({ ...req, op: 'recover' });
+    assert.equal(f.calls.submit, 1);
+    if (condition === 'valid') { assert.equal(result.answer, 'recovered original'); assert.equal(captures, 2); }
+    else { assert.equal(result.ok, false); assert.equal(captures, 1); }
+  }
+}));
+
+test('web language aliases keep later batches in the original task and conversation', async () => temporary(async directory => {
+  const f = fixture(); let label = '即時';
+  f.deps.ui.catalog = async () => ({ model: 'actual-account-model', effort: label });
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const first = await bridge.run({ ...await request(directory), task_id: 'same-pdf', effort: label });
+  label = '即时';
+  const second = await bridge.run({ ...await request(directory, 'translate', '-second'), task_id: 'same-pdf', effort: label });
+  assert.equal(second.ok, true); assert.equal(second.conversation_url, first.conversation_url);
+  assert.equal(f.calls.submit, 2); assert.equal(f.tabs.size, 3);
+}));
+
+test('explicit recovery refresh navigates the same verified conversation once without another submit', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0; let readyChecks = 0;
+  f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('stalled connection'); return { text: 'refreshed answer' }; };
+  f.deps.promptReady = async () => { readyChecks++; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'refresh-task' }; await bridge.run(req);
+  const before = f.calls.navigate.length; const previousReady = readyChecks;
+  const recovered = await bridge.run({ ...req, op: 'recover', refresh_conversation: true });
+  assert.equal(recovered.answer, 'refreshed answer'); assert.equal(f.calls.submit, 1);
+  assert.equal(f.calls.navigate.length, before + 1); assert.equal(f.calls.navigate.at(-1), 'https://chatgpt.com/c/our-request');
+  assert.equal(readyChecks, previousReady + 2); assert.equal(f.tabs.size, 3);
+  const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(journal.target_id, 'owned-2'); assert.equal(journal.task_id, 'refresh-task');
+}));
+
+test('explicit recovery refresh refuses unverified identity, draft or missing original target without navigating', async () => temporary(async directory => {
+  for (const failure of ['identity', 'draft', 'closed', 'missing-fingerprint']) {
+    const f = fixture(); let captures = 0; let clock = 0;
+    f.deps.waitAnswer = async () => { captures++; throw new Error('stalled connection'); };
+    f.deps.recoveryNow = () => clock; f.deps.recoveryPause = async ms => { clock += ms; };
+    const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+    const req = await request(directory, 'translate', `-${failure}`); await bridge.run(req);
+    if (failure === 'identity') f.tabs.get('owned-2').text = 'Different request';
+    if (failure === 'draft') f.tabs.get('owned-2').hasDraft = true;
+    if (failure === 'closed') f.tabs.delete('owned-2');
+    if (failure === 'missing-fingerprint') {
+      const filename = path.join(req.request_dir, 'journal.json'); const journal = JSON.parse(await fs.readFile(filename, 'utf8'));
+      delete journal.submitted_prompt_hash; await fs.writeFile(filename, JSON.stringify(journal));
+    }
+    const before = f.calls.navigate.length;
+    const result = await bridge.run({ ...req, op: 'recover', refresh_conversation: true });
+    assert.equal(result.ok, false); assert.equal(result.not_submitted, false);
+    assert.equal(result.error_code, failure === 'draft' ? 'RECOVERY_DRAFT_PRESENT' : failure === 'closed' ? 'RECOVERY_UNAVAILABLE' : 'RECOVERY_IDENTITY_UNVERIFIED');
+    assert.equal(f.calls.navigate.length, before); assert.equal(f.calls.submit, 1); assert.equal(captures, 1);
+  }
+}));
 test('recovery waits for the saved message and later Chat controls before reading an answer', async () => temporary(async directory => {
   const f = fixture(); let captures = 0; let clock = 0; let recovering = false; let modeChecks = 0;
   let savedTurn;
@@ -205,7 +280,7 @@ test('first rendered user message must equal this batch prompt before binding a 
   assert.equal(response.error_code, 'RECOVERY_IDENTITY_UNVERIFIED'); assert.equal(response.not_submitted, false);
   const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
   assert.equal(journal.submitted_prompt_hash, undefined);
-  assert.equal((await bridge.run({ ...req, op: 'recover' })).error_code, 'RECOVERY_UNAVAILABLE');
+  assert.equal((await bridge.run({ ...req, op: 'recover' })).error_code, 'RECOVERY_IDENTITY_UNVERIFIED');
   assert.equal(f.calls.submit, 1);
 }));
 test('missing journals prove no send; corrupt and ambiguous journals never do', async () => temporary(async directory => {
@@ -257,6 +332,21 @@ test('owned page facade binds every command to its exact session without reconne
   await connection.client.Input.insertText({ text: 'offline' });
   await connection.close();
   assert.deepEqual(commands, [['Runtime.evaluate', { expression: 'location.href' }, 'own-session'], ['Input.insertText', { text: 'offline' }, 'own-session'], ['detach', { sessionId: 'own-session' }]]);
+});
+
+test('text submission Input exposes only insertion/key events and forwards to the same bound target', async () => {
+  const calls = [];
+  const input = {
+    async insertText(params) { assert.equal(this, input); calls.push(['insertText', params]); return 'inserted'; },
+    async dispatchKeyEvent(params) { assert.equal(this, input); calls.push(['dispatchKeyEvent', params]); return 'key-sent'; },
+    async dispatchMouseEvent() { throw new Error('background mouse must never be attempted'); },
+  };
+  const facade = textSubmissionInput(input);
+  assert.deepEqual(Object.keys(facade).sort(), ['dispatchKeyEvent', 'insertText']);
+  assert.equal('dispatchMouseEvent' in facade, false);
+  assert.equal(await facade.insertText({ text: 'offline fixture' }), 'inserted');
+  assert.equal(await facade.dispatchKeyEvent({ type: 'keyDown', key: 'Enter' }), 'key-sent');
+  assert.deepEqual(calls, [['insertText', { text: 'offline fixture' }], ['dispatchKeyEvent', { type: 'keyDown', key: 'Enter' }]]);
 });
 
 test('notranslate document-start hints tolerate delayed root/head, are idempotent and skip other origins', async () => {
@@ -348,3 +438,286 @@ test('translation hints never reload a draft, submitted page or recovering conve
   assert.equal((await resumed.run({ ...req, op: 'recover' })).answer, 'recovered');
   assert.deepEqual(f.calls.reloads, []);
 }));
+
+test('two batches of one PDF reuse the same chat and persist the prior-turn baseline', async () => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'pdf-settings-fixed' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: first.task_id };
+  await fs.writeFile(second.prompt_file, 'Second batch of the same PDF.');
+  assert.equal((await bridge.run(first)).ok, true);
+  assert.equal((await bridge.run(second)).ok, true);
+  assert.equal(f.calls.submit, 2); assert.deepEqual(f.calls.navigate, ['https://chatgpt.com/', 'https://chatgpt.com/']);
+  const journal = JSON.parse(await fs.readFile(path.join(second.request_dir, 'journal.json'), 'utf8'));
+  assert.deepEqual(journal.previous_user_ids, ['submitted-user-1']); assert.equal(journal.previous_user_count, 1); assert.equal(journal.baseline_turns, 2);
+  assert.deepEqual(journal.accepted_user_ids, ['submitted-user-1', 'submitted-user-2']);
+  const task = JSON.parse(await fs.readFile(path.join(directory, 'tasks', `${first.task_id}.json`), 'utf8'));
+  assert.equal(task.target_id, 'owned-2'); assert.equal(task.pending_request_dir, null); assert.equal(task.last_user_count, 2);
+  assert.equal(task.conversation_url, 'https://chatgpt.com/c/our-request');
+}));
+
+test('an unfinished batch blocks later batches of the same task until recovery succeeds', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0;
+  f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('interrupted first batch'); return { text: 'complete' }; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'same-pdf' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: 'same-pdf' };
+  assert.equal((await bridge.run(first)).not_submitted, false);
+  const blocked = await bridge.run(second);
+  assert.equal(blocked.error_code, 'TASK_PENDING_BATCH'); assert.equal(blocked.not_submitted, true); assert.equal(f.calls.submit, 1);
+  assert.equal((await bridge.run({ ...first, op: 'recover' })).ok, true);
+  assert.equal((await bridge.run(second)).ok, true); assert.equal(f.calls.submit, 2);
+  assert.equal(f.calls.navigate.length, 2);
+}));
+
+test('closed task tab reopens only the exact saved conversation before appending the next batch', async () => temporary(async directory => {
+  const f = fixture(); let saved;
+  const create = f.deps.ui.createNativePage;
+  f.deps.ui.createNativePage = client => {
+    const page = create(client); const goto = page.goto;
+    page.goto = async url => { await goto(url); if (url === 'https://chatgpt.com/c/our-request' && saved) Object.assign(client.Runtime.state, saved); };
+    return page;
+  };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'reopen-original' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: first.task_id };
+  assert.equal((await bridge.run(first)).ok, true); saved = { ...f.tabs.get('owned-2') }; f.tabs.delete('owned-2');
+  assert.equal((await bridge.run(second)).ok, true);
+  assert.deepEqual(f.calls.navigate, ['https://chatgpt.com/', 'https://chatgpt.com/', 'https://chatgpt.com/c/our-request']);
+  assert.equal(f.calls.submit, 2);
+}));
+
+test('fixed task model and changed prior user IDs prevent continuation before any send', async () => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'fixed-task' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: first.task_id };
+  assert.equal((await bridge.run(first)).ok, true);
+  assert.equal((await bridge.run({ ...second, model: 'different-model' })).error_code, 'TASK_SETTINGS_CHANGED');
+  f.tabs.get('owned-2').userIds = ['tampered-earlier-id'];
+  assert.equal((await bridge.run(second)).error_code, 'RECOVERY_IDENTITY_UNVERIFIED');
+  assert.equal(f.calls.submit, 1); assert.equal(f.calls.navigate.length, 2);
+}));
+
+test('a new message cannot bind when earlier user IDs are replaced or reordered', async () => temporary(async directory => {
+  const f = fixture(); const submit = f.deps.submit;
+  f.deps.submit = async (...args) => { await submit(...args); if (f.calls.submit === 2) args[0].runtime.state.userIds[0] = 'replaced-prior-user'; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'id-prefix' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: first.task_id };
+  assert.equal((await bridge.run(first)).ok, true);
+  const result = await bridge.run(second); assert.equal(result.error_code, 'RECOVERY_IDENTITY_UNVERIFIED');
+  assert.equal(result.diagnostic.new_user_matches_baseline, false); assert.equal(result.not_submitted, false);
+  assert.equal(f.calls.submit, 2);
+}));
+
+test('rendered whitespace can match original prompt while identity stays bound to raw DOM', async () => temporary(async directory => {
+  const f = fixture(); const submit = f.deps.submit;
+  f.deps.submit = async (...args) => { await submit(...args); const state = args[0].runtime.state; state.text = state.text.replaceAll('\n', ''); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'rendered-layout' };
+  await fs.writeFile(req.prompt_file, 'Paragraph one.\n\nParagraph two.');
+  const result = await bridge.run(req); assert.equal(result.ok, true);
+  const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(journal.matched_text_source, 'innerText');
+  assert.equal(journal.submitted_prompt_hash, browserPromptFingerprint('Paragraph one.Paragraph two.', 'submitted-user-1'));
+}));
+
+test('legacy missing fingerprint diagnoses read-only and recovers only its original owned target', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0;
+  f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('interrupted'); return { text: 'legacy recovered' }; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); await bridge.run(req);
+  const filename = path.join(req.request_dir, 'journal.json'); const journal = JSON.parse(await fs.readFile(filename, 'utf8'));
+  const oldTask = journal.task_id;
+  for (const name of ['task_id', 'submitted_prompt_hash', 'submitted_user_id', 'submitted_user_count', 'accepted_user_ids', 'previous_user_ids', 'previous_user_count']) delete journal[name];
+  journal.version = 2; journal.conversation_url = null;
+  await fs.writeFile(filename, JSON.stringify(journal));
+  await fs.unlink(path.join(directory, 'tasks', `${oldTask}.json`));
+  const original = await fs.readFile(filename, 'utf8');
+  const diagnostic = await bridge.run({ ...req, op: 'diagnose_request', task_id: 'adopted-pdf' });
+  assert.equal(diagnostic.status, 'diagnostic'); assert.equal(diagnostic.diagnostic.normalized_hash_equal, true);
+  assert.equal(await fs.readFile(filename, 'utf8'), original, 'diagnosis does not bind or mutate a journal');
+  assert.doesNotMatch(JSON.stringify(diagnostic), /Fixture text|submitted-user|our-request|https:\/\//);
+  assert.equal((await bridge.run({ ...req, op: 'recover', task_id: 'adopted-pdf' })).answer, 'legacy recovered');
+  assert.equal((await bridge.run({ ...req, op: 'recover', task_id: 'different-pdf' })).error_code, 'TASK_OWNERSHIP_MISMATCH');
+  assert.equal(f.calls.submit, 1); assert.equal(f.calls.navigate.length, 2);
+}));
+
+test('missing-fingerprint recovery cannot create a new tab even with a saved URL', async () => temporary(async directory => {
+  const f = fixture(); f.deps.waitAnswer = async () => { throw new Error('interrupted'); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); await bridge.run(req);
+  const filename = path.join(req.request_dir, 'journal.json'); const journal = JSON.parse(await fs.readFile(filename, 'utf8'));
+  delete journal.submitted_prompt_hash; await fs.writeFile(filename, JSON.stringify(journal)); f.tabs.delete('owned-2');
+  const response = await bridge.run({ ...req, op: 'recover' }); assert.equal(response.error_code, 'RECOVERY_UNAVAILABLE');
+  assert.equal(response.not_submitted, false); assert.equal(f.calls.submit, 1); assert.equal(f.calls.navigate.length, 2);
+}));
+
+test('task IDs reject path traversal and Windows device filenames before creating files', async () => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps); const req = await request(directory);
+  for (const task_id of ['../other', 'a/b', 'CON', '', 'a'.repeat(129)]) assert.equal((await bridge.run({ ...req, task_id })).error_code, 'INVALID_TASK_ID');
+  assert.equal(await fs.stat(path.join(directory, 'tasks')).catch(() => null), null);
+  assert.equal(f.calls.attach.length, 0);
+}));
+
+test('concurrent different task cannot inherit another task pending response from the same request directory', async () => temporary(async directory => {
+  const f = fixture(); let release; let entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  f.deps.waitAnswer = async () => { entered(); return new Promise(resolve => { release = () => resolve({ text: 'original task answer' }); }); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'original-owner' };
+  const pending = bridge.run(req); await waiting;
+  const other = await bridge.run({ ...req, op: 'recover', task_id: 'other-owner' });
+  assert.equal(other.error_code, 'TASK_OWNERSHIP_MISMATCH'); assert.equal(other.answer, undefined);
+  release(); assert.equal((await pending).answer, 'original task answer'); assert.equal(f.calls.submit, 1);
+}));
+
+test('failed capture after navigation never replaces a verified conversation URL', async () => temporary(async directory => {
+  const f = fixture();
+  f.deps.waitAnswer = async runtime => { runtime.state.url = 'https://chatgpt.com/c/other-thread'; return { text: 'must not be accepted' }; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'url-integrity' };
+  const response = await bridge.run(req); assert.equal(response.error_code, 'RECOVERY_IDENTITY_UNVERIFIED');
+  const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(journal.conversation_url, 'https://chatgpt.com/c/our-request'); assert.equal(journal.status, 'paused');
+}));
+
+test('simultaneous direct calls serialize before the journal read and submit only once', async () => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'simultaneous' };
+  const responses = await Promise.all([bridge.run(req), bridge.run(req)]);
+  assert.ok(responses.every(response => response.ok)); assert.equal(f.calls.submit, 1);
+  assert.equal(f.calls.navigate.length, 2);
+}));
+
+test('simultaneous different batches cannot both cross the initial async journal read', async () => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'race-task' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: first.task_id };
+  const responses = await Promise.all([bridge.run(first), bridge.run(second)]);
+  assert.equal(responses.filter(response => response.ok).length, 1);
+  assert.equal(responses.find(response => !response.ok).error_code, 'BROWSER_BUSY');
+  assert.equal(f.calls.submit, 1); assert.equal(f.calls.navigate.length, 2);
+}));
+
+function domNode(tagName, ...children) {
+  return { nodeType: 1, tagName, childNodes: children.map(child => typeof child === 'string' ? { nodeType: 3, nodeValue: child } : child) };
+}
+test('DOM text reconstruction keeps every nested text node and only restores structural breaks and inline code marks', () => {
+  const content = domNode('DIV', domNode('P', 'First ', domNode('A', domNode('FONT', domNode('FONT', 'linked'))), ' paragraph.'),
+    domNode('DIV', 'Second', domNode('BR'), 'line: ', domNode('CODE', 'text'), ' / ', domNode('CODE', domNode('SPAN', 'index'))),
+    domNode('PRE', domNode('CODE', '{"literal":"\\n"}')));
+  const result = structuredUserContent(content);
+  assert.equal(result.text, 'First linked paragraph.\nSecond\nline: text / index\n{"literal":"\\n"}\n');
+  assert.equal(result.inlineCodeText, 'First linked paragraph.\nSecond\nline: `text` / `index`\n{"literal":"\\n"}\n');
+  assert.equal(result.inlineCodeCount, 2); assert.equal(result.tagCounts.code, 3);
+  assert.equal(result.tagCounts.br, 1); assert.equal(result.tagCounts.div, 2); assert.equal(result.tagCounts.p, 1);
+  assert.equal(structuredUserContent(domNode('PRE', domNode('CODE', 'only fenced content'))).inlineCodeText, null);
+});
+
+test('structural candidates omit native UI controls but preserve literal expansion labels and nested links in prompt content', () => {
+  const content = domNode('DIV', domNode('P', '正文显示更多 ', domNode('A', domNode('SPAN', domNode('FONT', '顯示更多'))), ' ', domNode('CODE', 'text')),
+    domNode('BUTTON', domNode('SPAN', domNode('FONT', '顯示更多'))), domNode('INPUT'),
+    domNode('SELECT', domNode('OPTION', 'UI choice')), domNode('TEXTAREA', 'UI field'));
+  const result = structuredUserContent(content);
+  assert.equal(result.text, '正文显示更多 顯示更多 text\n');
+  assert.equal(result.inlineCodeText, '正文显示更多 顯示更多 `text`\n');
+  assert.equal(result.buttonCount, 1); assert.equal(result.controlCount, 4);
+  assert.equal(result.inlineCodeCount, 1);
+  assert.equal(structuredUserContent(domNode('DIV', '顯示更多')).text, '顯示更多');
+});
+
+test('owned user snapshot evaluates the serialized structural reader and keeps raw fingerprint inputs untouched', async () => {
+  const latest = Object.assign(domNode('DIV', domNode('P', 'A', domNode('BR'), 'B ', domNode('CODE', 'text'))), {
+    textContent: 'AB text', innerText: 'AB text', getAttribute: () => 'latest-user',
+  });
+  const earlier = { getAttribute: () => 'earlier-user' };
+  const document = { querySelectorAll: selector => selector.includes('data-message-author-role') ? [earlier, latest] : [{ textContent: '' }], querySelector: () => null };
+  const runtime = { evaluate: async ({ expression }) => ({ result: { value: vm.runInNewContext(expression, { document, location: { href: 'https://chatgpt.com/c/owned' } }) } }) };
+  const turn = await userTurn(runtime);
+  assert.equal(turn.text, 'AB text'); assert.equal(turn.messageId, 'latest-user'); assert.equal(turn.count, 2);
+  assert.equal(turn.structuredText, 'A\nB text\n'); assert.equal(turn.inlineCodeText, 'A\nB `text`\n'); assert.equal(turn.inlineCodeCount, 1);
+  assert.deepEqual(Array.from(turn.userIds), ['earlier-user', 'latest-user']);
+});
+
+test('structural-only match accepts the whole prompt and retains Oracle raw text fingerprint', async () => temporary(async directory => {
+  const f = fixture(); const submit = f.deps.submit;
+  f.deps.submit = async (...args) => {
+    await submit(...args);
+    const state = args[0].runtime.state;
+    Object.assign(state, { text: 'First.Second.line.', renderedText: 'First.Second.line.',
+      structuredText: structuredUserContent(domNode('DIV', domNode('P', 'First.'), domNode('P', 'Second.', domNode('BR'), 'line.'))).text });
+  };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'structure-only' };
+  await fs.writeFile(req.prompt_file, 'First.\r\n\r\nSecond.\r\nline.');
+  assert.equal((await bridge.run(req)).ok, true);
+  const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(journal.matched_text_source, 'domStructure');
+  assert.equal(journal.submitted_prompt_hash, browserPromptFingerprint('First.Second.line.', 'submitted-user-1'));
+  assert.equal(f.calls.submit, 1);
+}));
+
+test('legacy unbound batch can recover inline-code DOM formatting once without resending or changing conversations', async () => temporary(async directory => {
+  const f = fixture(); let captures = 0;
+  f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('interrupted'); return { text: 'old answer recovered' }; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory);
+  await fs.writeFile(req.prompt_file, 'Return `text`\r\n\r\nand `index`.');
+  await bridge.run(req);
+  const filename = path.join(req.request_dir, 'journal.json'); const journal = JSON.parse(await fs.readFile(filename, 'utf8'));
+  const oldTask = journal.task_id;
+  for (const key of ['task_id', 'submitted_prompt_hash', 'submitted_user_id', 'submitted_user_count', 'accepted_user_ids', 'previous_user_ids', 'previous_user_count']) delete journal[key];
+  journal.version = 2; journal.conversation_url = null;
+  await fs.writeFile(filename, JSON.stringify(journal)); await fs.unlink(path.join(directory, 'tasks', `${oldTask}.json`));
+  const structure = structuredUserContent(domNode('DIV', domNode('P', 'Return ', domNode('CODE', 'text')), domNode('P', 'and ', domNode('CODE', 'index'), '.'),
+    domNode('BUTTON', domNode('SPAN', '顯示更多'))));
+  Object.assign(f.tabs.get('owned-2'), { text: 'Return textand index.顯示更多', renderedText: 'Return text and index. 顯示更多',
+    structuredText: structure.text, inlineCodeText: structure.inlineCodeText, inlineCodeCount: structure.inlineCodeCount,
+    buttonCount: structure.buttonCount, controlCount: structure.controlCount, tagCounts: structure.tagCounts });
+  const diagnostic = await bridge.run({ ...req, op: 'diagnose_request', task_id: 'adopt-structure' });
+  assert.equal(diagnostic.diagnostic.normalized_hash_equal, false); assert.equal(diagnostic.diagnostic.rendered_normalized_hash_equal, false);
+  assert.equal(diagnostic.diagnostic.structural_normalized_hash_equal, false); assert.equal(diagnostic.diagnostic.inline_code_normalized_hash_equal, true);
+  assert.equal(diagnostic.diagnostic.inline_code_count, 2); assert.equal(diagnostic.diagnostic.observed_fingerprint_matches_raw, true);
+  assert.equal(diagnostic.diagnostic.button_count, 1); assert.equal(diagnostic.diagnostic.control_count, 1);
+  assert.equal(diagnostic.diagnostic.normalized_mismatches.inline_code.index, -1);
+  const recovered = await bridge.run({ ...req, op: 'recover', task_id: 'adopt-structure' });
+  assert.equal(recovered.answer, 'old answer recovered'); assert.equal(f.calls.submit, 1); assert.equal(f.calls.navigate.length, 2);
+  const saved = JSON.parse(await fs.readFile(filename, 'utf8'));
+  assert.equal(saved.matched_text_source, 'domInlineCode');
+  assert.equal(saved.submitted_prompt_hash, browserPromptFingerprint('Return textand index.顯示更多', 'submitted-user-1'));
+  assert.equal(saved.conversation_url, 'https://chatgpt.com/c/our-request');
+}));
+
+test('structural matching never removes token separators, punctuation, escapes or zero-width characters', async () => temporary(async directory => {
+  for (const [expected, actual] of [['A B', 'AB'], ['A,B', 'AB'], ['A\\nB', 'A\nB'], ['AB', 'A\u200bB'], ['`text`', '`different`']]) {
+    const f = fixture(); const submit = f.deps.submit;
+    f.deps.submit = async (...args) => { await submit(...args); Object.assign(args[0].runtime.state, { text: 'mismatch', renderedText: 'mismatch', structuredText: actual, inlineCodeText: actual }); };
+    const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+    const req = await request(directory, 'translate', `-${Buffer.from(expected).toString('hex')}`); await fs.writeFile(req.prompt_file, expected);
+    const result = await bridge.run(req); assert.equal(result.error_code, 'RECOVERY_IDENTITY_UNVERIFIED'); assert.equal(result.not_submitted, false);
+    assert.equal(result.diagnostic.structural_normalized_hash_equal, false); assert.equal(f.calls.submit, 1);
+    assert.equal((await bridge.run({ ...req, op: 'recover' })).error_code, 'RECOVERY_IDENTITY_UNVERIFIED'); assert.equal(f.calls.submit, 1);
+  }
+}));
+
+test('diagnostics distinguish CRLF normalization from a real mismatch without exposing prompt text', () => {
+  const prompt = 'schema.\r\n\r\nX'; const normalized = 'schema. X';
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  const journal = { prompt_hash: digest(prompt), prompt_normalized_hash: digest(normalized), previous_user_ids: [], baseline_turns: 0 };
+  const turn = { count: 1, messageId: 'hidden-message-id', userIds: ['hidden-message-id'], url: 'https://chatgpt.com/c/hidden-conversation',
+    text: 'schema.X', renderedText: 'schema.\nX', structuredText: 'schema.\n\nX', tagCounts: { br: 2, p: 1 } };
+  const result = submissionDiagnostic(journal, turn, prompt, browserPromptFingerprint(turn.text, turn.messageId));
+  assert.equal(result.first_mismatch, 7); assert.equal(result.original_length, 12); assert.equal(result.original_lf_normalized_length, 10);
+  assert.equal(result.original_newline_count, 2); assert.equal(result.br_count, 2);
+  assert.deepEqual(result.normalized_mismatches.raw, { index: 7, window_start: 5, expected_codepoints: [97, 46, 32, 88], actual_codepoints: [97, 46, 88] });
+  assert.equal(result.normalized_mismatches.rendered.index, -1); assert.equal(result.normalized_mismatches.structural.index, -1);
+  assert.equal(result.normalized_mismatches.inline_code, null);
+  assert.doesNotMatch(JSON.stringify(result), /schema|hidden-|https:|messageId|structuredText|inlineCodeText/);
+  for (const mismatch of Object.values(result.normalized_mismatches).filter(Boolean)) {
+    assert.ok(mismatch.expected_codepoints.length <= 5); assert.ok(mismatch.actual_codepoints.length <= 5);
+    assert.ok([...mismatch.expected_codepoints, ...mismatch.actual_codepoints].every(Number.isInteger));
+  }
+});
