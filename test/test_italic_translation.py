@@ -121,6 +121,53 @@ def converter_with(translator) -> TranslateConverter:
 
 
 class ItalicClassifierTests(unittest.TestCase):
+    def test_standalone_italic_institution_with_small_number_marker(self):
+        affiliation = "Department of Physics, ETH Zurich, CH-8093 Zurich, Switzerland"
+        institution = paragraph(region_kind="plain text")
+        institution.size = 6.4
+        self.assertEqual(
+            _collect_translatable_italic_runs(
+                [fake_run(affiliation)], [0], [institution], ["1{v0}"]
+            ),
+            {0: affiliation},
+        )
+        for protected in (
+            "A. B. Smith and C. Jones",
+            "Department of Physics = x + y",
+            "Quantum Center Tensor A",
+        ):
+            with self.subTest(protected=protected):
+                self.assertEqual(
+                    _collect_translatable_italic_runs(
+                        [fake_run(protected)], [0], [institution], ["1{v0}"]
+                    ),
+                    {},
+                )
+
+    def test_year_before_italic_book_title_requires_publisher_parenthesis(self):
+        title = "Atom–Photon Interactions"
+        prefix = "[30] Cohen-Tannoudji C, Dupont-Roc J and Grynberg G 1992 "
+        self.assertEqual(
+            _collect_reference_title_italic_runs(
+                [fake_run(title)],
+                [0],
+                [paragraph()],
+                [prefix + "{v0}(New York: Wiley Inter-Science)"],
+            ),
+            {0: title},
+        )
+        for suffix in ("15 115012", "(12) 115012", ""):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(
+                    _collect_reference_title_italic_runs(
+                        [fake_run("New Journal of Physics")],
+                        [0],
+                        [paragraph()],
+                        [prefix + "{v0}" + suffix],
+                    ),
+                    {},
+                )
+
     def test_wrapped_subsection_heading_reaches_each_backend(self) -> None:
         from types import SimpleNamespace
 

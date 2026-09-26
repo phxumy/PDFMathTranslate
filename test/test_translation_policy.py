@@ -667,6 +667,32 @@ class AuthorAffiliationTests(unittest.TestCase):
         self.assertTrue(plan.parts[1].break_before)
         self.assertEqual("".join(part.text for part in plan.parts), source)
 
+    def test_post_comma_affiliation_markers_do_not_start_bibliography(self):
+        source = (
+            "Y. Xu ,{v0} Z. Hua ,{v1} Tao Chen,{v2} X. Pan ,{v3} "
+            "and L. Sun{v4} {v5}Center for Quantum Information, "
+            "Tsinghua University, Beijing 100084, China "
+            "{v6}School of Physics, South China Normal University, China"
+        )
+        policy = DocumentTranslationPolicy()
+        plan = policy.plan_segment(
+            segment(source), formula_texts=("1", "2", "1", "1", "1,*", "1", "2")
+        )
+        self.assertEqual(
+            [part.role for part in plan.parts], [ROLE_PRESERVE, ROLE_AFFILIATION]
+        )
+        self.assertEqual("".join(part.text for part in plan.parts), source)
+        self.assertIsNone(policy.last_reference_number)
+
+    def test_uppercase_and_in_author_byline_is_preserved(self):
+        source = "LIJUN DING{v0} AND ALEX L. WANG{v1}"
+        plan = DocumentTranslationPolicy().plan_segment(
+            segment(source), formula_texts=("†", "‡")
+        )
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts], [(ROLE_PRESERVE, source)]
+        )
+
     def test_author_protection_can_be_limited_to_front_matter(self) -> None:
         source = "Zijun Chen, A. Megrant, J. Kelly"
         policy = DocumentTranslationPolicy()

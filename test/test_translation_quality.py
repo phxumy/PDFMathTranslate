@@ -68,6 +68,95 @@ class CjkStructuralRepetitionNormalizationTests(unittest.TestCase):
 
 
 class ScientificCrossReferencePlacementTests(unittest.TestCase):
+    def test_square_bracket_reference_stays_with_its_translated_label(self):
+        source = "The method is described in Ref. [33]."
+        target = "该方法如参考文献中所述。 [33]."
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(source, target),
+            "该方法如参考文献[33]中所述.",
+        )
+        for valid in ("该方法见参考文献[33]。", "该方法见文献［33］。"):
+            with self.subTest(valid=valid):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, valid), valid
+                )
+
+    def test_square_bracket_reference_lists_are_complete(self):
+        source = "See Refs. [11,57,64,66–69]."
+        target = "见参考文献[11、57、64、66–69]。"
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(source, target), target
+        )
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                source, "见参考文献[11、57、64、66]。"
+            )
+        )
+
+    def test_panel_reference_moves_only_across_an_unambiguous_chinese_tail(self):
+        source = "The process matrix {v0} is shown in Fig. 4(b)."
+        for target, expected in (
+            ("过程矩阵{v0}如图4所示(b)。", "过程矩阵{v0}如图4(b)所示。"),
+            ("过程矩阵{v0}在图 4中所示（b）。", "过程矩阵{v0}在图 4（b）中所示。"),
+        ):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    expected,
+                )
+
+    def test_panel_suffix_cannot_be_dropped_changed_or_detached(self):
+        source = "The process matrix {v0} is shown in Fig. 4(b)."
+        for target in (
+            "过程矩阵{v0}如图4所示。",
+            "过程矩阵{v0}如图4(c)所示。",
+            "过程矩阵{v0}如图4所示，另一个标记为(b)。",
+        ):
+            with self.subTest(target=target):
+                self.assertIsNone(
+                    normalize_scientific_cross_reference_placement(source, target)
+                )
+
+    def test_panel_reference_retains_equivalent_notation(self):
+        for source in ("See Fig. 4(b).", "See Figure 4b."):
+            for target in ("见图4b。", "见图 4(b)。", "见图4（b）。"):
+                with self.subTest(source=source, target=target):
+                    self.assertEqual(
+                        normalize_scientific_cross_reference_placement(source, target),
+                        target,
+                    )
+
+    def test_full_panel_references_in_a_list_stay_in_order(self):
+        source = "Figs. 4(a) and 4(b) show the results."
+        target = "图4（a）和4（b）展示结果。"
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(source, target), target
+        )
+        self.assertIsNone(
+            normalize_scientific_cross_reference_placement(
+                source, "图4(a)展示结果，而4(b)只是标签。"
+            )
+        )
+
+    def test_shorthand_panel_list_requires_every_panel(self):
+        source = "The power is shown in Figs. 4(c) and (d)."
+        for target in ("功率如图4(c)和(d)所示。", "功率如图4c及4d所示。"):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+        for target in (
+            "功率如图4(c)所示。",
+            "功率如图4(c)所示，另一个量为(d)。",
+            "功率如图4(c)和5(d)所示。",
+            "功率如图4(c)和(e)所示。",
+        ):
+            with self.subTest(target=target):
+                self.assertIsNone(
+                    normalize_scientific_cross_reference_placement(source, target)
+                )
+
     def test_reference_lists_remain_one_unit_with_localized_separators(self) -> None:
         source = "The notation is defined in Eq. (2.5) and (2.6)."
         for target in (
@@ -552,6 +641,19 @@ class SuspiciousEnglishResidueTests(unittest.TestCase):
         target = "其中 {v0} denotes 空间位置。"
 
         self.assertTrue(has_suspicious_english_residue(source, target))
+
+    def test_stray_on_after_opaque_quantum_states_is_rejected(self):
+        source = "The evolution yields phases {v0} ({v1}) on states {v2} ({v3})."
+        target = "该演化产生几何相位{v0} ({v1}) on，相位作用于量子态{v2} ({v3})。"
+        self.assertTrue(has_suspicious_english_residue(source, target))
+
+    def test_device_state_labels_do_not_trigger_stray_on_check(self):
+        for label in ("on/off", "off/on", '"on"', "‘on’", "`on`", "ON"):
+            with self.subTest(label=label):
+                source = f"The switch has the state label {label}."
+                self.assertFalse(
+                    has_suspicious_english_residue(source, f"开关的状态标签为{label}。")
+                )
 
     def test_inflected_grammar_glue_inside_chinese_is_rejected(self) -> None:
         cases = (

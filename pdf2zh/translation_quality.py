@@ -46,16 +46,20 @@ _SOFTWARE_PRODUCT_SUFFIXES = (
 )
 _SOURCE_CROSS_REFERENCE_IDENTIFIER = (
     r"\{\{v\d+\}\}|\{v\d+\}|"
-    r"[A-Za-z]\.\d+(?:\.\d+)*[A-Za-z]?|"
-    r"[A-Za-z]?\d+(?:\.\d+)*[A-Za-z]?|"
+    r"[A-Za-z]\.\d+(?:\.\d+)*[A-Za-z]?(?:\s*[（(]\s*[A-Za-z]\s*[）)])?|"
+    r"[A-Za-z]?\d+(?:\.\d+)*[A-Za-z]?(?:\s*[（(]\s*[A-Za-z]\s*[）)])?|"
     r"(?-i:[IVXLCDM]+)"
+)
+_PANEL_IDENTIFIER_RE = re.compile(
+    r"(?P<number>(?:[A-Za-z]\.)?[A-Za-z]?\d+(?:\.\d+)*)"
+    r"\s*(?:[（(]\s*(?P<wrapped>[A-Za-z])\s*[）)]|(?P<bare>[A-Za-z]))$"
 )
 _SOURCE_CROSS_REFERENCE_RE = re.compile(
     r"\b(?P<label>figures?|figs?\.?|tables?|tbls?\.?|"
     r"equations?|eqs?\.?|references?|refs?\.?)(?![A-Za-z])"
-    r"\s*(?:[（(]\s*)?"
+    r"\s*(?:[（(［\[]\s*)?"
     rf"(?P<identifier>{_SOURCE_CROSS_REFERENCE_IDENTIFIER})(?![A-Za-z0-9])"
-    r"(?:\s*[）)])?",
+    r"(?:\s*[）)］\]])?",
     re.IGNORECASE,
 )
 _SOURCE_REFERENCE_LIST_SEPARATOR_RE = re.compile(
@@ -63,8 +67,8 @@ _SOURCE_REFERENCE_LIST_SEPARATOR_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_REFERENCE_LIST_ITEM_RE = re.compile(
-    rf"(?P<open>[（(])?\s*(?P<identifier>{_SOURCE_CROSS_REFERENCE_IDENTIFIER})"
-    r"(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))\s*(?P<close>[）)])?",
+    rf"(?P<open>[（(［\[])?\s*(?P<identifier>{_SOURCE_CROSS_REFERENCE_IDENTIFIER})"
+    r"(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))\s*(?P<close>[）)］\]])?",
     re.IGNORECASE,
 )
 _CROSS_REFERENCE_TERMINAL_RE = re.compile(r"^[\s\u00a0]*[。．.!?！？]")
@@ -173,6 +177,7 @@ _EMBEDDED_ENGLISH_GRAMMAR_GLUE = frozenset(
         "corresponded",
         "corresponds",
         "is",
+        "on",
         "represent",
         "represented",
         "represents",
@@ -468,14 +473,15 @@ def _source_reference_groups(
         )
         if _FORMULA_PLACEHOLDER_RE.match(source, first.end("identifier")):
             continue
-        first_wrapped = source[
-            first.start() : first.start("identifier")
-        ].rstrip().endswith(("(", "（")) and source[
-            first.end("identifier") : first.end()
-        ].strip() in (
-            ")",
-            "）",
+        before_identifier = source[first.start() : first.start("identifier")].rstrip()
+        after_identifier = source[first.end("identifier") : first.end()].strip()
+        first_open = (
+            before_identifier[-1:]
+            if before_identifier.endswith(("(", "（", "[", "［"))
+            else ""
         )
+        first_wrapped = bool(first_open) and after_identifier in (")", "）", "]", "］")
+        shared_open = first_open if first_open and not first_wrapped else ""
         plural = label.endswith("s")
         identifiers = [first.group("identifier")]
         separators = []
@@ -497,13 +503,50 @@ def _source_reference_groups(
                 item = labelled
             else:
                 item = _SOURCE_REFERENCE_LIST_ITEM_RE.match(source, item_start)
-                if item is None or bool(item.group("open")) != bool(
-                    item.group("close")
+                previous_panel = _PANEL_IDENTIFIER_RE.fullmatch(identifiers[-1])
+                shorthand_panel = re.match(
+                    r"[（(]\s*(?P<letter>[A-Za-z])\s*[）)]", source[item_start:]
+                )
+                if item is None and previous_panel is not None and shorthand_panel:
+                    # ``Figs. 4(c) and (d)`` repeats only the panel suffix.
+                    # Retain the inherited number so its second panel cannot
+                    # silently disappear or attach to an unrelated figure.
+                    identifiers.append(
+                        previous_panel.group("number")
+                        + "("
+                        + shorthand_panel.group("letter")
+                        + ")"
+                    )
+                    raw_separator = separator.group("separator").strip().casefold()
+                    separators.append(
+                        "range"
+                        if raw_separator in {"-", "–", "—", "to"}
+                        else "or" if raw_separator.endswith("or") else "list"
+                    )
+                    cursor = item_start + shorthand_panel.end()
+                    continue
+                shared_close = bool(
+                    item is not None
+                    and shared_open
+                    and not item.group("open")
+                    and item.group("close")
+                    and (
+                        (shared_open in "(（" and item.group("close") in ")）")
+                        or (shared_open in "[［" and item.group("close") in "]］")
+                    )
+                )
+                if item is None or (
+                    bool(item.group("open")) != bool(item.group("close"))
+                    and not shared_close
                 ):
                     break
                 # Singular "Eq. 1 and 2 layers" does not prove that 2 is another
                 # reference. Paired parentheses or a plural/repeated label do.
-                if not plural and not (first_wrapped and item.group("open")):
+                if (
+                    not plural
+                    and not shared_open
+                    and not (first_wrapped and item.group("open"))
+                ):
                     break
             if _FORMULA_PLACEHOLDER_RE.match(source, item.end("identifier")):
                 break
@@ -516,6 +559,8 @@ def _source_reference_groups(
             identifiers.append(item.group("identifier"))
             separators.append(relation)
             cursor = item.end()
+            if labelled is None and shared_close:
+                break
         if len(identifiers) > 1:
             groups.append(
                 (first.start(), cursor, kind, tuple(identifiers), tuple(separators))
@@ -539,10 +584,25 @@ def _target_reference_group_pattern(
         "range": r"(?:[-–—~～]|至|到|(?i:to))",
     }
     bare = [
-        re.escape(identifier) + r"(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))"
+        _reference_identifier_body_pattern(identifier)
+        + r"(?![A-Za-z0-9]|\.(?=[A-Za-z0-9]))"
         for identifier in identifiers
     ]
-    wrapped = [rf"(?:[（(]\s*{item}\s*[）)]|{item}(?!\s*[）)]))" for item in bare]
+    wrapped = [
+        rf"(?:[（(]\s*{item}\s*[）)]|[［\[]\s*{item}\s*[］\]]|"
+        rf"{item}(?!\s*[）)］\]]))"
+        for item in bare
+    ]
+    for index in range(1, len(identifiers)):
+        previous_panel = _PANEL_IDENTIFIER_RE.fullmatch(identifiers[index - 1])
+        panel = _PANEL_IDENTIFIER_RE.fullmatch(identifiers[index])
+        if (
+            panel is not None
+            and previous_panel is not None
+            and panel.group("number") == previous_panel.group("number")
+        ):
+            letter = re.escape(panel.group("wrapped") or panel.group("bare"))
+            wrapped[index] = rf"(?:{wrapped[index]}|[（(]\s*{letter}\s*[）)])"
 
     def joined(items: list[str]) -> str:
         result = items[0]
@@ -551,7 +611,8 @@ def _target_reference_group_pattern(
         return result
 
     return re.compile(
-        rf"{label}\s*(?:{joined(wrapped)}|[（(]\s*{joined(bare)}\s*[）)])"
+        rf"{label}\s*(?:{joined(wrapped)}|[（(]\s*{joined(bare)}\s*[）)]|"
+        rf"[［\[]\s*{joined(bare)}\s*[］\]])"
     )
 
 
@@ -574,8 +635,19 @@ def _mask_cross_reference_opaque_text(text: str) -> str:
     return masked
 
 
+def _reference_identifier_body_pattern(identifier: str) -> str:
+    """Treat a panel suffix as part of its figure/equation identifier."""
+
+    panel = _PANEL_IDENTIFIER_RE.fullmatch(identifier)
+    if panel is None:
+        return re.escape(identifier)
+    number = re.escape(panel.group("number"))
+    letter = re.escape(panel.group("wrapped") or panel.group("bare"))
+    return rf"{number}\s*(?:[（(]\s*{letter}\s*[）)]|{letter})"
+
+
 def _target_identifier_pattern(identifier: str) -> str:
-    escaped = re.escape(identifier)
+    escaped = _reference_identifier_body_pattern(identifier)
     if _FORMULA_PLACEHOLDER_RE.fullmatch(identifier):
         return escaped
     if _FORMULA_PLACEHOLDER_RE.search(identifier):
@@ -588,7 +660,8 @@ def _target_identifier_pattern(identifier: str) -> str:
     # ``式(8中`` and allowed it into the cache as a valid cross-reference.
     return (
         rf"(?<![A-Za-z0-9.])(?:"
-        rf"[（(]\s*{escaped}\s*[）)]|{escaped}(?!\s*[）)])"
+        rf"[（(]\s*{escaped}\s*[）)]|[［\[]\s*{escaped}\s*[］\]]|"
+        rf"{escaped}(?!\s*[）)］\]])"
         # A sentence/caption-final ASCII full stop is punctuation, not part of
         # the identifier.  Still reject decimal/version continuations such as
         # ``1.2`` so a shorter identifier cannot match their prefix.
@@ -660,6 +733,34 @@ def _repair_one_misplaced_cross_reference(
 ) -> str | None:
     label_pattern = _TARGET_CROSS_REFERENCE_LABELS[kind]
     tail_pattern = _TARGET_CROSS_REFERENCE_SAFE_TAILS[kind]
+    panel = _PANEL_IDENTIFIER_RE.fullmatch(identifier)
+    if panel is not None:
+        # A panel is not an independent prose parenthesis.  In results such as
+        # ``图4所示(b)`` the old number-only check silently accepted a detached
+        # suffix.  Move it across only an unambiguous locative/display tail;
+        # arbitrary intervening prose must be retried instead of rearranged.
+        number = re.escape(panel.group("number"))
+        letter = re.escape(panel.group("wrapped") or panel.group("bare"))
+        detached_panel = re.compile(
+            rf"(?P<label>{label_pattern})(?P<space>[\s\u00a0]*)"
+            rf"(?P<number>{number})(?![A-Za-z0-9.])"
+            rf"(?P<tail>中所示|所示|中)\s*"
+            rf"(?P<panel>[（(]\s*{letter}\s*[）)])"
+        )
+        matches = tuple(
+            detached_panel.finditer(_mask_cross_reference_opaque_text(target))
+        )
+        if len(matches) == 1:
+            match = matches[0]
+            return (
+                target[: match.start()]
+                + match.group("label")
+                + match.group("space")
+                + match.group("number")
+                + match.group("panel")
+                + match.group("tail")
+                + target[match.end() :]
+            )
     if not _FORMULA_PLACEHOLDER_RE.fullmatch(identifier):
         escaped_identifier = re.escape(identifier)
         # If the source supplies the exact scientific reference, balancing one
@@ -1345,6 +1446,17 @@ def _has_embedded_english_grammar_glue(source: str, target: str) -> bool:
             or normalized not in _EMBEDDED_ENGLISH_GRAMMAR_GLUE
             or normalized not in source_words
         ):
+            continue
+        if normalized == "on" and (
+            re.search(r"['\"‘“]\s*$", target[: match.start()])
+            or re.match(r"\s*['\"’”]", target[match.end() :])
+            or re.match(r"\s*/\s*off\b", target[match.end() :], re.IGNORECASE)
+            or re.search(
+                r"(?<![A-Za-z])off\s*/\s*$", target[: match.start()], re.IGNORECASE
+            )
+        ):
+            # Quoted device-state labels and on/off pairs are identifiers,
+            # unlike a stray source preposition in translated prose.
             continue
         clause_start = _last_clause_boundary(target, 0, match.start())
         clause_end = _next_clause_boundary(target, match.end(), len(target))

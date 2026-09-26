@@ -535,7 +535,7 @@ def looks_like_author_list(text: str) -> bool:
     return (
         _count_author_names(compact) >= 2
         and _author_name_coverage(compact) >= 0.55
-        and bool(re.search(r",|\band\b|&", compact))
+        and bool(re.search(r",|\band\b|&", compact, re.IGNORECASE))
     )
 
 
@@ -920,12 +920,31 @@ class DocumentTranslationPolicy:
         elif self.pending_named_prose_segments:
             self.pending_named_prose_segments -= 1
 
-        region = split_numbered_reference_region(
-            text,
-            formula_texts=formula_texts,
-            expected_number=self.expected_reference_number,
-            expected_prefix=self.last_reference_prefix,
-            heading_hint=heading_hint,
+        # An upper-page byline can put its affiliation superscripts after
+        # commas (``Y. Xu ,{v1} Z. Hua ,{v2}``).  Their repeated 1/2 sequence
+        # plus institution names resembles a bibliography, so establish a
+        # complete author/affiliation block before considering those markers.
+        # Existing reference context and named prose sections retain priority.
+        front_matter = (
+            protect_authors
+            and not in_named_prose_section
+            and not heading_hint
+            and self.last_reference_number is None
+            and (
+                split_author_affiliation(text) is not None
+                or looks_like_author_list(text)
+            )
+        )
+        region = (
+            None
+            if front_matter
+            else split_numbered_reference_region(
+                text,
+                formula_texts=formula_texts,
+                expected_number=self.expected_reference_number,
+                expected_prefix=self.last_reference_prefix,
+                heading_hint=heading_hint,
+            )
         )
         if region is not None:
             preceding_reference_number = self.last_reference_number

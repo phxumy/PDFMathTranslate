@@ -27,6 +27,30 @@ def translator_stub() -> CodexTranslator:
 
 
 class CodexReferenceTranslationTests(unittest.TestCase):
+    def test_long_abbreviated_spectroscopy_venue_preserves_title_boundary(self):
+        for title, translated_title in (
+            ("Composite pulses", "复合脉冲"),
+            ("Quantum computing with NMR", "基于核磁共振的量子计算"),
+        ):
+            with self.subTest(title=title):
+                entry = (
+                    f"[61] M. H. Levitt, {title}, "
+                    "Prog. Nucl. Magn. Reson. Spectrosc. 18, 61 (1986)."
+                )
+                (
+                    translated,
+                    valid,
+                ) = translator_stub()._apply_reference_title_replacements(
+                    entry, [ExactReplacement(title, translated_title)]
+                )
+                self.assertTrue(valid)
+                self.assertEqual(translated, entry.replace(title, translated_title))
+        self.assertFalse(
+            CodexTranslator._reference_venue_name_is_plausible(
+                "Quantum Methods. Prog. Nucl. Magn. Reson. Spectrosc."
+            )
+        )
+
     def test_known_complete_title_cannot_be_truncated_before_internal_in(self):
         for title in (
             "Theoretical issues in deep networks",

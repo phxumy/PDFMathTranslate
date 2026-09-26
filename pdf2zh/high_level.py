@@ -28,7 +28,10 @@ from pymupdf import Document, Font
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.font_cmap import prepare_pdf_text_font
-from pdf2zh.link_annotations import suppress_reflowed_link_borders
+from pdf2zh.link_annotations import (
+    restore_imported_named_links,
+    suppress_reflowed_link_borders,
+)
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import prepare_scan_background
 from pdf2zh.source_spelling import collect_source_spelling
@@ -384,6 +387,11 @@ def translate_patch(
                 pix.height,
                 pix.width,
             )
+            if not hasattr(device, "layout_detections"):
+                device.layout_detections = {}
+            device.layout_detections[page.pageno] = _layout_detections(
+                page_layout, pix.height, pix.width
+            )
             layout_region_types[page.pageno] = page_region_types
             layout[page.pageno] = box
             # 新建一个 xref 存放新指令流
@@ -501,6 +509,7 @@ def translate_stream(
             suppress_reflowed_link_borders(page)
 
     doc_en.insert_file(doc_zh)
+    restore_imported_named_links(doc_zh, doc_en, start_at=page_count)
     for id in range(page_count):
         doc_en.move_page(page_count + id, id * 2 + 1)
     if not skip_subset_fonts:

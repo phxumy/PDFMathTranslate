@@ -631,6 +631,35 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertEqual(translator.cache.get(source), valid)
         self.assertEqual(translate.call_count, 2)
 
+    def test_cached_figure_panel_is_repaired_before_it_reaches_pdf_layout(self):
+        source = "The process matrix {v0} is shown in Fig. 4(b)."
+        cached = "过程矩阵{v0}如图4所示(b)。"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+        translator.cache.set(source, cached)
+        with mock.patch.object(translator, "_run_batch_translation") as translate:
+            self.assertEqual(
+                translator.translate_batch([source]),
+                ["过程矩阵{v0}如图4(b)所示。"],
+            )
+        translate.assert_not_called()
+
+    def test_cached_translation_missing_a_figure_panel_is_retried(self):
+        source = "The response is shown in Figs. 4(c) and (d)."
+        cached = "响应如图4(c)所示。"
+        valid = "响应如图4(c)和(d)所示。"
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+        translator.cache.set(source, cached)
+        with mock.patch.object(
+            translator, "_run_batch_translation", return_value=[valid]
+        ) as translate:
+            self.assertEqual(translator.translate_batch([source]), [valid])
+        self.assertEqual(translator.cache.get(source), valid)
+        translate.assert_called_once()
+
     def test_translate_ignores_short_source_copy_cache_and_retries(self):
         source = "Results and discussion"
         with mock.patch("pdf2zh.translator.subprocess.run") as run:

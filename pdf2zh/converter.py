@@ -78,6 +78,7 @@ from pdf2zh.translation_policy import (
     SegmentPlan,
     formula_cache_signature,
     is_running_header_segment,
+    looks_like_affiliation,
     looks_like_reference_author_block,
     looks_like_reference_title_prefix,
     restore_affiliation_breaks,
@@ -124,17 +125,33 @@ _MAX_READONLY_FORMULA_GLYPHS = 24
 _MAX_READONLY_FORMULA_CODEPOINTS = 48
 _FORCED_STYLED_PROSE_ATTR = "_pdf2zh_forced_styled_prose"
 _PROSE_ITALIC_FONT_RE = re.compile(
-    r"(?:italic|oblique|slanted|ital$)",
+    r"(?:italic|oblique|slanted|ital$|^CM(?:TI|SL|ITT)\d)",
     re.IGNORECASE,
 )
 _PROSE_BOLD_FONT_RE = re.compile(r"(?:bold|demi|semibold)", re.IGNORECASE)
 _MATH_FONT_RE = re.compile(
-    r"(?:^CM(?:I|MI|SY|EX)|RMTMI|MTSY|MTEX|Math|Symbol|Sym$|TeX|Euler|"
+    r"(?:^CM(?:I(?!TT)|MI|SY|EX)|RMTMI|MTSY|MTEX|Math|Symbol|Sym$|TeX|Euler|"
     r"AdvP[0-9A-Fa-f]+)",
     re.IGNORECASE,
 )
 _MATH_WORDS = {
     "arg",
+    "argmin",
+    "argmax",
+    "arccos",
+    "arcsin",
+    "arctan",
+    "atan2",
+    "cot",
+    "coth",
+    "csc",
+    "sec",
+    "sech",
+    "dist",
+    "sign",
+    "supp",
+    "prox",
+    "proj",
     "cos",
     "cosh",
     "det",
@@ -643,6 +660,9 @@ _INLINE_SCRIPT_REGION_KINDS = frozenset(
         "figure_caption",
         "table_caption",
         "table_footnote",
+        "footnote",
+        "table_cell",
+        "algorithm",
     }
 )
 
@@ -1842,6 +1862,22 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     em = max(float(getattr(candidate, "size", 0.0)), float(previous.size), 1.0)
     right_edge = max(float(char.x1) for char in chars)
     gap = float(candidate.x0) - right_edge
+    if (
+        getattr(candidate, "_pdf2zh_prose_word_start", False)
+        and not _is_prose_emphasis_font(candidate.fontname)
+        and (
+            getattr(candidate, "_pdf2zh_prose_word_length", 0) >= 3
+            or gap > 0.12 * em
+            or previous_value.startswith("\\")
+        )
+        and not (
+            previous_value == ":"
+            and all(_is_prose_emphasis_font(ch.fontname) for ch in chars)
+        )
+    ):
+        return False
+    if getattr(candidate, "_pdf2zh_cm_prose", False):
+        return False
     if gap < -0.15 * em or gap > 0.40 * em:
         return False
 
@@ -1869,6 +1905,333 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     if last in _FORMULA_OPENING_OR_OPERATOR:
         return True
     return True
+
+
+def _mark_prose_words(chars: list[LTChar]) -> None:
+    """Keep complete text words out of adjacent mathematical glyph islands.
+
+    Computer Modern text italic is a prose font, unlike CMMI math italic.
+    The historical CM catch-all protected whole theorem statements and captions.
+    Identify words geometrically before segmentation; isolated italic variables,
+    math operators, scripts, and symbol fonts remain on the original glyph path.
+    Ordinary roman words also stop a formula from swallowing its following prose.
+    """
+    short_words = {
+        "a",
+        "an",
+        "as",
+        "at",
+        "be",
+        "by",
+        "do",
+        "if",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "so",
+        "to",
+        "we",
+        "no",
+        "vs",
+    }
+    run: list[LTChar] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        word = "".join(char.get_text() for char in run)
+        lowered = word.casefold()
+        cm_italic = all(
+            re.match(r"^CM(?:TI|SL)\d", _font_name(ch.fontname)) for ch in run
+        )
+        if (
+            len(word) >= 3 or (lowered in short_words and (cm_italic or len(word) > 1))
+        ) and lowered not in _MATH_WORDS:
+            run[0]._pdf2zh_prose_word_start = True
+            run[0]._pdf2zh_prose_word_length = len(word)
+            for char in run:
+                char._pdf2zh_prose_word = True
+                if cm_italic:
+                    char._pdf2zh_cm_prose = True
+        run.clear()
+
+    for char in chars:
+        value = char.get_text()
+        font = _font_name(char.fontname)
+        if (
+            not value.isalpha()
+            or _MATH_FONT_RE.search(font)
+            or _is_non_horizontal_text_matrix(char.matrix)
+            or re.search(r"(?:Mono|Code|^CMTT|^CMITT)", font, re.IGNORECASE)
+        ):
+            flush()
+            continue
+        if run:
+            previous = run[-1]
+            em = max(float(char.size), float(previous.size), 1.0)
+            if (
+                char.fontname != previous.fontname
+                or not -0.12 * em <= float(char.x0) - float(previous.x1) <= 0.16 * em
+                or abs(_char_baseline(char) - _char_baseline(previous)) > 0.15 * em
+                or min(float(char.size), float(previous.size)) < 0.9 * em
+            ):
+                flush()
+        run.append(char)
+    flush()
+    # Release punctuation only when it touches proven prose. An isolated
+    # italic ``(x)`` must remain one protected formula, including its brackets.
+    for ordered in (range(len(chars)), range(len(chars) - 1, -1, -1)):
+        for index in ordered:
+            char = chars[index]
+            if not re.match(
+                r"^CM(?:TI|SL)\d", _font_name(char.fontname)
+            ) or char.get_text() not in ".,;:!?-()[]/_" + chr(39) + chr(34) + chr(96):
+                continue
+            for neighbor_id in (index - 1, index + 1):
+                if not 0 <= neighbor_id < len(chars):
+                    continue
+                neighbor = chars[neighbor_id]
+                gap = max(char.x0, neighbor.x0) - min(char.x1, neighbor.x1)
+                if (
+                    getattr(neighbor, "_pdf2zh_cm_prose", False)
+                    and char.fontname == neighbor.fontname
+                    and -0.12 * char.size <= gap <= 0.16 * char.size
+                    and abs(_char_baseline(char) - _char_baseline(neighbor))
+                    <= 0.15 * char.size
+                ):
+                    char._pdf2zh_cm_prose = True
+                    break
+    # The standard prose abbreviation is often typeset in text italic using
+    # single-letter glyph groups, so the conservative word classifier skips it.
+    for index in range(len(chars) - 5):
+        abbreviation = chars[index : index + 6]
+        if (
+            "".join(ch.get_text() for ch in abbreviation).lower() == "w.r.t."
+            and all(
+                re.match(r"^CM(?:TI|SL)\d", _font_name(ch.fontname))
+                for ch in abbreviation
+            )
+            and max(_char_baseline(ch) for ch in abbreviation)
+            - min(_char_baseline(ch) for ch in abbreviation)
+            < 0.2 * abbreviation[0].size
+        ):
+            for char in abbreviation:
+                char._pdf2zh_cm_prose = True
+
+
+def _recover_preserved_region_prose(
+    chars: list[LTChar],
+    layout,
+    detections,
+    region_types: dict[int, str],
+    excluded: set[int],
+) -> dict[int, int]:
+    """Recover footnote, table-cell and algorithm prose with original anchors.
+
+    The detector deliberately protects figures and equations. Only independently
+    identifiable text lines inside table/footnote/algorithm boxes are released;
+    numeric cells, figure labels, equations and page furniture remain protected.
+    Each recovered cell/line gets a separate paragraph to prevent column mixing.
+    """
+    if not detections:
+        return {}
+    height, width = layout.shape
+    regions = [
+        d for d in detections if d.class_name in {"table", "abandon", "isolate_formula"}
+    ]
+    relevant = []
+    for char in chars:
+        if object_id(char) in excluded or _is_non_horizontal_text_matrix(char.matrix):
+            continue
+        x, y = float(char.x0), float(char.y0)
+        if (
+            int(layout[int(np.clip(y, 0, height - 1)), int(np.clip(x, 0, width - 1))])
+            != 0
+        ):
+            continue
+        matches = [
+            d
+            for d in regions
+            if d.bounds[0] <= x <= d.bounds[2] and d.bounds[1] <= y <= d.bounds[3]
+        ]
+        if matches:
+            # A detected table provides stronger structural context than a
+            # duplicate equation or abandon box over the same table contents.
+            region = next((d for d in matches if d.class_name == "table"), matches[0])
+            relevant.append((char, region))
+    grouped: dict[int, list[LTChar]] = {}
+    by_id = {d.value: d for d in regions}
+    for char, region in relevant:
+        grouped.setdefault(region.value, []).append(char)
+    recovered: dict[int, int] = {}
+    new_class = max(region_types, default=1) + 1
+    for region_id, region_chars in grouped.items():
+        region = by_id[region_id]
+        if region.class_name == "isolate_formula":
+            prose = _reconstruct_italic_run(region_chars)
+            if re.search(
+                r"^\s*(?:(?:\\bullet|•)\s*)?(?:[-–—]{1,2}\s*)?"
+                r"(?:Initialize|Let|For|Run|Set|Output|Given|Return|Update|Repeat|Until|While)\s+(?=[A-Za-z\\])",
+                prose,
+            ):
+                region_types[new_class] = "algorithm"
+                for char in region_chars:
+                    recovered[object_id(char)] = new_class
+                new_class += 1
+            continue
+        lines: list[list[LTChar]] = []
+        for char in sorted(region_chars, key=lambda ch: (-_char_baseline(ch), ch.x0)):
+            line = next(
+                (
+                    line
+                    for line in reversed(lines[-3:])
+                    if abs(_char_baseline(line[0]) - _char_baseline(char))
+                    <= 0.65 * max(float(line[0].size), float(char.size))
+                ),
+                None,
+            )
+            if line is None:
+                lines.append([char])
+            else:
+                line.append(char)
+        previous_footnote = None
+        footnote_history = []
+        for line in lines:
+            line.sort(key=lambda ch: (ch.x0, -ch.y0))
+            text = _reconstruct_italic_run(line)
+            words = re.findall(r"[A-Za-z]{3,}", text)
+            if re.search(
+                r"copyright|unauthorized|downloaded|redistribution|terms-privacy",
+                text,
+                re.I,
+            ):
+                previous_footnote = None
+                continue
+            cells = [line]
+            kind = "plain text"
+            if region.class_name == "table":
+                cells = [[]]
+                for char in line:
+                    if cells[-1] and char.x0 - cells[-1][-1].x1 > 1.8 * max(
+                        char.size, cells[-1][-1].size
+                    ):
+                        cells.append([])
+                    cells[-1].append(char)
+                kind = "table_cell"
+            elif region.class_name == "abandon":
+                if max(ch.y1 for ch in line) > height * 0.30 or (
+                    len(words) < 3 and previous_footnote is None
+                ):
+                    continue
+                if not re.match(r"^\d+\s*[A-Z]", text) and previous_footnote is None:
+                    # Publication/author notes use symbols; numeric scientific
+                    # footnotes are the target of this recovery path.
+                    number = [
+                        ch
+                        for ch in chars
+                        if ch.get_text().isdigit()
+                        and 0 <= line[0].x0 - ch.x1 <= line[0].size
+                        and abs(_char_baseline(ch) - _char_baseline(line[0]))
+                        < line[0].size
+                    ]
+                    if not number:
+                        continue
+                    line = sorted(number + line, key=lambda ch: ch.x0)
+                    cells = [line]
+                kind = "footnote"
+                cells = [[]]
+                for char in line:
+                    if cells[-1] and char.x0 - cells[-1][-1].x1 > 2 * max(
+                        char.size, cells[-1][-1].size
+                    ):
+                        cells.append([])
+                    cells[-1].append(char)
+            else:
+                if not re.search(
+                    r"(?:^|\s)(?:Initialize|Let|For|Run|Set|Output|Given|Return|Update|Repeat|Until|While)\b",
+                    text,
+                ):
+                    continue
+                kind = "algorithm"
+            for cell in cells:
+                cell_words = [
+                    ch for ch in cell if getattr(ch, "_pdf2zh_prose_word", False)
+                ]
+                if not cell_words:
+                    continue
+                if kind == "table_cell":
+                    prose = "".join(ch.get_text() for ch in cell_words)
+                    if len(prose) < 4:
+                        continue
+                if kind == "footnote":
+                    baseline = float(np.median([_char_baseline(ch) for ch in cell]))
+                    extra = [
+                        ch
+                        for ch in chars
+                        if object_id(ch) not in excluded
+                        and abs(_char_baseline(ch) - baseline)
+                        <= 0.6 * max(c.size for c in cell)
+                        and min(c.x0 for c in cell) - 2
+                        <= ch.x0
+                        <= max(c.x1 for c in cell)
+                        and not _is_non_horizontal_text_matrix(ch.matrix)
+                    ]
+                    cell = sorted(
+                        {object_id(ch): ch for ch in cell + extra}.values(),
+                        key=lambda ch: ch.x0,
+                    )
+                    # Continue only a touching word clipped by the detector,
+                    # never a neighboring text column across a whitespace gap.
+                    for candidate in sorted(chars, key=lambda ch: ch.x0):
+                        previous = cell[-1]
+                        if (
+                            candidate.x0 >= previous.x1 - 0.1 * previous.size
+                            and candidate.x0 - previous.x1 <= 0.16 * previous.size
+                            and candidate.fontname == previous.fontname
+                            and abs(
+                                _char_baseline(candidate) - _char_baseline(previous)
+                            )
+                            <= 0.15 * previous.size
+                            and object_id(candidate) not in excluded
+                            and object_id(candidate)
+                            not in {object_id(ch) for ch in cell}
+                        ):
+                            cell.append(candidate)
+                class_id = new_class
+                if kind == "footnote":
+                    previous_footnote = next(
+                        (
+                            item
+                            for item in reversed(footnote_history)
+                            if abs(
+                                min(ch.x0 for ch in item[0]) - min(ch.x0 for ch in cell)
+                            )
+                            <= 2 * max(ch.size for ch in cell)
+                        ),
+                        None,
+                    )
+                if kind == "footnote" and previous_footnote is not None:
+                    prior, prior_class = previous_footnote
+                    gap = min(ch.y0 for ch in prior) - max(ch.y1 for ch in cell)
+                    starts_number = bool(
+                        re.match(r"^\d+\s*[A-Z]", _reconstruct_italic_run(cell))
+                    )
+                    if not starts_number and -3 <= gap <= 1.2 * max(
+                        ch.size for ch in cell
+                    ):
+                        class_id = prior_class
+                if class_id == new_class:
+                    region_types[class_id] = kind
+                    new_class += 1
+                for char in cell:
+                    recovered[object_id(char)] = class_id
+                if kind == "footnote":
+                    previous_footnote = (cell, class_id)
+                    footnote_history.append(previous_footnote)
+    return recovered
 
 
 def _is_hidden_glyph_repertoire_probe(
@@ -2234,6 +2597,45 @@ def _has_inline_prose_context(
     )
 
 
+def _standalone_italic_affiliation(
+    chars: list[LTChar], segment: str, paragraph: "Paragraph"
+) -> str | None:
+    """Recover a typeset institution line beside its affiliation superscript.
+
+    The paragraph font size can come from the superscript rather than the
+    address.  Institution syntax and a formula-only numbered block provide
+    stronger evidence here than the inline-prose font-size heuristic.
+    """
+    if paragraph.region_kind not in {"", "plain text"}:
+        return None
+    surrounding = _FORMULA_MARKER_RE.sub("", segment)
+    if re.search(r"[^\d\s,;*†‡]", surrounding):
+        return None
+    visible = [char for char in chars if char.get_text().strip()]
+    if not visible or any(
+        getattr(char, "_pdf2zh_layout_class", 0) == 0
+        or not _is_prose_italic_font(char.fontname)
+        or _is_non_horizontal_text_matrix(char.matrix)
+        for char in visible
+    ):
+        return None
+    sizes = [float(char.size) for char in visible]
+    if min(sizes) <= 0 or max(sizes) / min(sizes) > 1.08:
+        return None
+    baselines = [_char_baseline(char) for char in visible]
+    if max(baselines) - min(baselines) > max(0.8, 0.10 * min(sizes)):
+        return None
+    text = _reconstruct_italic_run(chars)
+    if (
+        not looks_like_affiliation(text)
+        or "," not in text
+        or len(re.findall(r"[A-Za-z]{2,}", text)) < 3
+        or re.search(r"[=+×÷∑∫<>]", text)
+    ):
+        return None
+    return text
+
+
 def _collect_translatable_italic_runs(
     formula_runs: list[list[LTChar]],
     formula_paragraphs: list[int],
@@ -2245,6 +2647,12 @@ def _collect_translatable_italic_runs(
         zip(formula_runs, formula_paragraphs, strict=True)
     ):
         if not 0 <= paragraph_id < len(paragraphs):
+            continue
+        affiliation = _standalone_italic_affiliation(
+            chars, segments[paragraph_id], paragraphs[paragraph_id]
+        )
+        if affiliation is not None:
+            candidates[formula_id] = affiliation
             continue
         text = _is_high_confidence_prose_italic(
             chars,
@@ -2308,8 +2716,16 @@ def _collect_reference_title_italic_runs(
             ),
             entry_prefix,
         )
-        if not looks_like_reference_title_prefix(author_prefix) or re.search(
-            r"\d[a-z]?\s*$", author_prefix
+        year_before_title = re.search(r"\d[a-z]?\s*$", author_prefix)
+        publisher_after_title = re.match(
+            r"\s*\([^()\r\n]{1,100}:\s*"
+            r"[^()\r\n]*(?:Wiley|Springer|Elsevier|Press|Publishers?|Publishing)"
+            r"[^()\r\n]*\)",
+            segment[match.end() :],
+            re.IGNORECASE,
+        )
+        if not looks_like_reference_title_prefix(author_prefix) or (
+            year_before_title and publisher_after_title is None
         ):
             continue
         visible = [char for char in chars if char.get_text()]
@@ -4070,7 +4486,7 @@ class TranslateConverter(PDFConverterEx):
                 except UnicodeDecodeError:
                     font = ""
             font = font.split("+")[-1]      # 字体名截断
-            if re.match(r"\(cid:", char):
+            if re.match(r"\(cid:|\\", char):
                 return True
             # 基于字体名规则的判定
             if self.vfont:
@@ -4078,7 +4494,7 @@ class TranslateConverter(PDFConverterEx):
                     return True
             else:
                 if _MATH_FONT_RE.search(font) or re.match(              # latex 字体
-                    r"(CM[^R]|MS.M|XY|MT|BL|RM|EU|LA|RS|LINE|LCIRCLE|TeX-|rsfs|txsy|wasy|stmary|.*Mono|.*Code|.*Ital|.*Sym|.*Math)",
+                    r"(CM(?!R|BX|B\d|CSC)[^R]|MS.M|XY|MT|BL|RM|EU|LA|RS|LINE|LCIRCLE|TeX-|rsfs|txsy|wasy|stmary|.*Mono|.*Code|.*Ital|.*Sym|.*Math)",
                     font,
                 ):
                     return True
@@ -4101,8 +4517,16 @@ class TranslateConverter(PDFConverterEx):
 
         ############################################################
         # A. 原文档解析
+        _mark_prose_words([child for child in ltpage if isinstance(child, LTChar)])
         code_chars = code_block_chars(ltpage)
         identity_chars = orcid_list_chars(ltpage)
+        recovered_region_classes = _recover_preserved_region_prose(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            self.layout[ltpage.pageid],
+            getattr(self, "layout_detections", {}).get(ltpage.pageid, ()),
+            region_types,
+            {object_id(char) for char in code_chars | identity_chars},
+        )
         boundary_text_classes = _recover_detector_boundary_text(
             [child for child in ltpage if isinstance(child, LTChar)],
             self.layout[ltpage.pageid],
@@ -4133,6 +4557,8 @@ class TranslateConverter(PDFConverterEx):
                     cls = toc_class_start + toc_entry_index
                 elif object_id(child) in toc_layout.page_number_chars:
                     cls = 0
+                elif object_id(child) in recovered_region_classes:
+                    cls = recovered_region_classes[object_id(child)]
                 elif object_id(child) in boundary_text_classes:
                     cls = boundary_text_classes[object_id(child)]
                 actual_cls = int(cls)
@@ -4196,7 +4622,8 @@ class TranslateConverter(PDFConverterEx):
                     cls == 0                                                                                # 1. 类别为保留区域
                     or getattr(child, "_pdf2zh_scan_fragment", False)
                     or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79)  # 2. 角标字体，有 0.76 的角标和 0.799 的大写，这里用 0.79 取中，同时考虑首字母放大的情况
-                    or vflag(child.fontname, child.get_text())                                              # 3. 公式字体
+                    or (vflag(child.fontname, child.get_text())
+                        and not (not self.vfont and getattr(child, "_pdf2zh_cm_prose", False)))                                              # 3. 公式字体
                     or (child.matrix[0] == 0 and child.matrix[3] == 0)                                      # 4. 垂直字体
                 ):
                     cur_v = True
