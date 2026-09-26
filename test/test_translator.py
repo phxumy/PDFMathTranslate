@@ -645,6 +645,34 @@ class TestCodexTranslator(unittest.TestCase):
             )
         translate.assert_not_called()
 
+    def test_cached_outer_bracket_references_do_not_trigger_translation_retries(self):
+        source = (
+            "Pulses [Fig. 1(a)] act through the frequency response [Fig. 1(b)] "
+            "on the energy levels [Fig. 1(d)]. We tune the {v14} state into "
+            "resonance with the {v15} state [Fig. 1(d)]. "
+            "The detuning {v18} [Fig. 1(c)] shows two plateaus."
+        )
+        cached = (
+            "脉冲[图 1(a)]通过频率响应[图 1(b)]作用于能级[图 1(d)]。"
+            "我们将{v14}态调至与{v15}态共振[图 1(d)]。"
+            "失谐量{v18}[图 1(c)]呈现两个平台。"
+        )
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+        translator.cache.set(source, cached)
+        with mock.patch.object(translator, "_run_batch_translation") as translate:
+            self.assertEqual(translator.translate_batch([source]), [cached])
+        translate.assert_not_called()
+        self.assertIsNone(
+            translator._accepted_translation(
+                source, cached.replace("共振[图 1(d)]", "共振")
+            )
+        )
+        self.assertIsNone(
+            translator._accepted_translation(source, cached.replace("{v15}", "{v16}"))
+        )
+
     def test_cached_translation_missing_a_figure_panel_is_retried(self):
         source = "The response is shown in Figs. 4(c) and (d)."
         cached = "响应如图4(c)所示。"

@@ -68,6 +68,47 @@ class CjkStructuralRepetitionNormalizationTests(unittest.TestCase):
 
 
 class ScientificCrossReferencePlacementTests(unittest.TestCase):
+    def test_outer_brackets_enclose_the_label_and_panel_together(self):
+        source = "A state [Fig. 1(d)] is used."
+        for target in (
+            "使用状态[图 1(d)]。",
+            "使用状态［图 1（d）］。",
+            "使用状态(图 1(d))。",
+            "使用状态（图 1（d））。",
+            "使用状态[ 图 1(d) ]。",
+            "使用状态[（图 1(d)）]。",
+            "使用状态（图 1(d)中所示）。",
+        ):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(
+                source, "使用状态[Fig. 1(d)]。"
+            ),
+            "使用状态[图 1(d)]。",
+        )
+
+    def test_outer_reference_pair_does_not_relax_panel_or_closing_validation(self):
+        source = "A state [Fig. 1(d)] is used."
+        for target in (
+            "使用状态图 1(d)]。",
+            "使用状态[图 1(d]。",
+            "使用状态[图 1(d))。",
+            "使用状态[图 1(d)]]。",
+            "使用状态[图 1(d)。",
+            "使用状态[ 图 1(d) ] ]。",
+            "使用状态[图 1(c)]。",
+            "使用状态[图 1]。",
+            "使用状态[图 1 的结果在(d)]。",
+        ):
+            with self.subTest(target=target):
+                self.assertIsNone(
+                    normalize_scientific_cross_reference_placement(source, target)
+                )
+
     def test_square_bracket_reference_stays_with_its_translated_label(self):
         source = "The method is described in Ref. [33]."
         target = "该方法如参考文献中所述。 [33]."

@@ -421,9 +421,7 @@ def normalize_scientific_cross_reference_placement(
         key = (kind, identifier.casefold())
         used = consumed.get(key, 0)
         correct = _target_cross_reference_pattern(kind, identifier)
-        correct_count = len(
-            tuple(correct.finditer(_mask_cross_reference_opaque_text(normalized)))
-        )
+        correct_count = len(_balanced_cross_reference_matches(correct, normalized))
         if correct_count > used:
             consumed[key] = used + 1
             continue
@@ -442,7 +440,7 @@ def normalize_scientific_cross_reference_placement(
         )
         if (
             repaired is None
-            or correct.search(_mask_cross_reference_opaque_text(repaired)) is None
+            or len(_balanced_cross_reference_matches(correct, repaired)) <= used
         ):
             return None
         normalized = repaired
@@ -646,7 +644,9 @@ def _reference_identifier_body_pattern(identifier: str) -> str:
     return rf"{number}\s*(?:[（(]\s*{letter}\s*[）)]|{letter})"
 
 
-def _target_identifier_pattern(identifier: str) -> str:
+def _target_identifier_pattern(
+    identifier: str, *, enclosed_reference: bool = False
+) -> str:
     escaped = _reference_identifier_body_pattern(identifier)
     if _FORMULA_PLACEHOLDER_RE.fullmatch(identifier):
         return escaped
@@ -658,10 +658,11 @@ def _target_identifier_pattern(identifier: str) -> str:
     # Parentheses are optional, but they must be balanced when present.  The
     # former pair of independent optionals accepted malformed output such as
     # ``式(8中`` and allowed it into the cache as a valid cross-reference.
+    bare_end = "" if enclosed_reference else r"(?!\s*[）)］\]])"
     return (
         rf"(?<![A-Za-z0-9.])(?:"
         rf"[（(]\s*{escaped}\s*[）)]|[［\[]\s*{escaped}\s*[］\]]|"
-        rf"{escaped}(?!\s*[）)］\]])"
+        rf"{escaped}{bare_end}"
         # A sentence/caption-final ASCII full stop is punctuation, not part of
         # the identifier.  Still reject decimal/version continuations such as
         # ``1.2`` so a shorter identifier cannot match their prefix.
@@ -669,11 +670,71 @@ def _target_identifier_pattern(identifier: str) -> str:
     )
 
 
+def _labelled_reference_pattern(label: str, body: str, enclosed_body: str) -> str:
+    """Distinguish brackets around an identifier from a whole reference.
+
+    In ``[Fig. 1(d)]`` the last bracket belongs to the outer reference, not to
+    the panel identifier. Relax its trailing-close check only inside a matched
+    outer pair, retaining rejection of stray or missing identifier brackets.
+    """
+    alternatives = [rf"{label}[\s\u00a0]*{body}"]
+    for opening, closing in (("[", "]"), ("［", "］"), ("(", ")"), ("（", "）")):
+        alternatives.append(
+            rf"{re.escape(opening)}\s*{label}[\s\u00a0]*"
+            rf"{enclosed_body}\s*{re.escape(closing)}"
+        )
+    return "(?:" + "|".join(alternatives) + ")"
+
+
 def _target_cross_reference_pattern(kind: str, identifier: str) -> re.Pattern[str]:
     return re.compile(
-        rf"(?:{_TARGET_CROSS_REFERENCE_LABELS[kind]})"
-        rf"[\s\u00a0]*{_target_identifier_pattern(identifier)}"
+        _labelled_reference_pattern(
+            rf"(?:{_TARGET_CROSS_REFERENCE_LABELS[kind]})",
+            _target_identifier_pattern(identifier),
+            _target_identifier_pattern(identifier, enclosed_reference=True),
+        )
     )
+
+
+def _balanced_cross_reference_matches(
+    pattern: re.Pattern[str], target: str
+) -> tuple[re.Match[str], ...]:
+    """Check only outer delimiters immediately surrounding a reference.
+
+    A regex can otherwise match the valid inner fragment of ``[图1(d)`` or
+    ``[图1(d)]]``. Allow prose inside a balanced wrapper, as in ``(图1中所示)``,
+    while keeping missing identifier-parenthesis repairs independent.
+    """
+    masked = _mask_cross_reference_opaque_text(target)
+    pairs = {"(": ")", "（": "）", "[": "]", "［": "］"}
+    closing = set(pairs.values())
+    accepted = []
+    for match in pattern.finditer(masked):
+        start = match.start()
+        while (prefix := masked[:start].rstrip()) and prefix[-1] in pairs:
+            start = len(prefix) - 1
+        if start == match.start() and masked[start] not in pairs:
+            accepted.append(match)
+            continue
+        stack = []
+        cursor = start
+        valid = True
+        while cursor < len(masked):
+            char = masked[cursor]
+            if cursor >= match.end() and not stack and not char.isspace():
+                if char in closing:
+                    valid = False
+                break
+            if char in pairs:
+                stack.append(pairs[char])
+            elif char in closing:
+                if not stack or stack.pop() != char:
+                    valid = False
+                    break
+            cursor += 1
+        if valid and not stack:
+            accepted.append(match)
+    return tuple(accepted)
 
 
 def _normalize_duplicate_cross_reference_labels(
@@ -712,14 +773,20 @@ def _normalize_english_cross_reference_label(
     """
 
     source_label = _SOURCE_CROSS_REFERENCE_LABELS[kind]
-    identifier_pattern = _target_identifier_pattern(identifier)
+    label_pattern = rf"(?<![A-Za-z])(?:{source_label})\.?(?![A-Za-z])"
     pattern = re.compile(
-        rf"(?i)(?<![A-Za-z])(?P<label>{source_label})\.?(?![A-Za-z])"
-        rf"(?P<space>[\s\u00a0]*)(?P<identifier>{identifier_pattern})"
+        _labelled_reference_pattern(
+            label_pattern,
+            _target_identifier_pattern(identifier),
+            _target_identifier_pattern(identifier, enclosed_reference=True),
+        ),
+        re.IGNORECASE,
     )
     canonical = _TARGET_CROSS_REFERENCE_CANONICAL_LABELS[kind]
     return pattern.sub(
-        lambda match: canonical + match.group("space") + match.group("identifier"),
+        lambda match: re.sub(
+            label_pattern, canonical, match.group(0), count=1, flags=re.IGNORECASE
+        ),
         target,
     )
 

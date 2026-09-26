@@ -359,16 +359,64 @@ def _ends_sentence(text: str) -> bool:
     return bool(_TERMINAL_RE.search(text.rstrip()))
 
 
+def _repeated_term_after_dangling_modifier(left: str, right: str) -> bool:
+    """Require both a missing noun and a previously introduced capitalized term."""
+    if not re.search(
+        r"\b(?:in|of|with|on|from|to|for|by)\s+(?:the|an?)\s+[a-z][a-z-]{2,}\s*$",
+        left,
+    ):
+        return False
+    term = re.match(
+        r"\s*([A-Z][A-Za-z-]{2,})\s+(?:in|of|with|on|from|to|for|by)\b", right
+    )
+    return bool(term and re.search(r"\b" + re.escape(term[1]) + r"\b", left))
+
+
+def _body_follows_column_figure(
+    right: FlowSegment, segments: Sequence[FlowSegment]
+) -> bool:
+    """Prove that a low column start is directly below a figure caption."""
+    above = [
+        item
+        for item in segments
+        if item.ref != right.ref
+        and item.ref.page_id == right.ref.page_id
+        and item.y0 >= right.y1
+        and min(item.x1, right.x1) - max(item.x0, right.x0)
+        >= 0.5 * min(item.width, right.width)
+    ]
+    # Never skip an earlier body block even when a prose heuristic excluded it.
+    if not above or any(item.region_kind in {"plain text", "title"} for item in above):
+        return False
+    caption = min(above, key=lambda item: item.y0)
+    em = max(right.size, caption.size, 0.01)
+    return bool(
+        caption.region_kind == "figure_caption"
+        and _column_index(caption) == _column_index(right)
+        and caption.y0 - right.y1 <= 4 * em
+        and abs(caption.x0 - right.x0) <= 2 * em
+        and min(caption.width, right.width) >= 0.72 * max(caption.width, right.width)
+    )
+
+
 def _compatible_boundary(
     left: FlowSegment,
     right: FlowSegment,
     kind: Literal["column", "page"],
+    *,
+    below_column_figure: bool = False,
 ) -> tuple[bool, tuple[str, ...]]:
     if not (_looks_like_body_prose(left) and _looks_like_body_prose(right)):
         return False, ()
     continuation_start = _continuation_start_reason(right.text)
     if continuation_start is None and _left_has_dangling_continuation_cue(left.text):
         continuation_start = "capitalized-after-dangling-cue"
+    if (
+        continuation_start is None
+        and below_column_figure
+        and _repeated_term_after_dangling_modifier(left.text, right.text)
+    ):
+        continuation_start = "repeated-term-after-dangling-modifier"
     if _ends_sentence(left.text) or continuation_start is None:
         return False, ()
     largest_size = max(abs(left.size), abs(right.size), 0.01)
@@ -383,9 +431,11 @@ def _compatible_boundary(
     if kind == "column":
         if _column_index(left) != 0 or _column_index(right) != 1:
             return False, ()
-        if right.y1 < right.page_height * 0.55:
+        if right.y1 < right.page_height * 0.55 and not below_column_figure:
             return False, ()
         reasons.append("column-boundary")
+        if below_column_figure:
+            reasons.append("body-below-column-figure")
     else:
         reasons.append("physical-page-boundary")
     return True, tuple(reasons)
@@ -460,6 +510,10 @@ def detect_page_edges(segments: Sequence[FlowSegment]) -> list[ContinuationEdge]
     left = left_column[-1]
     right = right_column[0]
     accepted, reasons = _compatible_boundary(left, right, "column")
+    if not accepted and _body_follows_column_figure(right, segments):
+        accepted, reasons = _compatible_boundary(
+            left, right, "column", below_column_figure=True
+        )
     if not accepted:
         return []
     hyphenated = left.text.rstrip().endswith("-")
@@ -666,8 +720,22 @@ def detect_reference_continuation(
     return None
 
 
+def _sentence_endings(text: str):
+    for match in _SENTENCE_END_RE.finditer(text):
+        # A figure/equation abbreviation belongs to the following number, not
+        # the preceding sentence. Splitting at ``Fig.`` strands its panel label
+        # outside the jointly translated continuation fragment.
+        if (
+            match.group() == "."
+            and re.search(r"\b(?:Figs?|Eqs?)\.$", text[: match.end()], re.IGNORECASE)
+            and re.match(r"\s*[(\[]?\s*[A-Za-z]?\d", text[match.end() :])
+        ):
+            continue
+        yield match
+
+
 def _tail_span(text: str, maximum_chars: int) -> tuple[int, int] | None:
-    matches = list(_SENTENCE_END_RE.finditer(text))
+    matches = list(_sentence_endings(text))
     start = matches[-1].end() if matches else 0
     while start < len(text) and text[start].isspace():
         start += 1
@@ -677,7 +745,7 @@ def _tail_span(text: str, maximum_chars: int) -> tuple[int, int] | None:
 
 
 def _head_span(text: str, maximum_chars: int) -> tuple[int, int] | None:
-    match = _SENTENCE_END_RE.search(text)
+    match = next(_sentence_endings(text), None)
     end = match.end() if match else len(text)
     while end < len(text) and text[end] in "\"'\u2019\u201d)]":
         end += 1

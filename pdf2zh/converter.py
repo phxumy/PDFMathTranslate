@@ -20,7 +20,7 @@ from tenacity import retry, retry_if_exception, wait_fixed, stop_after_attempt
 
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
-from pdf2zh.identity_layout import orcid_list_chars
+from pdf2zh.identity_layout import author_byline_chars, orcid_list_chars
 from pdf2zh.codex_errors import CodexPermanentError
 from pdf2zh.source_spelling import normalize_source_wraps
 from pdf2zh.line_breaking import (
@@ -329,6 +329,71 @@ def _release_chemical_direction_qualifiers(
         texts[paragraph_id] = source.replace(
             marker, marker + " " + match.group("suffix"), 1
         )
+        paragraph_text_chars[paragraph_id].extend(suffix)
+
+
+def _release_parenthetical_prose_articles(
+    texts: list[str],
+    formulas: list[list[LTChar]],
+    formula_paragraphs: list[int],
+    paragraph_text_chars: list[list[LTChar]],
+) -> None:
+    """Release a spaced ordinary-font ``(a relative offset ...)`` explanation.
+
+    A single-letter article can follow a symbol so closely that it enters the
+    formula atom. Require the complete descriptive noun-phrase framing in the
+    surrounding prose, ordinary glyphs, an unmatched opener, and a word gap.
+    Function arguments, italic variables, and phrases such as ``a relative to``
+    remain protected.
+    """
+    phrase = re.compile(
+        r"\s+(?:relative|absolute|small|large|positive|negative|constant|"
+        r"uniform|random|finite|infinitesimal|additional|effective|average)"
+        r"\s+[a-z]{3,}\b[^()\r\n=+<>]{0,180}\)"
+    )
+    for index, chars in enumerate(formulas):
+        joined = "".join(char.get_text() for char in chars)
+        match = re.search(r"\(an?$", joined)
+        if (
+            match is None
+            or match.start() == 0
+            or joined.count("(") <= joined.count(")")
+            or any(len(char.get_text()) != 1 for char in chars)
+        ):
+            continue
+        paragraph_id = formula_paragraphs[index]
+        source = texts[paragraph_id]
+        marker = f"{{v{index}}}"
+        if source.count(marker) != 1:
+            continue
+        following = source[source.index(marker) + len(marker) :]
+        if phrase.match(following) is None:
+            continue
+        prefix, suffix = chars[: match.start()], chars[match.start() :]
+        em = float(suffix[0].size)
+        if em <= 0 or any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0
+            or _is_non_horizontal_text_matrix(char.matrix)
+            for char in chars
+        ):
+            continue
+        if any(
+            not _is_non_math_text_font(char.fontname)
+            or _PROSE_ITALIC_FONT_RE.search(_formula_font_name(char))
+            or abs(float(char.size) - em) > em * 0.1
+            for char in suffix
+        ):
+            continue
+        if any(
+            abs(_char_baseline(char) - _char_baseline(prefix[-1])) > em * 0.15
+            for char in suffix
+        ):
+            continue
+        gap = float(suffix[0].x0) - max(float(char.x1) for char in prefix)
+        if not em * 0.12 < gap <= em * 0.5:
+            continue
+        formulas[index] = prefix
+        texts[paragraph_id] = source.replace(marker, marker + " " + match.group(), 1)
         paragraph_text_chars[paragraph_id].extend(suffix)
 
 
@@ -4652,7 +4717,7 @@ class TranslateConverter(PDFConverterEx):
         # A. 原文档解析
         _mark_prose_words([child for child in ltpage if isinstance(child, LTChar)])
         code_chars = code_block_chars(ltpage)
-        identity_chars = orcid_list_chars(ltpage)
+        identity_chars = orcid_list_chars(ltpage) | author_byline_chars(ltpage)
         recovered_region_classes = _recover_preserved_region_prose(
             [child for child in ltpage if isinstance(child, LTChar)],
             self.layout[ltpage.pageid],
@@ -5101,6 +5166,7 @@ class TranslateConverter(PDFConverterEx):
             varp,
             paragraph_text_chars,
         )
+        _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
         for paragraph in pstk:
             if paragraph.region_kind == "toc_entry":
                 entry = toc_layout.entries[paragraph.layout_class - toc_class_start]

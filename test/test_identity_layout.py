@@ -1,7 +1,7 @@
 from pymupdf import Font
 from types import SimpleNamespace
 
-from pdf2zh.identity_layout import orcid_list_chars
+from pdf2zh.identity_layout import author_byline_chars, orcid_list_chars
 from test_code_blocks import page_with_lines
 
 
@@ -57,3 +57,62 @@ def test_extended_latin_characters_use_unicode_fallback_not_glyph_zero():
     assert "/pdf2zh_latin " in ops
     assert f"[<{glyphs}>] TJ" in ops
     assert "0000" not in glyphs
+
+
+def test_first_page_author_rows_retain_source_transforms_and_translate_affiliation():
+    converter, page = page_with_lines(
+        [
+            "Experimental implementation of quantum gates",
+            "A. Smith1, B. Jones2, C. White1,",
+            "D. Black2 and E. Brown1",
+            "1Department of Physics, Example University, China",
+            "This experiment implements geometric gates.",
+        ],
+        fontname="Times-Roman",
+    )
+    selected = author_byline_chars(page)
+    assert "".join(char.get_text() for char in page if char in selected) == (
+        "A. Smith1, B. Jones2, C. White1,D. Black2 and E. Brown1"
+    )
+    original = [
+        (char.get_text(), char.cid, char.matrix, char.size) for char in selected
+    ]
+    sources = []
+
+    def translate(texts, *args, **kwargs):
+        sources.extend(texts)
+        return texts
+
+    converter._translate_planned_segments = translate
+    ops = converter.receive_layout(page)
+    assert not any("Smith" in source or "Brown" in source for source in sources)
+    assert any("Department of Physics" in source for source in sources)
+    assert any("Experimental implementation" in source for source in sources)
+    assert original == [
+        (char.get_text(), char.cid, char.matrix, char.size) for char in selected
+    ]
+    for char in selected:
+        matrix = " ".join(f"{v:f}" for v in char._pdf2zh_source_text_state.matrix)
+        assert f"{matrix} Tm [<{char.cid:02x}>] TJ" in ops
+
+
+def test_author_geometry_requires_first_page_affiliation_and_strict_name_rows():
+    for lines in (
+        ["A. Smith and B. Jones", "We study geometric quantum gates."],
+        [
+            "Experimental Implementation and Universal Quantum Gates",
+            "Department of Physics, Example University",
+        ],
+        [
+            "A. Smith and B. Jones measured the quantum gates",
+            "Department of Physics, Example University",
+        ],
+    ):
+        _, page = page_with_lines(lines, fontname="Times-Roman")
+        assert not author_byline_chars(page)
+    _, page = page_with_lines(
+        ["A. Smith and B. Jones", "Department of Physics, Example University"],
+        fontname="Times-Roman",
+    )
+    page.pageid = 2
+    assert not author_byline_chars(page)
