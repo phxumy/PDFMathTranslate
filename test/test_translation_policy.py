@@ -684,6 +684,42 @@ class AuthorAffiliationTests(unittest.TestCase):
         self.assertEqual("".join(part.text for part in plan.parts), source)
         self.assertIsNone(policy.last_reference_number)
 
+    def test_numbered_address_after_anchored_authors_is_translated_in_full(self):
+        source = (
+            "1Center for Quantum Information, Institute for Interdisciplinary "
+            "Information Sciences, Tsinghua University, Beijing 100084, China "
+            "{v0}Guangdong Provincial Key Laboratory of Quantum Engineering and "
+            "Quantum Materials, South China Normal University, Guangzhou 510006, China"
+        )
+        address = SourceSegment(
+            index=3, text=source, y0=605, y1=660, size=9.5,
+            page_width=612, page_height=792, region_kind="plain text",
+        )
+        policy = DocumentTranslationPolicy()
+        plan = policy.plan_segment(address, formula_texts=("2",))
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts],
+            [(ROLE_AFFILIATION, source)],
+        )
+        self.assertIsNone(policy.last_reference_number)
+        translated = "1第一机构，北京100084，中国{v0}第二机构，广州510006，中国"
+        self.assertEqual(
+            restore_affiliation_breaks(source, translated, ("2",)),
+            "1第一机构，北京100084，中国\n{v0}第二机构，广州510006，中国",
+        )
+
+    def test_numbered_address_rule_does_not_override_reference_context(self):
+        policy = DocumentTranslationPolicy()
+        policy.plan_segment(segment("References"))
+        plan = policy.plan_segment(
+            SourceSegment(
+                index=3,
+                text="[1] A. Smith, University Research Methods, Science 20, 1 (2020).",
+                y0=605, y1=660, size=9.5, page_width=612, page_height=792,
+            )
+        )
+        self.assertNotIn(ROLE_AFFILIATION, [part.role for part in plan.parts])
+
     def test_uppercase_and_in_author_byline_is_preserved(self):
         source = "LIJUN DING{v0} AND ALEX L. WANG{v1}"
         plan = DocumentTranslationPolicy().plan_segment(

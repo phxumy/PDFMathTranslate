@@ -932,6 +932,26 @@ class DocumentTranslationPolicy:
         elif self.pending_named_prose_segments:
             self.pending_named_prose_segments -= 1
 
+        # Once a byline is anchored separately, its address can start directly
+        # with a superscript number: ``1Center ... Institute ... University``.
+        # Title Case institution names also resemble a list of people. Keep a
+        # confirmed numbered upper-page address intact before author splitting,
+        # so all its words and affiliation boundaries reach the address route.
+        affiliation_markers = _affiliation_markers(text, formula_texts)
+        if (
+            protect_authors
+            and not in_named_prose_section
+            and not heading_hint
+            and self.last_reference_number is None
+            and segment.page_height > 0
+            and segment.y0 >= segment.page_height * 0.48
+            and 0 < segment.size <= segment.page_height * 0.019
+            and affiliation_markers
+            and affiliation_markers[0][0] == len(text) - len(text.lstrip())
+            and looks_like_affiliation(text)
+        ):
+            return SegmentPlan(segment, (SegmentPart(ROLE_AFFILIATION, text),))
+
         # An upper-page byline can put its affiliation superscripts after
         # commas (``Y. Xu ,{v1} Z. Hua ,{v2}``).  Their repeated 1/2 sequence
         # plus institution names resembles a bibliography, so establish a
