@@ -7,6 +7,7 @@ from typing import Literal
 
 from pdf2zh.translation_policy import (
     find_reference_markers,
+    is_explanatory_reference_note,
     looks_like_affiliation,
     looks_like_author_list,
     reference_entry_score,
@@ -507,6 +508,88 @@ def detect_cross_page_edge(
         0.97 if hyphenated else 0.94,
         reasons,
     )
+
+
+def detect_reference_note_continuations(
+    segments: Sequence[FlowSegment],
+    *,
+    occupied: Sequence[FragmentSpan] = (),
+) -> list[ContinuationGroup]:
+    """Join supplemental-material prose notes split across bibliography columns.
+
+    Unlike a title continuation, this note has no authors or publication year.
+    Require consecutive entry numbers and matching column geometry; only the
+    note text is translated jointly, keeping both reference markers untouched.
+    """
+    groups = []
+    used = list(occupied)
+    for left in segments:
+        if left.region_kind != "plain text" or _column_index(left) != 0:
+            continue
+        markers = find_reference_markers(left.text)
+        if not markers:
+            continue
+        marker = markers[-1]
+        note = left.text[marker.end :]
+        if (
+            marker.number is None
+            or not is_explanatory_reference_note(note)
+            or _TERMINAL_RE.search(note)
+            or _has_unsafe_reference_token(note)
+        ):
+            continue
+        for right in segments:
+            if (
+                right.ref.page_id != left.ref.page_id
+                or right.region_kind != "plain text"
+                or _column_index(right) != 1
+                or abs(left.size - right.size) > 0.15 * max(left.size, right.size)
+                or min(left.width, right.width) < 0.72 * max(left.width, right.width)
+                or abs(left.y1 - right.y1) > 2 * max(left.size, right.size)
+            ):
+                continue
+            following = find_reference_markers(right.text)
+            if not following:
+                continue
+            next_marker = following[0]
+            prefix = right.text[: next_marker.start]
+            if (
+                next_marker.number != marker.number + 1
+                or next_marker.prefix != marker.prefix
+                or not _first_alpha_is_lower(prefix)
+                or not _TERMINAL_RE.search(prefix)
+                or _has_unsafe_reference_token(prefix)
+                or reference_entry_score(
+                    right.text[
+                        next_marker.start : (
+                            following[1].start
+                            if len(following) > 1
+                            else len(right.text)
+                        )
+                    ]
+                )
+                < 5
+                or max(len(note), len(prefix)) > 1600
+            ):
+                continue
+            fragments = (
+                FragmentSpan(left.ref, marker.end, len(left.text)),
+                FragmentSpan(right.ref, 0, next_marker.start),
+            )
+            if any(_span_overlaps(span, used) for span in fragments):
+                continue
+            edge = ContinuationEdge(
+                left.ref,
+                right.ref,
+                "column",
+                "line_hyphen_candidate" if note.rstrip().endswith("-") else "normal",
+                0.98,
+                ("supplemental-note", "consecutive-reference-numbers"),
+            )
+            groups.append(ContinuationGroup(edge, fragments))
+            used.extend(fragments)
+            break
+    return groups
 
 
 def detect_reference_continuation(

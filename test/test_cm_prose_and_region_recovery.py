@@ -246,3 +246,82 @@ def test_wide_abandon_box_keeps_two_columns_of_footnotes_independent():
     assert mapping[id(left[0])] == mapping[id(left_next[0])]
     assert mapping[id(right[0])] == mapping[id(right_next[0])]
     assert mapping[id(left[0])] != mapping[id(right[0])]
+
+
+def test_displayed_recovery_task_releases_prose_without_rewriting_math():
+    lead = run("recover", x=20, y=500)
+    variable = run("X", x=lead[-1].x1 + 3, y=500, font="CMMI10")
+    middle = run("from (b,A), where b =", x=variable[-1].x1 + 3, y=500)
+    target = run("X", x=middle[-1].x1 + 3, y=500, font="CMMI10")
+    chars = lead + variable + middle + target
+    mapping, kinds = recover(chars, [detection("isolate_formula", (0, 450, 599, 550))])
+    assert all(id(ch) in mapping for ch in chars)
+    assert len(set(mapping.values())) == 1
+    assert kinds[mapping[id(lead[0])]] == "plain text"
+    assert not any(getattr(ch, "_pdf2zh_prose_word", False) for ch in variable + target)
+    for text in (
+        "recover(x) = x",
+        "recover x from y",
+        "x = recover y from z where x = z",
+        "recover x from y where z = x",
+    ):
+        chars = run(text, x=20, y=500, font="CMMI10")
+        mapping, _ = recover(chars, [detection("isolate_formula", (0, 450, 599, 550))])
+        assert not mapping
+
+
+def test_roman_with_respect_to_abbreviation_stops_formula_swallowing():
+    symbol = run("X", x=20, y=500, font="CMMI10", size=10)
+    abbreviation = run("w.r.t.", x=symbol[-1].x1 + 2, y=500, font="CMR10", size=10)
+    _mark_prose_words(symbol + abbreviation)
+    assert _should_extend_formula_run(symbol, abbreviation[0]) is False
+    math_abbreviation = run("w.r.t.", x=30, y=500, font="CMMI10", size=10)
+    _mark_prose_words(math_abbreviation)
+    assert not any(
+        getattr(ch, "_pdf2zh_prose_word_start", False) for ch in math_abbreviation
+    )
+
+
+def test_overprinted_tex_text_accent_stays_with_its_original_base_glyph():
+    accent = run("`", x=20, y=500, font="CMR10", size=10)[0]
+    accent.get_text = lambda: r"\`"
+    base = run("es", x=20.3, y=500, font="CMR10", size=10)
+    _mark_prose_words([accent] + base)
+    assert _should_extend_formula_run([accent], base[0]) is True
+    accent.get_text = lambda: r"\""
+    base = run("older", x=20.3, y=500, font="CMR10", size=10)
+    _mark_prose_words([accent] + base)
+    assert _should_extend_formula_run([accent], base[0]) is True
+    for symbol in ("'", r"\prime"):
+        accent.get_text = lambda v=symbol: v
+        assert _should_extend_formula_run([accent], base[0]) is False
+    accent.get_text = lambda: r"\`"
+    separate = run("e", x=30, y=500, font="CMR10", size=10)[0]
+    assert _should_extend_formula_run([accent], separate) is False
+
+
+def test_tex_single_quote_glyphs_are_prose_punctuation_not_math_or_code():
+    from pdf2zh.converter import _tex_prose_quote
+
+    char = run("`", font="CMR10")[0]
+    char.get_text = lambda: "``"
+    assert _tex_prose_quote(char, 4) == "“"
+    char.get_text = lambda: '""'
+    assert _tex_prose_quote(char, 4) == "”"
+    for name, category, text in (
+        ("CMR10", 0, "``"),
+        ("CMTT10", 4, "``"),
+        ("CMITT10", 4, "``"),
+        ("CMMI10", 4, "''"),
+        ("CMR10", 4, "'"),
+    ):
+        char.fontname = name
+        char.get_text = lambda v=text: v
+        assert _tex_prose_quote(char, category) is None
+
+
+def test_translatable_quote_does_not_join_neighboring_formula():
+    math = run("x", font="CMMI10", size=10)
+    quote = run("“", x=math[-1].x1 + 0.1, font="CMR10", size=10)[0]
+    quote._pdf2zh_prose_quote = True
+    assert _should_extend_formula_run(math, quote) is False

@@ -296,6 +296,18 @@ def find_reference_markers(
     return tuple(sorted(selected, key=lambda item: (item.start, item.end)))
 
 
+def is_explanatory_reference_note(text: str) -> bool:
+    """Recognize prose notes which occupy a numbered bibliography entry."""
+    return bool(
+        re.match(
+            r"^\s*(?:See|Consult)\s+(?:(?:the|our|online)\s+)?"
+            r"(?:Supplemental|Supplementary)\s+(?:Materials?|Information)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
 def reference_entry_score(text: str) -> int:
     """Return a conservative bibliography-likeness score for one source entry."""
     compact = re.sub(r"\s+", " ", text).strip()
@@ -1007,6 +1019,18 @@ class DocumentTranslationPolicy:
                     else region.end
                 )
                 entry = text[marker.start : next_start]
+                if is_explanatory_reference_note(text[marker.end : next_start]):
+                    parts.extend(
+                        (
+                            SegmentPart(
+                                ROLE_PRESERVE,
+                                text[marker.start : marker.end],
+                                break_before=index > 0 or bool(prefix.strip()),
+                            ),
+                            SegmentPart(ROLE_TRANSLATE, text[marker.end : next_start]),
+                        )
+                    )
+                    continue
                 parts.append(
                     SegmentPart(
                         ROLE_REFERENCE,

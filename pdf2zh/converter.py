@@ -81,6 +81,7 @@ from pdf2zh.translation_policy import (
     looks_like_affiliation,
     looks_like_reference_author_block,
     looks_like_reference_title_prefix,
+    reference_entry_score,
     restore_affiliation_breaks,
 )
 from pdf2zh.reading_flow import (
@@ -93,6 +94,7 @@ from pdf2zh.reading_flow import (
     detect_cross_page_edge,
     detect_page_edges,
     detect_reference_continuation,
+    detect_reference_note_continuations,
 )
 
 log = logging.getLogger(__name__)
@@ -1854,7 +1856,7 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     if not chars:
         return False
     value = candidate.get_text()
-    if not value or value.isspace():
+    if not value or value.isspace() or getattr(candidate, "_pdf2zh_prose_quote", False):
         return False
 
     previous = chars[-1]
@@ -1862,6 +1864,22 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     em = max(float(getattr(candidate, "size", 0.0)), float(previous.size), 1.0)
     right_edge = max(float(char.x1) for char in chars)
     gap = float(candidate.x0) - right_edge
+    # TeX text accents are overprinted glyphs: their following base moves back
+    # underneath the accent (Cand\`es, H\"older). Preserve both glyphs as one
+    # atom instead of charging the accent's nominal advance as a separate word.
+    # Ordinary apostrophes and mathematical prime symbols are not accent codes.
+    if (
+        re.fullmatch(r"\\[`'\"^~=]", previous_value)
+        and len(value) == 1
+        and value.isalpha()
+        and candidate.fontname == previous.fontname
+        and not _is_non_horizontal_text_matrix(candidate.matrix)
+        and 0.9 <= float(candidate.size) / float(previous.size) <= 1.1
+        and abs(_char_baseline(candidate) - _char_baseline(previous)) <= 0.15 * em
+        and abs(float(candidate.x0) - float(previous.x0)) <= 0.25 * em
+        and float(candidate.x0) < float(previous.x1) - 0.2 * em
+    ):
+        return True
     if (
         getattr(candidate, "_pdf2zh_prose_word_start", False)
         and not _is_prose_emphasis_font(candidate.fontname)
@@ -1905,6 +1923,22 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     if last in _FORMULA_OPENING_OR_OPERATOR:
         return True
     return True
+
+
+def _tex_prose_quote(char: LTChar, layout_class: int) -> str | None:
+    """Decode one TeX quote glyph only in an established prose region.
+
+    Computer Modern maps a single opening/closing quote glyph to two ASCII
+    characters. Treating the opening backticks as modifier symbols protects
+    them with the following formula while the translator sees only the closing
+    pair. Expose balanced Unicode punctuation without touching primes or code.
+    """
+    if (
+        layout_class == 0
+        or re.match(r"^CM(?:R|TI|SL|BX|CSC)\d", _font_name(char.fontname)) is None
+    ):
+        return None
+    return {"``": "“", "''": "”", '""': "”"}.get(char.get_text())
 
 
 def _mark_prose_words(chars: list[LTChar]) -> None:
@@ -2010,16 +2044,80 @@ def _mark_prose_words(chars: list[LTChar]) -> None:
         abbreviation = chars[index : index + 6]
         if (
             "".join(ch.get_text() for ch in abbreviation).lower() == "w.r.t."
-            and all(
-                re.match(r"^CM(?:TI|SL)\d", _font_name(ch.fontname))
-                for ch in abbreviation
-            )
+            and all(_is_non_math_text_font(ch.fontname) for ch in abbreviation)
             and max(_char_baseline(ch) for ch in abbreviation)
             - min(_char_baseline(ch) for ch in abbreviation)
             < 0.2 * abbreviation[0].size
         ):
+            abbreviation[0]._pdf2zh_prose_word_start = True
+            abbreviation[0]._pdf2zh_prose_word_length = 6
             for char in abbreviation:
-                char._pdf2zh_cm_prose = True
+                char._pdf2zh_prose_word = True
+                if re.match(r"^CM(?:TI|SL)\d", _font_name(char.fontname)):
+                    char._pdf2zh_cm_prose = True
+
+
+def _abandoned_reference_entries(lines: list[list[LTChar]]) -> list[list[LTChar]]:
+    """Identify complete bibliographic entries inside an abandoned text box.
+
+    A detector can merge the first references with author email footnotes. Use
+    bracketed numbering, author names, a publication year and bibliography
+    evidence, rather than treating every line in that box as body prose.
+    """
+    cells: list[list[LTChar]] = []
+    for line in lines:
+        cell: list[LTChar] = []
+        for char in sorted(line, key=lambda ch: ch.x0):
+            if cell and char.x0 - cell[-1].x1 > 2 * max(char.size, cell[-1].size):
+                cells.append(cell)
+                cell = []
+            cell.append(char)
+        if cell:
+            cells.append(cell)
+    entries = []
+    used: set[int] = set()
+    for index, first in enumerate(cells):
+        text = _reconstruct_italic_run(first)
+        if index in used or not re.match(r"^\[\s*(?:S\s*)?\d{1,3}\s*\]", text):
+            continue
+        candidate = list(first)
+        indices = [index]
+        previous = first
+        em = max(ch.size for ch in first)
+        for next_index in range(index + 1, len(cells)):
+            if re.search(r"\((?:19|20)\d{2}[a-z]?\)[.,;:]?\s*$", text):
+                break
+            cell = cells[next_index]
+            if abs(cell[0].x0 - first[0].x0) > 2.5 * em:
+                continue
+            baseline_gap = _char_baseline(previous[0]) - _char_baseline(cell[0])
+            continuation = _reconstruct_italic_run(cell)
+            if (
+                next_index in used
+                or not 0.7 * em <= baseline_gap <= 1.8 * em
+                or abs(max(ch.size for ch in cell) - em) > 0.15 * em
+                or re.match(r"^\[\s*(?:S\s*)?\d{1,3}\s*\]", continuation)
+                or "@" in continuation
+                or re.search(
+                    r"copyright|unauthorized|downloaded|redistribution|"
+                    r"terms-privacy|all\s+rights\s+reserved",
+                    continuation,
+                    re.IGNORECASE,
+                )
+            ):
+                break
+            candidate.extend(cell)
+            indices.append(next_index)
+            previous = cell
+            text += " " + continuation
+        if (
+            "@" not in text
+            and re.search(r"\((?:19|20)\d{2}[a-z]?\)", text)
+            and reference_entry_score(text) >= 5
+        ):
+            entries.append(candidate)
+            used.update(indices)
+    return entries
 
 
 def _recover_preserved_region_prose(
@@ -2072,12 +2170,28 @@ def _recover_preserved_region_prose(
         region = by_id[region_id]
         if region.class_name == "isolate_formula":
             prose = _reconstruct_italic_run(region_chars)
-            if re.search(
+            algorithm = re.search(
                 r"^\s*(?:(?:\\bullet|•)\s*)?(?:[-–—]{1,2}\s*)?"
                 r"(?:Initialize|Let|For|Run|Set|Output|Given|Return|Update|Repeat|Until|While)\s+(?=[A-Za-z\\])",
                 prose,
-            ):
-                region_types[new_class] = "algorithm"
+            )
+            # A displayed recovery task is prose around protected mathematical
+            # objects, e.g. ``recover X from (b, A), where b = A(X)``. Require
+            # the complete task framing and actual math fonts; function names
+            # or arbitrary explanatory words inside an equation do not qualify.
+            task_words = _reconstruct_italic_run(
+                [ch for ch in region_chars if getattr(ch, "_pdf2zh_prose_word", False)]
+            )
+            recovery_task = (
+                re.search(r"^\s*recover\s+.+?\s+from\s+.+?\s+where\s+", prose, re.I)
+                and re.search(r"\brecover\b.*\bfrom\b.*\bwhere\b", task_words, re.I)
+                and any(
+                    _MATH_FONT_RE.search(_font_name(ch.fontname))
+                    for ch in region_chars
+                )
+            )
+            if algorithm or recovery_task:
+                region_types[new_class] = "algorithm" if algorithm else "plain text"
                 for char in region_chars:
                     recovered[object_id(char)] = new_class
                 new_class += 1
@@ -2097,6 +2211,17 @@ def _recover_preserved_region_prose(
                 lines.append([char])
             else:
                 line.append(char)
+        if region.class_name == "abandon":
+            for entry in _abandoned_reference_entries(lines):
+                region_types[new_class] = "plain text"
+                for char in entry:
+                    recovered[object_id(char)] = new_class
+                new_class += 1
+            lines = [
+                remaining
+                for line in lines
+                if (remaining := [ch for ch in line if object_id(ch) not in recovered])
+            ]
         previous_footnote = None
         footnote_history = []
         for line in lines:
@@ -4304,6 +4429,14 @@ class TranslateConverter(PDFConverterEx):
                     for override in reference_overrides:
                         draft_lookup[override.span.ref].overrides.append(override)
                         occupied.append(override.span)
+        for group in detect_reference_note_continuations(
+            flow_by_page[pending.page_id], occupied=occupied
+        ):
+            overrides = self._translate_continuation_group(group, draft_lookup)
+            if overrides is not None:
+                for override in overrides:
+                    draft_lookup[override.span.ref].overrides.append(override)
+                    occupied.append(override.span)
         groups = build_continuation_groups(
             edges,
             texts,
@@ -4562,6 +4695,12 @@ class TranslateConverter(PDFConverterEx):
                 elif object_id(child) in boundary_text_classes:
                     cls = boundary_text_classes[object_id(child)]
                 actual_cls = int(cls)
+                quote = (
+                    _tex_prose_quote(child, actual_cls)
+                    if not self.vfont and not self.vchar
+                    else None
+                )
+                child._pdf2zh_prose_quote = quote is not None
                 child._pdf2zh_layout_class = actual_cls
                 candidate_region_kind = region_types.get(actual_cls, "")
                 previous_actual_cls = int(
@@ -4622,7 +4761,7 @@ class TranslateConverter(PDFConverterEx):
                     cls == 0                                                                                # 1. 类别为保留区域
                     or getattr(child, "_pdf2zh_scan_fragment", False)
                     or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79)  # 2. 角标字体，有 0.76 的角标和 0.799 的大写，这里用 0.79 取中，同时考虑首字母放大的情况
-                    or (vflag(child.fontname, child.get_text())
+                    or (vflag(child.fontname, quote or child.get_text())
                         and not (not self.vfont and getattr(child, "_pdf2zh_cm_prose", False)))                                              # 3. 公式字体
                     or (child.matrix[0] == 0 and child.matrix[3] == 0)                                      # 4. 垂直字体
                 ):
@@ -4855,7 +4994,7 @@ class TranslateConverter(PDFConverterEx):
                     ) and child.get_text() != " ":                          # 3. 当前字符不是空格
                         pstk[-1].y -= child.size - pstk[-1].size            # 修正段落初始纵坐标，假设两个不同大小字符的上边界对齐
                         pstk[-1].size = child.size
-                    sstk[-1] += child.get_text()
+                    sstk[-1] += quote or child.get_text()
                     paragraph_text_chars[-1].append(child)
                 else:                                                       # 公式入栈
                     if (                                                    # 根据公式左侧的文字修正公式的纵向偏移
