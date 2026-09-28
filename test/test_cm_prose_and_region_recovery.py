@@ -282,6 +282,36 @@ def test_roman_with_respect_to_abbreviation_stops_formula_swallowing():
     )
 
 
+def test_probability_and_statistical_abbreviations_remain_complete_prose():
+    for word in ("w.h.p.", "i.i.d.", "i.e.", "e.g."):
+        for font in ("CMR10", "CMTI10"):
+            chars = run(word, x=30, y=500, font=font, size=10)
+            _mark_prose_words(chars)
+            assert all(getattr(ch, "_pdf2zh_prose_word", False) for ch in chars)
+            if font == "CMTI10":
+                assert all(getattr(ch, "_pdf2zh_cm_prose", False) for ch in chars)
+            math = run("X", x=20, y=500, font="CMMI10", size=10)
+            assert not _should_extend_formula_run(math, chars[0])
+        math_chars = run(word, x=30, y=500, font="CMMI10", size=10)
+        _mark_prose_words(math_chars)
+        assert not any(getattr(ch, "_pdf2zh_prose_word", False) for ch in math_chars)
+
+
+def test_abbreviation_does_not_bridge_rows_or_widely_separated_glyphs():
+    for modification in ("gap", "baseline", "size"):
+        chars = run("w.h.p.", x=30, y=500, font="CMTI10", size=10)
+        if modification == "gap":
+            for ch in chars[2:]:
+                ch.x0 += 10
+                ch.x1 += 10
+        elif modification == "baseline":
+            chars[2].y0 -= 8
+        else:
+            chars[2].size = 7
+        _mark_prose_words(chars)
+        assert not any(getattr(ch, "_pdf2zh_prose_word", False) for ch in chars)
+
+
 def test_overprinted_tex_text_accent_stays_with_its_original_base_glyph():
     accent = run("`", x=20, y=500, font="CMR10", size=10)[0]
     accent.get_text = lambda: r"\`"

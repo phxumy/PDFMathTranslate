@@ -865,6 +865,7 @@ def _recover_detector_boundary_text(
         ):
             recovered[object_id(char)] = target_class
 
+    clipped_words: list[tuple[int, int, int]] = []
     index = 0
     while index < len(chars):
         start = index
@@ -893,6 +894,8 @@ def _recover_detector_boundary_text(
         target_class = next((cls for cls in run_classes if cls > 1), None)
         if target_class is None:
             continue
+        if set(run_classes) == {1, target_class}:
+            clipped_words.append((start, index, target_class))
         # Require preceding prose on the same source line. An isolated Roman
         # mathematical label must not become prose merely by touching a box.
         previous = start - 1
@@ -915,6 +918,61 @@ def _recover_detector_boundary_text(
         ):
             continue
         recovered.update((object_id(char), target_class) for char in chars[start:index])
+    # A narrow detector box can clip *both* ends of one ordinary source line.
+    # Two bisected words prove that neither box edge is a linguistic boundary,
+    # even when a formula or sentence punctuation precedes those words. Restore
+    # that continuous line as one paragraph; protected layout classes are never
+    # released, and mathematical fonts still use the original formula path.
+    for left, right in zip(clipped_words, clipped_words[1:]):
+        start, left_end, target_class = left
+        right_start, end, right_class = right
+        if (
+            target_class != right_class
+            or classes[start] != 1
+            or classes[left_end - 1] != target_class
+            or classes[right_start] != target_class
+            or classes[end - 1] != 1
+        ):
+            continue
+        anchor = chars[start]
+        em = float(anchor.size)
+        baseline = _char_baseline(anchor)
+
+        def on_line(pos: int) -> bool:
+            candidate = chars[pos]
+            return (
+                object_id(candidate) not in protected_ids
+                and classes[pos] in {1, target_class}
+                and not getattr(candidate, "_pdf2zh_scan_fragment", False)
+                and not _is_non_horizontal_text_matrix(candidate.matrix)
+                and 0.65 * em <= float(candidate.size) <= 1.05 * em
+                and abs(_char_baseline(candidate) - baseline) <= 0.25 * em
+            )
+
+        def connected(a: int, b: int) -> bool:
+            return (
+                on_line(a) and on_line(b)
+                and -0.25 * em <= float(chars[b].x0) - float(chars[a].x1) <= 0.8 * em
+            )
+
+        if not all(connected(pos, pos + 1) for pos in range(start, end - 1)):
+            continue
+        # Several full prose words between the two cut words distinguish a
+        # sentence from an isolated Roman label or names beside an equation.
+        interior = [
+            ch for ch in chars[left_end:right_start]
+            if not is_formula(ch.fontname, ch.get_text())
+        ]
+        if len(re.findall(r"[A-Za-z]{3,}", _reconstruct_italic_run(interior))) < 3:
+            continue
+        while start > 0 and connected(start - 1, start):
+            start -= 1
+        while end < len(chars) and connected(end - 1, end):
+            end += 1
+        recovered.update(
+            (object_id(chars[pos]), target_class)
+            for pos in range(start, end) if classes[pos] == 1
+        )
     return recovered
 
 
@@ -2103,19 +2161,30 @@ def _mark_prose_words(chars: list[LTChar]) -> None:
                 ):
                     char._pdf2zh_cm_prose = True
                     break
-    # The standard prose abbreviation is often typeset in text italic using
-    # single-letter glyph groups, so the conservative word classifier skips it.
-    for index in range(len(chars) - 5):
-        abbreviation = chars[index : index + 6]
+    # Prose abbreviations use single-letter groups, even in text italic. Keep
+    # the entire dotted unit (including its final period) out of math islands.
+    prose_abbreviations = {"w.r.t.", "w.h.p.", "i.i.d.", "i.e.", "e.g."}
+    for index in range(len(chars)):
+        abbreviation = next((
+            chars[index : index + length] for length in (4, 6)
+            if "".join(ch.get_text() for ch in chars[index : index + length]).lower()
+            in prose_abbreviations
+        ), None)
+        if abbreviation is None:
+            continue
+        em = max(ch.size for ch in abbreviation)
         if (
-            "".join(ch.get_text() for ch in abbreviation).lower() == "w.r.t."
-            and all(_is_non_math_text_font(ch.fontname) for ch in abbreviation)
+            all(_is_non_math_text_font(ch.fontname) for ch in abbreviation)
+            and min(ch.size for ch in abbreviation) >= 0.9 * em
             and max(_char_baseline(ch) for ch in abbreviation)
-            - min(_char_baseline(ch) for ch in abbreviation)
-            < 0.2 * abbreviation[0].size
+            - min(_char_baseline(ch) for ch in abbreviation) < 0.2 * em
+            and all(
+                -0.12 * em <= right.x0 - left.x1 <= 0.5 * em
+                for left, right in zip(abbreviation, abbreviation[1:])
+            )
         ):
             abbreviation[0]._pdf2zh_prose_word_start = True
-            abbreviation[0]._pdf2zh_prose_word_length = 6
+            abbreviation[0]._pdf2zh_prose_word_length = len(abbreviation)
             for char in abbreviation:
                 char._pdf2zh_prose_word = True
                 if re.match(r"^CM(?:TI|SL)\d", _font_name(char.fontname)):
@@ -2244,7 +2313,47 @@ def _formula_annotation_islands(chars: list[LTChar]) -> list[list[LTChar]]:
             before = "".join(ch.get_text() for ch in left)
             after = "".join(ch.get_text() for ch in right)
             em = max(ch.size for ch in run)
+
+            def math_neighbor(on_left):
+                # Extensible matrix delimiters have raised font baselines.
+                # Include just those tall delimiters alongside same-row glyphs.
+                candidates = []
+                for char in chars:
+                    gap = run[0].x0 - char.x1 if on_left else char.x0 - run[-1].x1
+                    if not 0 <= gap <= 2.5 * em:
+                        continue
+                    same_row = abs(_char_baseline(char) - _char_baseline(run[0])) <= 0.2 * em
+                    tall_delimiter = (
+                        re.match(r"\\(?:bigg?|Bigg?)[lr]?[()[\]]", char.get_text())
+                        and abs(char.y0 - run[0].y0) <= 2 * em
+                    )
+                    if same_row or tall_delimiter:
+                        candidates.append((gap, char))
+                if not candidates:
+                    return False
+                nearest = min(candidates, key=lambda item: item[0])[1]
+                math_script = (
+                    nearest.get_text().isdigit() and nearest.size < 0.9 * em
+                    and any(
+                        _MATH_FONT_RE.search(_font_name(ch.fontname))
+                        and -0.1 * em <= nearest.x0 - ch.x1 <= 0.3 * em
+                        and abs(_char_baseline(ch) - _char_baseline(nearest)) < 0.65 * em
+                        for ch in chars
+                    )
+                )
+                return bool(
+                    math_script
+                    or
+                    _MATH_FONT_RE.search(_font_name(nearest.fontname))
+                    or re.match(r"\\[A-Za-z]+", nearest.get_text())
+                )
+
             if (
+                text.casefold() in {"and", "or"}
+                and math_neighbor(True) and math_neighbor(False)
+            ):
+                islands.append(run)
+            elif (
                 text.casefold() == "where"
                 and left and right
                 and before.rstrip().endswith(",")
@@ -2394,8 +2503,18 @@ def _recover_preserved_region_prose(
                         recovered[object_id(char)] = new_class
                     new_class += 1
             continue
+        if region.class_name == "table":
+            for island in _formula_annotation_islands(region_chars):
+                if _reconstruct_italic_run(island).casefold() not in {"and", "or"}:
+                    continue
+                region_types[new_class] = "formula_annotation"
+                for char in island:
+                    recovered[object_id(char)] = new_class
+                new_class += 1
         lines: list[list[LTChar]] = []
         for char in sorted(region_chars, key=lambda ch: (-_char_baseline(ch), ch.x0)):
+            if object_id(char) in recovered:
+                continue
             line = next(
                 (
                     line
@@ -3738,6 +3857,61 @@ class PDFConverterEx(PDFConverter):
             self._source_render_mode = previous
 
 
+def _collect_formula_annotation_contexts(paragraphs, formulas) -> dict[int, dict[str, str]]:
+    """Read nearby protected glyphs without merging them into a label's layout."""
+    protected = [
+        ch for formula in formulas for ch in formula
+        if getattr(ch, "_pdf2zh_layout_class", None) == 0
+    ]
+    contexts = {}
+    for index, paragraph in enumerate(paragraphs):
+        if paragraph.region_kind != "formula_annotation":
+            continue
+        em = max(paragraph.size, 1.0)
+        row = [
+            ch for ch in protected
+            if (
+                abs(_char_baseline(ch) - paragraph.y) <= 0.65 * em
+                or (
+                    re.match(r"\\(?:bigg?|Bigg?)[lr]?[()[\]]", ch.get_text())
+                    and abs(ch.y0 - paragraph.y) <= 2 * em
+                )
+            )
+            and ch.size <= 1.25 * em
+        ]
+
+        def side(left):
+            candidates = sorted(
+                [ch for ch in row if (
+                    ch.x1 <= paragraph.x0 + 0.05 if left
+                    else ch.x0 >= paragraph.x1 - 0.05
+                )],
+                key=lambda ch: (ch.x0, -ch.y0), reverse=left,
+            )
+            edge = paragraph.x0 if left else paragraph.x1
+            selected = []
+            for ch in candidates:
+                gap = edge - ch.x1 if left else ch.x0 - edge
+                if gap > 2.5 * em or len(selected) >= 80:
+                    break
+                selected.append(ch)
+                edge = min(edge, ch.x0) if left else max(edge, ch.x1)
+                if ch.get_text().strip() in ({"(", "["} if left else {")", "]"}):
+                    break
+            return "".join(ch.get_text() for ch in sorted(selected, key=lambda ch: ch.x0)).strip()
+
+        left, right = side(True), side(False)
+        meaningful = lambda text: bool(re.search(r"[\w\\≤≥∼=]", text))
+        position = (
+            "between-math" if meaningful(left) and meaningful(right)
+            else "before-math" if meaningful(right)
+            else "after-math" if meaningful(left)
+            else "label"
+        )
+        contexts[index] = {"position": position, "left_math": left, "right_math": right}
+    return contexts
+
+
 class Paragraph:
     def __init__(
         self,
@@ -3766,6 +3940,7 @@ class Paragraph:
         self.page_id = int(page_id)
         self.layout_class = int(layout_class)
         self.region_kind = region_kind
+        self.formula_annotation_context: dict[str, str] = {}
 
 
 @dataclass
@@ -4294,6 +4469,10 @@ class TranslateConverter(PDFConverterEx):
         reference_locations: list[tuple[int, int]] = []
         reference_texts: list[str] = []
         reference_cache_contexts: list[str] = []
+        annotation_locations: list[tuple[int, int]] = []
+        annotation_texts: list[str] = []
+        annotation_contexts: list[dict[str, str]] = []
+        annotation_translator = getattr(self.translator, "translate_formula_annotations", None)
 
         for plan_index, plan in enumerate(plans):
             for part_index, part in enumerate(plan.parts):
@@ -4302,6 +4481,15 @@ class TranslateConverter(PDFConverterEx):
                         normalize_protected_literals(part.text)
                     )
                 elif part.role in {ROLE_TRANSLATE, ROLE_AFFILIATION}:
+                    if (
+                        pstk[plan_index].region_kind == "formula_annotation"
+                        and _supports_scientific_translation(self.translator)
+                        and callable(annotation_translator)
+                    ):
+                        annotation_locations.append((plan_index, part_index))
+                        annotation_texts.append(part.text)
+                        annotation_contexts.append(pstk[plan_index].formula_annotation_context)
+                        continue
                     styled_text, style_ids = _tag_translatable_italic_formulas(
                         part.text,
                         italic_candidates or {},
@@ -4343,6 +4531,17 @@ class TranslateConverter(PDFConverterEx):
                     )
                 else:
                     raise ValueError(f"Unsupported translation role: {part.role}")
+
+        if annotation_texts:
+            annotation_results = self._validate_batch_result(
+                annotation_translator(annotation_texts, annotation_contexts),
+                len(annotation_texts),
+                "translate_formula_annotations",
+            )
+            for (plan_index, part_index), result in zip(
+                annotation_locations, annotation_results, strict=True
+            ):
+                part_results[plan_index][part_index] = result
 
         ordinary_results = self._translate_text_segments(
             ordinary_texts,
@@ -5344,6 +5543,8 @@ class TranslateConverter(PDFConverterEx):
         formula_texts = [
             "".join(ch.get_text() for ch in value) for value in var
         ]
+        for paragraph_id, context in _collect_formula_annotation_contexts(pstk, var).items():
+            pstk[paragraph_id].formula_annotation_context = context
         running_headers = _classify_running_header_regions(
             sstk,
             pstk,

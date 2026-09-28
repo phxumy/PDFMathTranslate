@@ -10,6 +10,8 @@ from pdf2zh.translation_policy import (
     SourceSegment,
 )
 from test_converter_translation_policy import FakeCodexTranslator, converter_with, paragraph
+from pdf2zh.translator import CodexTranslator
+from test_codex_formula_context import translator_stub
 
 
 ADDRESS = (
@@ -119,7 +121,11 @@ def test_standalone_numbered_institutions_translate_wholly_and_remain_separate()
 
         def translate_batch(self, texts):
             self.seen.extend(texts)
-            return ["1清华大学机构，北京100084，中国{v2}华南师范大学机构，广州510006，中国"]
+            return [
+                "1清华大学机构，北京100084，中国" if text.startswith("1Center")
+                else "{v2}华南师范大学机构，广州510006，中国"
+                for text in texts
+            ]
 
     translator = Translator()
     converter = converter_with(translator)
@@ -129,9 +135,63 @@ def test_standalone_numbered_institutions_translate_wholly_and_remain_separate()
         [source], [address_paragraph], formula_texts=["1", "1", "2"],
         page_width=612, page_height=792,
     )
-    assert translator.seen == [source]
+    boundary = source.index("{v2}")
+    assert translator.seen == [source[:boundary], source[boundary:]]
+    assert "".join(translator.seen) == source
+    assert "School of Physics and Telecommunication Engineering" in translator.seen[1]
+    backend = CodexTranslator.__new__(CodexTranslator)
+    assert all(backend._split_long_text(text) == [text] for text in translator.seen)
     assert output == ["1清华大学机构，北京100084，中国\n{v2}华南师范大学机构，广州510006，中国"]
     assert not translator.reference_entries
+
+
+def test_numbered_affiliation_parts_bypass_the_old_whole_block_cache():
+    source = (
+        "1Department of Physics, Example University, USA "
+        "{v0}School of Physics and Telecommunication Engineering, "
+        "South China Normal University, Guangzhou 510006, China"
+    )
+    translator = translator_stub()
+    translator.cache.set(source, "1旧机构{v0}物理学院和电信工程")
+    calls = []
+
+    def translate(texts, **kwargs):
+        calls.extend(texts)
+        return ["1第一机构，美国" if text.startswith("1Department")
+                else "{v0}物理与电信工程学院，华南师范大学，中国广州510006"
+                for text in texts]
+
+    translator._run_batch_translation = translate
+    converter = converter_with(translator)
+    result = converter._translate_planned_segments(
+        [source], [paragraph()], formula_texts=["2"], page_width=612, page_height=792,
+    )
+    boundary = source.index("{v0}")
+    assert calls == [source[:boundary], source[boundary:]]
+    assert result == ["1第一机构，美国\n{v0}物理与电信工程学院，华南师范大学，中国广州510006"]
+    assert all(translator.cache.get(part) for part in calls)
+    assert translator.cache.get(source) == "1旧机构{v0}物理学院和电信工程"
+
+
+@pytest.mark.parametrize("source,formulas", [
+    ("1School of Physics and Telecommunication Engineering, Example University, USA", []),
+    ("Department of Physics, Example University, NY 10598, USA", []),
+    ("1Department of Physics, Example University, Room {v0}, USA", ["12"]),
+])
+def test_single_institution_or_room_number_remains_one_translation_unit(source, formulas):
+    plan = DocumentTranslationPolicy().plan_segment(segment(source), formula_texts=formulas)
+    assert [(part.role, part.text) for part in plan.parts] == [(ROLE_AFFILIATION, source)]
+
+
+def test_room_number_near_the_next_institution_does_not_create_a_third_part():
+    source = (
+        "1Department of Physics, Example University, Room {v0}, USA "
+        "{v1}Department of Chemistry, Other University, UK"
+    )
+    plan = DocumentTranslationPolicy().plan_segment(segment(source), formula_texts=["12", "2"])
+    boundary = source.index("{v1}")
+    assert [part.text for part in plan.parts] == [source[:boundary], source[boundary:]]
+    assert [part.break_before for part in plan.parts] == [False, True]
 
 
 def test_converter_delivers_distinct_metadata_fields_and_preserves_email_literal():

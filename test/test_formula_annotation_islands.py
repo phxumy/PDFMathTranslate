@@ -91,3 +91,48 @@ def test_operators_variables_and_single_labels_do_not_become_prose():
         chars = run(text, y=500, font=font)
         mapping, _ = recover(chars, [detection("isolate_formula", (0, 450, 599, 550))])
         assert not mapping
+
+
+def test_math_conjunctions_keep_adjacent_expressions_fixed_in_equations_and_tables():
+    for conjunction in ("and", "or"):
+        for region in ("isolate_formula", "table"):
+            left = run("ℓ", x=30, y=500, font="CMMI10")
+            word = run(conjunction, x=left[-1].x1 + 3, y=500)
+            right = run("ℓ", x=word[-1].x1 + 3, y=500, font="CMMI10")
+            mapping, kinds = recover(left + word + right, [detection(region, (0, 450, 599, 550))])
+            assert set(mapping) == {id(ch) for ch in word}
+            assert kinds[mapping[id(word[0])]] == "formula_annotation"
+
+
+def test_math_conjunction_recovery_rejects_code_math_names_and_distant_columns():
+    for label_font, right_font, gap, right_y in (
+        ("CMTT10", "CMMI10", 3, 500),
+        ("CMMI10", "CMMI10", 3, 500),
+        ("CMR8", "CMR8", 3, 500),
+        ("CMR8", "CMMI10", 30, 500),
+        ("CMR8", "CMMI10", 3, 480),
+    ):
+        left = run("ℓ", x=30, y=500, font="CMMI10")
+        word = run("or", x=left[-1].x1 + 3, y=500, font=label_font)
+        right = run("x", x=word[-1].x1 + gap, y=right_y, font=right_font)
+        mapping, _ = recover(left + word + right, [detection("isolate_formula", (0, 450, 599, 550))])
+        assert not mapping
+
+
+def test_conjunction_between_large_matrices_accepts_raised_math_delimiter():
+    bracket = run(")", x=30, y=514, font="CMEX10", size=10)[0]
+    bracket.get_text = lambda: r"\biggr) "
+    word = run("and", x=55, y=500, size=10)
+    delta = run("D", x=word[-1].x1 + 21, y=500, font="CMR10", size=10)[0]
+    delta.get_text = lambda: r"\Delta "
+    mapping, _ = recover([bracket] + word + [delta], [detection("isolate_formula", (0, 450, 599, 550))])
+    assert set(mapping) == {id(ch) for ch in word}
+
+
+def test_table_conjunction_after_numeric_math_subscript_stays_independent():
+    left = run("ℓ", x=30, y=500, font="CMMI8", size=8)
+    script = run("1", x=left[-1].x1, y=499, font="CMR6", size=6)
+    word = run("or", x=script[-1].x1 + 0.5, y=500, size=8)
+    right = run("ℓ", x=word[-1].x1 + 3, y=500, font="CMMI8", size=8)
+    mapping, _ = recover(left + script + word + right, [detection("table", (0, 450, 599, 550))])
+    assert set(mapping) == {id(ch) for ch in word}

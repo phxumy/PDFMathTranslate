@@ -6,6 +6,8 @@ import difflib
 import re
 import unicodedata
 
+from pdf2zh.source_segmentation import statistical_abbreviation_spans
+
 _FORMULA_PLACEHOLDER_RE = re.compile(r"\{\{v\d+\}\}|\{v\d+\}", re.IGNORECASE)
 _INTERNAL_MARKER_RE = re.compile(
     r"\[\[PDF2ZH_(?:FLOW|ITALIC|REF_BOUNDARY)[^\]]*\]\]",
@@ -49,7 +51,8 @@ def has_detached_norm_relation(source: str, target: str) -> bool:
     for match in relation.finditer(source):
         token = re.escape(match.group("norm"))
         if re.search(
-            r"[。！？.!?]\s*[（(]?\s*" + token
+            r"[。！？.!?]\s*[（(]?\s*"
+            + token
             + r"\s*(?:范数|範數)\s*[）)]?\s*[；;。.!?！？]",
             target,
         ):
@@ -1061,7 +1064,101 @@ def has_suspicious_english_residue(source: str, target: str) -> bool:
         _has_shared_english_clause(source_words, target_words)
         or _is_target_only_english_prose(clean_target, target_words)
         or _has_embedded_english_grammar_glue(clean_source, clean_target)
+        or _has_untranslated_mathematical_prose(clean_source, clean_target)
+        or _has_broken_statistical_abbreviation(source, target)
     )
+
+
+def _has_untranslated_mathematical_prose(source: str, target: str) -> bool:
+    """Catch short mathematical prose without treating names as translatable.
+
+    These source-matched forms are lower-case property words, numbered internal
+    statement references, and quoted labels made wholly of ordinary scientific
+    words. External citation locators retain their original bibliographic form.
+    """
+    if not any(_is_cjk_ideograph(char) for char in target):
+        return False
+    for word in ("sharp", "sharpness"):
+        pattern = rf"(?<![A-Za-z]){word}(?![A-Za-z])"
+        if re.search(pattern, source) and re.search(pattern, target):
+            return True
+
+    citation = re.compile(r"\[\s*\d+(?:\s*[-–,]\s*\d+)*\s*,[^\]\r\n]*\]")
+    source_references = citation.sub(" ", source)
+    target_references = citation.sub(" ", target)
+    statement = re.compile(
+        r"\b(?:theorem|lemma|proposition|corollary|definition|assumption|remark)"
+        r"\s+(?:[A-Za-z]\.)?\d+(?:\.\d+)*(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    normalized_source = {
+        match.group().casefold() for match in statement.finditer(source_references)
+    }
+    if any(
+        match.group().casefold() in normalized_source
+        for match in statement.finditer(target_references)
+    ):
+        return True
+
+    # A closed vocabulary excludes product, author and method names, while
+    # quotes identify the complete local problem label rather than an arbitrary
+    # technical phrase embedded in the surrounding sentence.
+    scientific_label_words = {
+        "covariance",
+        "matrix",
+        "vector",
+        "signal",
+        "phase",
+        "sparse",
+        "low-rank",
+        "estimation",
+        "recovery",
+        "sensing",
+        "retrieval",
+    }
+    quote = re.compile(r"""["“‘'](?P<label>[A-Za-z][A-Za-z0-9 -]{2,80})["”’']""")
+    for match in quote.finditer(source):
+        label = match.group("label").strip()
+        content = re.sub(r"\s+(?:[IVXLCDM]+|\d+)\s*$", "", label)
+        words = tuple(word.casefold() for word in _ENGLISH_WORD_RE.findall(content))
+        if len(words) < 2 or not all(word in scientific_label_words for word in words):
+            continue
+        pattern = (
+            r"(?<![A-Za-z])"
+            + r"\s+".join(re.escape(word) for word in label.split())
+            + r"(?![A-Za-z0-9])"
+        )
+        if re.search(pattern, target, re.IGNORECASE):
+            return True
+    return False
+
+
+def _has_broken_statistical_abbreviation(source: str, target: str) -> bool:
+    """Reject a qualifier that separates a Chinese verb from its operand.
+
+    A condition may legitimately move before the qualifier in Chinese, leaving
+    the abbreviation at a complete sentence end. Reject only when an incomplete
+    verb precedes the stop and the original following operand still follows it.
+    """
+    operand = r"(?:[A-Z]{2,}\s*)?(?:\{\{v\d+\}\}|\{v\d+\})"
+    for start, end in statistical_abbreviation_spans(source):
+        following_operand = re.match(r"\s*,?\s*(" + operand + r")", source[end:])
+        if following_operand is None:
+            continue
+        expected_operand = re.sub(r"\s+", "", following_operand.group(1))
+        letters = re.findall(r"[a-z]", source[start:end])
+        prefix = r"\b" + r"\.\s*".join(letters)
+        for match in re.finditer(prefix + r"\.?\s*[。！？]", target):
+            preceding = target[: match.start()].rstrip()
+            if not re.search(r"(?:设|令|取|选取|选择|设置|采样|抽取)\s*$", preceding):
+                continue
+            actual_operand = re.match(r"\s*(" + operand + r")", target[match.end() :])
+            if (
+                actual_operand is not None
+                and re.sub(r"\s+", "", actual_operand.group(1)) == expected_operand
+            ):
+                return True
+    return False
 
 
 def has_unchanged_translatable_english(

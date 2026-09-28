@@ -20,14 +20,24 @@ _ABBREVIATED_REFERENCE = re.compile(
 _SENTENCE_END = re.compile(r"[.!?;:](?:\s+|$)")
 _INTERNAL_TOKEN = re.compile(r"\[\[PDF2ZH_(?:FLOW_\d+|ITALIC_\d+_(?:BEGIN|END))\]\]")
 _CONTINUING_ABBREVIATION = re.compile(
-    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|viz\.|cf\.)"
-    r"(?=\s*[,;:]?\s+\S)",
+    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|viz\.|cf\.)" r"(?=\s*[,;:]?\s+\S)",
     re.IGNORECASE,
+)
+_CONTINUING_STATISTICAL_ABBREVIATION = re.compile(
+    r"\b(?:w\.\s*h\.\s*p\.|i\.\s*i\.\s*d\.)"
+    rf"(?=\s*,?\s+(?:{_FORMULA}|[a-z]|[A-Z]{{2,}}\s*{_FORMULA}))",
 )
 
 
 def scientific_reference_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(match.span() for match in _ABBREVIATED_REFERENCE.finditer(text))
+
+
+def statistical_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Keep a statistical qualifier attached to prose or an acronym operand."""
+    return tuple(
+        match.span() for match in _CONTINUING_STATISTICAL_ABBREVIATION.finditer(text)
+    )
 
 
 def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
@@ -37,7 +47,9 @@ def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
     or explanation. Internal spacing in PDF extraction must not create a false
     sentence boundary either (``w. r. t.``).
     """
-    return tuple(match.span() for match in _CONTINUING_ABBREVIATION.finditer(text))
+    return tuple(
+        match.span() for match in _CONTINUING_ABBREVIATION.finditer(text)
+    ) + statistical_abbreviation_spans(text)
 
 
 def scientific_sentence_parts(text: str) -> list[str]:

@@ -679,7 +679,8 @@ class AuthorAffiliationTests(unittest.TestCase):
             segment(source), formula_texts=("1", "2", "1", "1", "1,*", "1", "2")
         )
         self.assertEqual(
-            [part.role for part in plan.parts], [ROLE_PRESERVE, ROLE_AFFILIATION]
+            [part.role for part in plan.parts],
+            [ROLE_PRESERVE, ROLE_AFFILIATION, ROLE_AFFILIATION],
         )
         self.assertEqual("".join(part.text for part in plan.parts), source)
         self.assertIsNone(policy.last_reference_number)
@@ -697,10 +698,10 @@ class AuthorAffiliationTests(unittest.TestCase):
         )
         policy = DocumentTranslationPolicy()
         plan = policy.plan_segment(address, formula_texts=("2",))
-        self.assertEqual(
-            [(part.role, part.text) for part in plan.parts],
-            [(ROLE_AFFILIATION, source)],
-        )
+        self.assertEqual([part.role for part in plan.parts], [ROLE_AFFILIATION] * 2)
+        self.assertEqual("".join(part.text for part in plan.parts), source)
+        self.assertEqual([part.break_before for part in plan.parts], [False, True])
+        self.assertTrue(plan.parts[1].text.startswith("{v0}Guangdong"))
         self.assertIsNone(policy.last_reference_number)
         translated = "1第一机构，北京100084，中国{v0}第二机构，广州510006，中国"
         self.assertEqual(

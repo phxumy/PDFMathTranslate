@@ -849,6 +849,35 @@ def _affiliation_markers(
     return tuple(markers)
 
 
+def _affiliation_parts(
+    text: str, formula_texts: Sequence[str], *, break_before: bool = False
+) -> tuple[SegmentPart, ...]:
+    """Send separately numbered institutions as complete translation units.
+
+    Waiting until rendering to restore these boundaries lets the backend's
+    length splitter cut through a later institution's name. Only an affiliation
+    block beginning with a confirmed marker can supply these semantic breaks;
+    a lone institution and incidental numbered expressions remain one unit.
+    """
+    markers = []
+    for start, end, raw in _affiliation_markers(text, formula_texts):
+        following = text[end : end + 80]
+        institution = _AFFILIATION_RE.search(following) or _AFFILIATION_NOTE_RE.search(following)
+        # A room/postal number can see the *next* institution inside the broad
+        # marker lookahead. Its intervening comma or marker rules out a start.
+        if institution and not re.search(r"[,;{}\d]", following[: institution.start()]):
+            markers.append((start, end, raw))
+    if len(markers) < 2 or markers[0][0] != len(text) - len(text.lstrip()):
+        return (SegmentPart(ROLE_AFFILIATION, text, break_before=break_before),)
+    boundaries = [0, *(start for start, _, _ in markers[1:]), len(text)]
+    return tuple(
+        SegmentPart(
+            ROLE_AFFILIATION, text[start:end], break_before=break_before or index > 0
+        )
+        for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]))
+    )
+
+
 def restore_affiliation_breaks(
     source_text: str, translated_text: str, formula_texts: Sequence[str] = ()
 ) -> str:
@@ -1026,7 +1055,7 @@ class DocumentTranslationPolicy:
             )
             and looks_like_affiliation(text)
         ):
-            return SegmentPlan(segment, (SegmentPart(ROLE_AFFILIATION, text),))
+            return SegmentPlan(segment, _affiliation_parts(text, formula_texts))
 
         # An upper-page byline can put its affiliation superscripts after
         # commas (``Y. Xu ,{v1} Z. Hua ,{v2}``).  Their repeated 1/2 sequence
@@ -1150,8 +1179,8 @@ class DocumentTranslationPolicy:
                     segment,
                     (
                         SegmentPart(ROLE_PRESERVE, author_text),
-                        SegmentPart(
-                            ROLE_AFFILIATION, affiliation_text, break_before=True
+                        *_affiliation_parts(
+                            affiliation_text, formula_texts, break_before=True
                         ),
                     ),
                 )
@@ -1172,5 +1201,5 @@ class DocumentTranslationPolicy:
             if looks_like_author_list(text):
                 return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
             if looks_like_affiliation(text):
-                return SegmentPlan(segment, (SegmentPart(ROLE_AFFILIATION, text),))
+                return SegmentPlan(segment, _affiliation_parts(text, formula_texts))
         return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))
