@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from pdf2zh.reading_flow import FragmentSpan, detect_reference_note_continuations
 from pdf2zh.translation_policy import (
     DocumentTranslationPolicy,
@@ -35,9 +37,14 @@ def columns():
     ]
 
 
-def test_supplemental_note_uses_prose_translation_and_preserves_number():
+@pytest.mark.parametrize("break_offsets", [(), (len(PRIOR), len(PRIOR) + 5 + len(NOTE))])
+def test_supplemental_note_uses_prose_translation_and_preserves_number(break_offsets):
     text = PRIOR + "[65] " + NOTE + " tomography. " + NEXT
-    source = SourceSegment(0, text, 6, 52, 297, 282, 743, 9.5, "plain text")
+    source = SourceSegment(
+        index=0, text=text, x0=52, x1=297, y0=282, y1=743, size=9.5,
+        page_width=612, page_height=792, region_kind="plain text",
+        break_offsets=break_offsets,
+    )
     plan = DocumentTranslationPolicy().plan_segment(source)
     note_part = next(part for part in plan.parts if NOTE in part.text)
     assert note_part.role == ROLE_TRANSLATE

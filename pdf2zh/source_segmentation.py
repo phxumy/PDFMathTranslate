@@ -19,14 +19,29 @@ _ABBREVIATED_REFERENCE = re.compile(
 )
 _SENTENCE_END = re.compile(r"[.!?;:](?:\s+|$)")
 _INTERNAL_TOKEN = re.compile(r"\[\[PDF2ZH_(?:FLOW_\d+|ITALIC_\d+_(?:BEGIN|END))\]\]")
+_CONTINUING_ABBREVIATION = re.compile(
+    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|viz\.|cf\.)"
+    r"(?=\s*[,;:]?\s+\S)",
+    re.IGNORECASE,
+)
 
 
 def scientific_reference_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(match.span() for match in _ABBREVIATED_REFERENCE.finditer(text))
 
 
+def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Dependent prose abbreviations must stay with their following clause.
+
+    Unlike terminal abbreviations such as ``etc.``, these introduce a relation
+    or explanation. Internal spacing in PDF extraction must not create a false
+    sentence boundary either (``w. r. t.``).
+    """
+    return tuple(match.span() for match in _CONTINUING_ABBREVIATION.finditer(text))
+
+
 def scientific_sentence_parts(text: str) -> list[str]:
-    references = scientific_reference_spans(text)
+    references = scientific_reference_spans(text) + scientific_abbreviation_spans(text)
     cursor = 0
     parts = []
     for match in _SENTENCE_END.finditer(text):
@@ -49,7 +64,7 @@ def safe_chunk_boundary(
     A single indivisible unit longer than the limit is returned whole. All other
     chunks fit the limit; no characters or source whitespace are changed.
     """
-    spans = [*scientific_reference_spans(text)]
+    spans = [*scientific_reference_spans(text), *scientific_abbreviation_spans(text)]
     spans.extend((start, end) for start, end, _ in formula_atoms)
     spans.extend(match.span() for match in _INTERNAL_TOKEN.finditer(text))
     spans.sort()

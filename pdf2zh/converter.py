@@ -2185,6 +2185,91 @@ def _abandoned_reference_entries(lines: list[list[LTChar]]) -> list[list[LTChar]
     return entries
 
 
+def _formula_annotation_islands(chars: list[LTChar]) -> list[list[LTChar]]:
+    """Find independent prose labels without releasing the surrounding equation.
+
+    Only geometrically separated words in text fonts qualify. Symbols, operators,
+    brackets and underbraces retain their original protected glyphs and anchors.
+    A one-word qualifier needs an explicit mathematical grammar around it.
+    """
+    lines: list[list[LTChar]] = []
+    for char in sorted(chars, key=lambda ch: (-_char_baseline(ch), ch.x0)):
+        line = next(
+            (
+                line for line in reversed(lines[-5:])
+                if abs(_char_baseline(line[0]) - _char_baseline(char))
+                <= 0.18 * min(float(line[0].size), float(char.size))
+            ),
+            None,
+        )
+        if line is None:
+            lines.append([char])
+        else:
+            line.append(char)
+    islands = []
+    relation = re.compile(r"[=<>≤≥∼≈∈]|\\(?:sim|in|leq|geq|equiv|approx)\b")
+    for line in lines:
+        line.sort(key=lambda ch: ch.x0)
+        runs: list[list[LTChar]] = []
+        run: list[LTChar] = []
+        for char in line:
+            if (
+                getattr(char, "_pdf2zh_prose_word", False)
+                and char.get_text().isalpha()
+                and _is_non_math_text_font(char.fontname)
+            ):
+                if run and (
+                    char.x0 - run[-1].x1 > 0.8 * min(char.size, run[-1].size)
+                    or min(char.size, run[-1].size) < 0.9 * max(char.size, run[-1].size)
+                ):
+                    runs.append(run)
+                    run = []
+                run.append(char)
+            else:
+                if run:
+                    runs.append(run)
+                    run = []
+        if run:
+            runs.append(run)
+        for run in runs:
+            text = _reconstruct_italic_run(run)
+            words = re.findall(r"[A-Za-z]+", text)
+            if len(words) >= 2 and any(len(word) >= 3 for word in words):
+                islands.append(run)
+                continue
+            # ``A(x) = y, where z ~ N(...)`` is an explanatory clause;
+            # ``where(x)`` is not. Keep both mathematical sides in place.
+            left = [ch for ch in line if ch.x1 <= run[0].x0]
+            right = [ch for ch in line if ch.x0 >= run[-1].x1]
+            before = "".join(ch.get_text() for ch in left)
+            after = "".join(ch.get_text() for ch in right)
+            em = max(ch.size for ch in run)
+            if (
+                text.casefold() == "where"
+                and left and right
+                and before.rstrip().endswith(",")
+                and relation.search(before) and relation.search(after)
+                and run[0].x0 - left[-1].x1 >= 0.2 * em
+                and right[0].x0 - run[-1].x1 >= 0.2 * em
+                and any(_MATH_FONT_RE.search(_font_name(ch.fontname)) for ch in left)
+                and any(_MATH_FONT_RE.search(_font_name(ch.fontname)) for ch in right)
+            ):
+                islands.append(run)
+            elif (
+                text.casefold() in {"small", "large"}
+                and left
+                and re.search(
+                    r"(?:∀|\\forall\s*)\s*(?:\\[A-Za-z]+\s*|[A-Za-z\u0370-\u03ff])$",
+                    before,
+                )
+                and run[0].x0 - left[-1].x1 >= 0.2 * em
+                and _MATH_FONT_RE.search(_font_name(left[-1].fontname))
+                and not re.search(r"[^\s.,;:)]", after)
+            ):
+                islands.append(run)
+    return islands
+
+
 def _recover_preserved_region_prose(
     chars: list[LTChar],
     layout,
@@ -2203,7 +2288,8 @@ def _recover_preserved_region_prose(
         return {}
     height, width = layout.shape
     regions = [
-        d for d in detections if d.class_name in {"table", "abandon", "isolate_formula"}
+        d for d in detections
+        if d.class_name in {"table", "abandon", "isolate_formula", "figure"}
     ]
     relevant = []
     for char in chars:
@@ -2233,6 +2319,47 @@ def _recover_preserved_region_prose(
     new_class = max(region_types, default=1) + 1
     for region_id, region_chars in grouped.items():
         region = by_id[region_id]
+        if region.class_name == "figure":
+            # A displayed comparison with underbraces can be detected as a
+            # figure. Require a brace directly beneath each label and a math
+            # relation on its baseline; ordinary chart labels stay protected.
+            for island in _formula_annotation_islands(region_chars):
+                em = max(ch.size for ch in island)
+                baseline = _char_baseline(island[0])
+                braces = [
+                    ch for ch in region_chars
+                    if ("\\underbrace" in ch.get_text() or ch.get_text() == "⏟")
+                    and _MATH_FONT_RE.search(_font_name(ch.fontname))
+                    and 0 < baseline - _char_baseline(ch) < 1.2 * em
+                    and ch.x1 > island[0].x0 and ch.x0 < island[-1].x1
+                ]
+                if not braces or not any(
+                    re.search(r"[=<>≤≥]|\\(?:leq|geq|equiv)\b", ch.get_text())
+                    and abs(_char_baseline(ch) - baseline) < 0.2 * em
+                    for ch in region_chars
+                ):
+                    continue
+                # TeX's extensible braces include glyph pieces mapped to a
+                # space. Include only matching-font pieces on the brace row.
+                braces += [
+                    ch for ch in region_chars
+                    if not ch.get_text().strip()
+                    and ch.x1 > island[0].x0 and ch.x0 < island[-1].x1
+                    and any(
+                        ch.fontname == brace.fontname
+                        and abs(_char_baseline(ch) - _char_baseline(brace)) < 0.05 * em
+                        for brace in braces
+                    )
+                ]
+                if max(ch.x1 for ch in braces) - min(ch.x0 for ch in braces) < (
+                    0.8 * (island[-1].x1 - island[0].x0)
+                ):
+                    continue
+                region_types[new_class] = "formula_annotation"
+                for char in island:
+                    recovered[object_id(char)] = new_class
+                new_class += 1
+            continue
         if region.class_name == "isolate_formula":
             prose = _reconstruct_italic_run(region_chars)
             algorithm = re.search(
@@ -2260,6 +2387,12 @@ def _recover_preserved_region_prose(
                 for char in region_chars:
                     recovered[object_id(char)] = new_class
                 new_class += 1
+            else:
+                for island in _formula_annotation_islands(region_chars):
+                    region_types[new_class] = "formula_annotation"
+                    for char in island:
+                        recovered[object_id(char)] = new_class
+                    new_class += 1
             continue
         lines: list[list[LTChar]] = []
         for char in sorted(region_chars, key=lambda ch: (-_char_baseline(ch), ch.x0)):
@@ -5714,7 +5847,9 @@ class TranslateConverter(PDFConverterEx):
             )
             line_height = vertical_fit.line_height
             render_scale = vertical_fit.render_scale
-            if scanned_paragraph and not brk:
+            if not brk and (
+                scanned_paragraph or pstk[id].region_kind == "formula_annotation"
+            ):
                 render_scale = min(
                     render_scale,
                     horizontal_fit_scale(

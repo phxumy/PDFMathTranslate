@@ -38,6 +38,7 @@ from pdf2zh.source_segmentation import scientific_sentence_parts, safe_chunk_bou
 from pdf2zh.config import ConfigManager
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START
 from pdf2zh.translation_quality import (
+    has_detached_norm_relation,
     has_suspicious_english_residue,
     has_suspicious_reference_title_residue,
     has_unchanged_reference_title_fragment,
@@ -3518,6 +3519,7 @@ class ScientificTranslator(BaseTranslator):
         if self._checks_english_residue() and (
             has_unchanged_translatable_english(source, normalized)
             or has_suspicious_english_residue(source, normalized)
+            or has_detached_norm_relation(source, normalized)
         ):
             return None
         return normalized

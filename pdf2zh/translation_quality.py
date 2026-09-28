@@ -32,6 +32,31 @@ _DOI_RE = re.compile(
 _ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
 _VISIBLE_SEPARATOR_RE = re.compile(r"[^\w]+", re.UNICODE)
 _CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;。！？；\r\n]")
+
+
+def has_detached_norm_relation(source: str, target: str) -> bool:
+    """Reject an isolated norm fragment after a translated sentence boundary.
+
+    This checks the narrow signature of an incorrectly split ``w.r.t.`` clause,
+    including cached results from older segmentation. It does not prescribe the
+    Chinese wording or reject a norm that starts a complete target sentence.
+    """
+    relation = re.compile(
+        r"\b(?:w\.\s*r\.\s*t\.|with\s+respect\s+to)\s+(?:the\s+)?"
+        r"(?P<norm>\{\{v\d+\}\}|\{v\d+\})\s+norm\b",
+        re.IGNORECASE,
+    )
+    for match in relation.finditer(source):
+        token = re.escape(match.group("norm"))
+        if re.search(
+            r"[。！？.!?]\s*[（(]?\s*" + token
+            + r"\s*(?:范数|範數)\s*[）)]?\s*[；;。.!?！？]",
+            target,
+        ):
+            return True
+    return False
+
+
 _MODEL_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:/-]*")
 _LEADING_REFERENCE_NAME_RE = re.compile(
     r"^\s*(?P<name>[^:：\r\n]{1,80}?)\s*[:：]\s*(?P<description>.+)$",

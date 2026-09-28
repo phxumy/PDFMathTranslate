@@ -30,6 +30,7 @@ from pdf2zh.doclayout import OnnxModel
 from pdf2zh.font_cmap import prepare_pdf_text_font
 from pdf2zh.link_annotations import (
     restore_imported_named_links,
+    restore_imported_uri_links,
     suppress_reflowed_link_borders,
 )
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
@@ -510,6 +511,7 @@ def translate_stream(
 
     doc_en.insert_file(doc_zh)
     restore_imported_named_links(doc_zh, doc_en, start_at=page_count)
+    restore_imported_uri_links(doc_zh, doc_en, start_at=page_count)
     for id in range(page_count):
         doc_en.move_page(page_count + id, id * 2 + 1)
     if not skip_subset_fonts:

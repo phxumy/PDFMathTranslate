@@ -757,6 +757,72 @@ def looks_like_affiliation(text: str) -> bool:
     return bool(_AFFILIATION_RE.search(text)) and not _AUTHOR_PROSE_RE.search(text)
 
 
+def _looks_like_standalone_address(text: str) -> bool:
+    """Disambiguate an institution/address from capitalized personal names."""
+    first, separator, address = text.partition(",")
+    return bool(
+        separator
+        and _AFFILIATION_RE.search(first)
+        and not re.search(r"\b(?:is|are)\s+with\b", first, re.IGNORECASE)
+        and looks_like_affiliation(text)
+        and (
+            re.search(r"\b\d{4,6}(?:-\d{4})?\b", address)
+            or re.search(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", address)
+        )
+    )
+
+
+def _publication_metadata_parts(segment: SourceSegment) -> tuple[SegmentPart, ...]:
+    """Keep publication fields on their actual PDF lines, not a joined URL."""
+    if segment.region_kind not in {"", "plain text"}:
+        return ()
+    text = segment.text
+    boundaries = sorted(
+        {0, len(text)}
+        | {offset for offset in segment.break_offsets if 0 < offset < len(text)}
+        | {match.end() for match in re.finditer(r"\r?\n", text)}
+    )
+    if len(boundaries) < 3:
+        return ()
+    month = (
+        r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    )
+    date = (
+        rf"(?:\d{{1,2}}\s+{month}\s+\d{{4}}|{month}\s+\d{{1,2}},?\s+\d{{4}}|"
+        r"\d{4}[-/]\d{1,2}[-/]\d{1,2})"
+    )
+    parts = []
+    labels = set()
+    has_date = False
+    for start, end in zip(boundaries, boundaries[1:]):
+        source = text[start:end]
+        value = source.strip()
+        dated = re.fullmatch(
+            rf"(Received|Revised|Accepted|Published(?:\s+online)?)\s*:?\s*{date}[.;]?",
+            value,
+            re.IGNORECASE,
+        )
+        if dated:
+            has_date = True
+            labels.add(dated[1].casefold())
+            role = ROLE_TRANSLATE
+        elif re.fullmatch(
+            r"(?:Online\s+at|Available\s+online(?:\s+at)?)\s*:?\s*https?://\S+",
+            value,
+            re.IGNORECASE,
+        ):
+            labels.add("url")
+            role = ROLE_TRANSLATE
+        elif re.fullmatch(r"doi\s*:\s*10\.\d{4,9}/\S+", value, re.IGNORECASE):
+            labels.add("doi")
+            role = ROLE_PRESERVE
+        else:
+            return ()
+        parts.append(SegmentPart(role, source, break_before=bool(parts)))
+    return tuple(parts) if has_date and len(labels) >= 2 else ()
+
+
 def _affiliation_markers(
     text: str, formula_texts: Sequence[str]
 ) -> tuple[tuple[int, int, str], ...]:
@@ -916,6 +982,10 @@ class DocumentTranslationPolicy:
             # as a byline.
             return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))
 
+        metadata_parts = _publication_metadata_parts(segment)
+        if metadata_parts:
+            return SegmentPlan(segment, metadata_parts)
+
         heading = _REFERENCE_HEADING_RE.fullmatch(stripped)
         if heading:
             self.pending_reference_heading = 3
@@ -935,8 +1005,9 @@ class DocumentTranslationPolicy:
         # Once a byline is anchored separately, its address can start directly
         # with a superscript number: ``1Center ... Institute ... University``.
         # Title Case institution names also resemble a list of people. Keep a
-        # confirmed numbered upper-page address intact before author splitting,
-        # so all its words and affiliation boundaries reach the address route.
+        # numbered institution or standalone postal/contact address intact
+        # before author splitting, so all words and affiliation boundaries
+        # reach the address route.
         affiliation_markers = _affiliation_markers(text, formula_texts)
         if (
             protect_authors
@@ -946,8 +1017,13 @@ class DocumentTranslationPolicy:
             and segment.page_height > 0
             and segment.y0 >= segment.page_height * 0.48
             and 0 < segment.size <= segment.page_height * 0.019
-            and affiliation_markers
-            and affiliation_markers[0][0] == len(text) - len(text.lstrip())
+            and (
+                (
+                    affiliation_markers
+                    and affiliation_markers[0][0] == len(text) - len(text.lstrip())
+                )
+                or _looks_like_standalone_address(text)
+            )
             and looks_like_affiliation(text)
         ):
             return SegmentPlan(segment, (SegmentPart(ROLE_AFFILIATION, text),))

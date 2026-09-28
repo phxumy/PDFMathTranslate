@@ -2,13 +2,174 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from io import BytesIO
 
 from pdfminer.pdfdocument import PDFDestinationNotFound, PDFDocument
 from pdfminer.pdfparser import PDFParser
-from pdfminer.pdftypes import PDFObjRef, dict_value, resolve1
+from pdfminer.pdftypes import PDFObjRef, PDFStream, dict_value, resolve1
 from pdfminer.psparser import PSLiteral, literal_name
-from pymupdf import Document, LINK_GOTO, LINK_NAMED, Page, get_pdf_str
+from pymupdf import (
+    Document,
+    LINK_GOTO,
+    LINK_GOTOR,
+    LINK_LAUNCH,
+    LINK_NAMED,
+    LINK_URI,
+    Page,
+    get_pdf_str,
+)
+
+
+def _copy_pdf_value(value, parsed, source, destination, copied_refs) -> str:
+    """Copy action operands without decoding URI bytes or retaining source xrefs."""
+    if isinstance(value, PDFObjRef):
+        if value.objid not in copied_refs:
+            new_xref = destination.get_new_xref()
+            copied_refs[value.objid] = new_xref
+            resolved = parsed.getobj(value.objid)
+            attributes = resolved.attrs if isinstance(resolved, PDFStream) else resolved
+            destination.update_object(
+                new_xref,
+                _copy_pdf_value(attributes, parsed, source, destination, copied_refs),
+            )
+            if isinstance(resolved, PDFStream):
+                destination.update_stream(new_xref, source.xref_stream(value.objid))
+        return f"{copied_refs[value.objid]} 0 R"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return format(Decimal(str(value)), "f")
+    if isinstance(value, bytes):
+        return f"<{value.hex()}>"
+    if isinstance(value, PSLiteral):
+        name = literal_name(value).encode("utf-8")
+        return "/" + "".join(
+            (
+                chr(byte)
+                if 33 <= byte <= 126 and chr(byte) not in "#%()/<>[]{}"
+                else f"#{byte:02X}"
+            )
+            for byte in name
+        )
+    if isinstance(value, list):
+        return (
+            "["
+            + " ".join(
+                _copy_pdf_value(item, parsed, source, destination, copied_refs)
+                for item in value
+            )
+            + "]"
+        )
+    if isinstance(value, dict):
+        return (
+            "<<"
+            + " ".join(
+                _copy_pdf_value(
+                    PSLiteral(key), parsed, source, destination, copied_refs
+                )
+                + " "
+                + _copy_pdf_value(item, parsed, source, destination, copied_refs)
+                for key, item in value.items()
+            )
+            + ">>"
+        )
+    raise ValueError(f"unsupported PDF link action operand: {type(value).__name__}")
+
+
+def restore_imported_uri_links(
+    source: Document, destination: Document, *, start_at: int
+) -> None:
+    """Preserve URI actions that MuPDF recreates as Launch/file actions.
+
+    Relative URIs are reported as file links by get_links(), even when their
+    actual PDF action is URI. Read the action dictionary to distinguish them
+    from genuine file actions; do not resolve URLs or invent a base address.
+    """
+    if start_at < 0 or start_at + len(source) > len(destination):
+        raise ValueError("imported page range is outside the destination document")
+    parsed = None
+    parsed_destination = None
+    copied_refs = {
+        source.page_xref(index): destination.page_xref(start_at + index)
+        for index in range(len(source))
+    }
+    for page_number, source_page in enumerate(source):
+        copied_page = destination[start_at + page_number]
+        source_links = source_page.get_links()
+        if not any(
+            source.xref_get_key(link["xref"], "A/S")[1] == "/URI"
+            for link in source_links
+        ):
+            continue
+        if parsed is None:
+            parsed = PDFDocument(PDFParser(BytesIO(source.tobytes())))
+            parsed_destination = PDFDocument(PDFParser(BytesIO(destination.tobytes())))
+        existing = [
+            link
+            for link in copied_page.get_links()
+            if destination.xref_get_key(link["xref"], "A/S")[1]
+            in ("/URI", "/Launch", "/GoToR")
+        ]
+        for link in source_links:
+            action_kind = source.xref_get_key(link["xref"], "A/S")[1]
+            if action_kind not in ("/URI", "/Launch", "/GoToR"):
+                continue
+            original = dict_value(parsed.getobj(link["xref"]))
+            original_rect = resolve1(original["Rect"])
+            # Older MuPDF imports rotated link coordinates as though they were
+            # unrotated. Accept that imported rectangle as well as the original
+            # PDF rectangle, then restore the original geometry below.
+            imported_rect = link["from"] * ~source_page.transformation_matrix
+            imported_action = {
+                LINK_URI: "/URI",
+                LINK_LAUNCH: "/Launch",
+                LINK_GOTOR: "/GoToR",
+            }.get(link["kind"])
+            matching = None
+            for old in existing:
+                if destination.xref_get_key(old["xref"], "A/S")[1] not in (
+                    action_kind,
+                    imported_action,
+                ):
+                    continue
+                old_annotation = dict_value(parsed_destination.getobj(old["xref"]))
+                rect = resolve1(old_annotation["Rect"])
+                if any(
+                    all(abs(left - right) < 0.01 for left, right in zip(rect, expected))
+                    for expected in (original_rect, imported_rect)
+                ):
+                    matching = old
+                    break
+            if matching is not None:
+                # Consume genuine Launch links as well: overlapping links must
+                # remain paired with their corresponding annotation in order.
+                existing.remove(matching)
+            if action_kind != "/URI":
+                continue
+            if matching is None:
+                previous_xrefs = {xref for xref, *_ in copied_page.annot_xrefs()}
+                copied_page.insert_link(
+                    {"kind": LINK_URI, "from": link["from"], "uri": "about:blank"}
+                )
+                new_xref = next(
+                    xref
+                    for xref, *_ in copied_page.annot_xrefs()
+                    if xref not in previous_xrefs
+                )
+            else:
+                new_xref = matching["xref"]
+            for key in ("A", "Rect", "QuadPoints"):
+                if key in original:
+                    destination.xref_set_key(
+                        new_xref,
+                        key,
+                        _copy_pdf_value(
+                            original[key], parsed, source, destination, copied_refs
+                        ),
+                    )
 
 
 def _internal_destination(document: PDFDocument, xref: int):
