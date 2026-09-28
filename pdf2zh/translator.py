@@ -2384,7 +2384,12 @@ class ScientificTranslator(BaseTranslator):
             json.dumps(items, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         )
 
-    def _accepted_annotation(self, source: str, target: str | None) -> str | None:
+    def _accepted_annotation(
+        self,
+        source: str,
+        target: str | None,
+        context: dict[str, str] | None = None,
+    ) -> str | None:
         accepted = self._accepted_translation(source, target)
         if accepted is None:
             return None
@@ -2407,7 +2412,18 @@ class ScientificTranslator(BaseTranslator):
                 or 0x2100 <= ord(char) <= 0x214F
                 or 0x1D400 <= ord(char) <= 0x1D7FF
             )
-        if nonprose_marks(accepted) - nonprose_marks(source):
+        added_marks = nonprose_marks(accepted) - nonprose_marks(source)
+        # A prefix may naturally introduce its adjacent expression with a
+        # colon (e.g. a bound label). Allow only that one terminal separator;
+        # a suffix/standalone label or a colon followed by commentary cannot.
+        if (
+            context and context.get("position") == "before-math"
+            and context.get("right_math", "").strip()
+            and accepted.endswith((":", "："))
+            and added_marks == Counter({accepted[-1]: 1})
+        ):
+            added_marks.clear()
+        if added_marks:
             return None
         if self._checks_english_residue():
             source_words = {word.casefold() for word in re.findall(r"[A-Za-z]+", source)}
@@ -2438,7 +2454,7 @@ class ScientificTranslator(BaseTranslator):
         for index, (source, context) in enumerate(zip(texts, contexts, strict=True)):
             key = self._annotation_cache_key(source, context)
             if not (self.ignore_cache or ignore_cache):
-                results[index] = self._accepted_annotation(source, self.cache.get(key))
+                results[index] = self._accepted_annotation(source, self.cache.get(key), context)
             if results[index] is None:
                 pending.append((index, json.dumps({"text": source, "context": context})))
         for batch in self._chunk_batch(pending):
@@ -2447,10 +2463,10 @@ class ScientificTranslator(BaseTranslator):
                 [texts[i] for i in indices], [contexts[i] for i in indices]
             )
             for i, target in zip(indices, targets, strict=True):
-                accepted = self._accepted_annotation(texts[i], target)
+                accepted = self._accepted_annotation(texts[i], target, contexts[i])
                 if accepted is None:
                     retry = self._run_annotation_batch([texts[i]], [contexts[i]], strict=True)[0]
-                    accepted = self._accepted_annotation(texts[i], retry)
+                    accepted = self._accepted_annotation(texts[i], retry, contexts[i])
                 if accepted is None:
                     logger.warning(
                         "Formula annotation translation was invalid; preserving source "

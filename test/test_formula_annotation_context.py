@@ -59,6 +59,36 @@ def test_repeated_annotation_failure_warns_preserves_and_does_not_cache(caplog):
     assert "preserving source without caching" in caplog.text
 
 
+@pytest.mark.parametrize("target", ["上界：", "上界:"])
+def test_one_terminal_colon_is_valid_only_before_adjacent_math_and_in_its_cache(target):
+    translator = translator_stub()
+    calls = []
+    translator._run_annotation_batch = lambda texts, contexts, **kwargs: calls.append(texts) or [target]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [target]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [target]
+    assert len(calls) == 1
+    assert translator.cache.get(translator._annotation_cache_key("bound on", context())) == target
+    for invalid_context in (
+        context(position="after-math"), context(position="between-math"),
+        context(position="label"), context(right_math=""),
+    ):
+        assert translator._accepted_annotation("bound on", target, invalid_context) is None
+    for bad in ("上界：：", "上界:：", "上界：说明", "上界：……", "上界：（x）", "上界δ："):
+        assert translator._accepted_annotation("bound on", bad, context()) is None
+
+
+def test_terminal_colon_in_wrong_context_cache_is_revalidated():
+    translator = translator_stub()
+    suffix = context(position="after-math")
+    key = translator._annotation_cache_key("bound on", suffix)
+    translator.cache.set(key, "上界：")
+    calls = []
+    translator._run_annotation_batch = lambda texts, contexts, **kwargs: calls.append(contexts) or ["的界"]
+    assert translator.translate_formula_annotations(["bound on"], [suffix]) == ["的界"]
+    assert calls == [[suffix]]
+    assert translator.cache.get(key) == "的界"
+
+
 def test_annotation_prompt_has_readonly_neighbor_roles_and_compact_output():
     translator = translator_stub()
     prompt = translator._build_annotation_prompt(["bound on"], [context()])
