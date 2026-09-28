@@ -48,6 +48,15 @@ def safe_float(o: Any) -> Optional[float]:
         return None
 
 
+def _serialize_pdf_operand(value: Any) -> str:
+    """Emit PDF arrays with PDF separators instead of Python list commas."""
+    if isinstance(value, (list, tuple)):
+        return "[" + " ".join(_serialize_pdf_operand(item) for item in value) + "]"
+    if isinstance(value, float):
+        return f"{value:f}"
+    return str(value).replace("'", "")
+
+
 class PDFPageInterpreterEx(PDFPageInterpreter):
     """Processor for the content of a PDF page
 
@@ -131,6 +140,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             and apply_matrix_pt(self.ctm, self.curpath[0][-2:])[1]
             == apply_matrix_pt(self.ctm, self.curpath[1][-2:])[1]
             and is_black(self.graphicstate.scolor)
+            # Dashed diagram lines must stay in the original graphics stream;
+            # the movable formula-line renderer only represents solid rules.
+            and not (self.graphicstate.dash and self.graphicstate.dash[0])
         ):  # 独立直线，水平，黑色
             # print(apply_matrix_pt(self.ctm,self.curpath[0][-2:]),apply_matrix_pt(self.ctm,self.curpath[1][-2:]),self.graphicstate.scolor)
             self.device.paint_path(self.graphicstate, True, False, False, self.curpath)
@@ -342,16 +354,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                                 name[0] == "T"
                                 or name in ['"', "'", "EI", "MP", "DP", "BMC", "BDC"]
                             ):  # 过滤 T 系列文字指令，因为 EI 的参数是 obj 所以也需要过滤（只在少数文档中画横线时使用），过滤 marked 系列指令
-                                p = " ".join(
-                                    [
-                                        (
-                                            f"{x:f}"
-                                            if isinstance(x, float)
-                                            else str(x).replace("'", "")
-                                        )
-                                        for x in args
-                                    ]
-                                )
+                                p = " ".join(_serialize_pdf_operand(x) for x in args)
                                 ops += f"{p} {name} "
                     else:
                         # log.debug("exec: %s", name)
@@ -359,16 +362,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         if targs is None:
                             targs = []
                         if not (name[0] == "T" or name in ["BI", "ID", "EMC"]):
-                            p = " ".join(
-                                [
-                                    (
-                                        f"{x:f}"
-                                        if isinstance(x, float)
-                                        else str(x).replace("'", "")
-                                    )
-                                    for x in targs
-                                ]
-                            )
+                            p = " ".join(_serialize_pdf_operand(x) for x in targs)
                             ops += f"{p} {name} "
                 elif settings.STRICT:
                     error_msg = "Unknown operator: %r" % name

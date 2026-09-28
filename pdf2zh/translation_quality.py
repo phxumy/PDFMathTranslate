@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import re
 import unicodedata
+from collections import Counter
 
 from pdf2zh.source_segmentation import statistical_abbreviation_spans
 
@@ -58,6 +59,116 @@ def has_detached_norm_relation(source: str, target: str) -> bool:
         ):
             return True
     return False
+
+
+def has_suspicious_physics_translation(source: str, target: str) -> bool:
+    """Reject clear quantum-population mistranslation or a lost sensitivity.
+
+    These checks reject a result for normal retranslation, never rewrite it.
+    A physical context is required to avoid treating demographic populations as
+    quantum state populations. The omitted quantity check uses a complete noun
+    phrase and accepts the common Chinese variants, without prescribing syntax.
+    """
+    source = _strip_non_prose(source)
+    target = _strip_non_prose(target)
+    if not re.search(r"\bpopulation\b", source, re.IGNORECASE):
+        return False
+    physics = re.search(
+        r"\b(?:qubits?|quantum|excited\s+states?|ground\s+states?|"
+        r"conditional\s+phase|rabi|pulses?|CZ)\b",
+        source,
+        re.IGNORECASE,
+    )
+    demographic = re.search(
+        r"\b(?:human|people|census|demograph\w*|inhabitants?|residents?)\b",
+        source,
+        re.IGNORECASE,
+    )
+    if physics and not demographic and re.search(r"人口|种群|種群", target):
+        return True
+    return bool(
+        physics
+        and re.search(r"\bpopulation\s+sensitivity\b", source, re.IGNORECASE)
+        and re.search(r"灵敏|靈敏|敏感|感度|敏度", target) is None
+    )
+
+
+def has_changed_numeric_citations(source: str, target: str) -> bool:
+    """Keep bare numbered citations even when no ``Ref.`` label precedes them.
+
+    Compare the cited numbers with multiplicity, accepting spacing, full-width
+    punctuation, regrouping and equivalent short ranges. Opaque code, URLs and
+    mathematics are outside this check. Visible numeric arrays are preserved
+    by the same rule rather than being guessed to be bibliography references.
+    """
+    def numbers(text):
+        text = unicodedata.normalize("NFKC", _strip_non_prose(text))
+        result = Counter()
+        for match in re.finditer(r"\[\s*(\d+(?:\s*[-–—,]\s*\d+)*)\s*\]", text):
+            for part in match.group(1).split(","):
+                bounds = re.split(r"\s*[-–—]\s*", part.strip())
+                if len(bounds) == 2:
+                    start, end = map(int, bounds)
+                    if 0 <= end - start <= 1000:
+                        result.update(range(start, end + 1))
+                    else:
+                        result.update([tuple(bounds)])
+                else:
+                    result.update([int(bounds[0])])
+        return result
+
+    return numbers(source) != numbers(target)
+
+
+def has_reversed_not_only_condition(source: str, target: str) -> bool:
+    """Reject an expanded condition translated as the excluded 'only' case.
+
+    Restrict this to explicit when/if conditions and an affirmative Chinese
+    only-case condition. Ordinary additive 'not only ... but also' paraphrases
+    and target conditions that retain the negation remain valid.
+    """
+    if re.search(
+        r"\b(?:when|if)\s+not\s+only\b"
+        r"(?:[^.!?]|\.(?=\s*[\[(\d])){1,600}?\bbut\b",
+        _strip_non_prose(source), re.IGNORECASE,
+    ) is None:
+        return False
+    for match in re.finditer(
+        r"(?:在|当|當|如果|若)([^。！？;；]{0,120}?)(?:情况(?:下)?|情況(?:下)?|时|時)",
+        _strip_non_prose(target),
+    ):
+        clause = match.group(1)
+        if re.search(r"(?:只|仅|僅)(?:仅|僅)?", clause) and re.search(
+            r"不|非|除了|还|還|同时|同時|以及|而且", clause
+        ) is None:
+            return True
+    return False
+
+
+def has_incomplete_scientific_caption(source: str, target: str) -> bool:
+    """Catch missing panel labels and a visibly omitted plotted quantity."""
+    caption = re.match(r"\s*fig(?:ure)?\.?\s*(?:\d+|\{v\d+\})\s*[.:]", source, re.I)
+    if caption:
+        panels = set(re.findall(r"\(([a-z])\)\s+[A-Z][a-z]", source))
+        for panel in panels:
+            if re.search(rf"[（(]\s*{panel}\s*[）)]|分图\s*{panel}\b", target) is None:
+                return True
+    if re.search(r"\bone[- ]dimensional\s+cuts?\b", source, re.I):
+        if re.search(r"截线|截線|切线|切線|剖面|截面|切面|切片|剖线|剖線", target) is None:
+            return True
+    if re.search(r"\barg\s*(?:\{\{v\d+\}\}|\{v\d+\})", source):
+        if re.search(r"(?<![A-Za-z])arg(?![A-Za-z])|辐角|輻角|幅角|相角", target) is None:
+            return True
+    return False
+
+
+def has_new_unbalanced_prose_parentheses(source: str, target: str) -> bool:
+    """Reject newly unclosed prose parentheses, allowing inherited math splits."""
+    def balance(text):
+        text = unicodedata.normalize("NFKC", _strip_non_prose(text))
+        return text.count("(") - text.count(")")
+    before, after = balance(source), balance(target)
+    return after > max(0, before) or after < min(0, before)
 
 
 _MODEL_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:/-]*")

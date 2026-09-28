@@ -651,6 +651,89 @@ def _split_trailing_runin_connector(
     return chars, "", []
 
 
+def _release_caption_prose_delimiters(segments, formulas, formula_paragraphs, paragraphs):
+    """Expose caption punctuation hidden after a subscripted variable.
+
+    Only full-size, horizontal text-font delimiters that close an opening mark
+    already visible in caption prose are eligible. A panel transition additionally
+    needs consecutive panel labels and an ordinary sentence on its right.
+    Mathematical delimiters and glyph coordinates remain untouched.
+    """
+    for formula_id, chars in enumerate(formulas):
+        if not chars:
+            continue
+        paragraph_id = formula_paragraphs[formula_id]
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.region_kind != "figure_caption" or paragraph.layout_class <= 1:
+            continue
+        marker = f"{{v{formula_id}}}"
+        source = segments[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        left, right = source.split(marker)
+        if left.count("(") <= left.count(")"):
+            continue
+
+        def prose_glyph(char):
+            return (
+                getattr(char, "_pdf2zh_layout_class", None) != 0
+                and _MATH_FONT_RE.search(_formula_font_name(char)) is None
+                and _is_non_math_text_font(char.fontname)
+                and 0.9 * paragraph.size <= char.size <= 1.1 * paragraph.size
+                and not _is_non_horizontal_text_matrix(char.matrix)
+            )
+
+        joined = "".join(char.get_text() for char in chars)
+        panel = re.fullmatch(r"\)\.\(([b-z])\)", joined)
+        previous_panels = re.findall(r"\(([a-z])\)", left)
+        if (
+            panel is not None
+            and previous_panels
+            and ord(previous_panels[-1]) + 1 == ord(panel.group(1))
+            and re.match(r"\s*[A-Z][a-z]{2,}\b", right)
+            and all(prose_glyph(char) for char in chars)
+            and max(_char_baseline(char) for char in chars)
+            - min(_char_baseline(char) for char in chars) < 0.2 * paragraph.size
+        ):
+            segments[paragraph_id] = left + f"). ({panel.group(1)})" + right
+        elif (
+            len(chars) > 1
+            and chars[-1].get_text() == ")"
+            and "(" not in joined
+            and joined.count(")") > joined.count("(")
+            and prose_glyph(chars[-1])
+            and any(char.get_text().isalnum() for char in chars[:-1])
+        ):
+            formulas[formula_id] = chars[:-1]
+            segments[paragraph_id] = left + marker + ")" + right
+
+
+def _release_prose_slash_connectives(segments, formulas, formula_paragraphs, paragraphs):
+    """Release the ordinary /or suffix of and/or from a spurious formula run."""
+    for index, chars in enumerate(formulas):
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            continue
+        if "".join(char.get_text() for char in chars) != "/or":
+            continue
+        if any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0
+            or _MATH_FONT_RE.search(_formula_font_name(char)) is not None
+            or not 0.9 * paragraph.size <= char.size <= 1.1 * paragraph.size
+            or _is_non_horizontal_text_matrix(char.matrix)
+            for char in chars
+        ):
+            continue
+        marker = f"{{v{index}}}"
+        source = segments[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        left, right = source.split(marker)
+        if re.search(r"\band\s*$", left, re.I) and re.match(r"\s+[A-Za-z]{2,}\b", right):
+            segments[paragraph_id] = left.rstrip() + "/or" + right
+
+
 def _split_trailing_prose_punctuation(
     chars: list[LTChar],
 ) -> tuple[list[LTChar], str]:
@@ -2379,6 +2462,103 @@ def _formula_annotation_islands(chars: list[LTChar]) -> list[list[LTChar]]:
     return islands
 
 
+def _is_scripted_table_symbol(chars: list[LTChar]) -> bool:
+    """Keep a mathematical base and its textual script in a protected cell."""
+    visible = [char for char in chars if char.get_text().strip()]
+    if len(visible) < 2:
+        return False
+    base, *script = visible
+    em = float(base.size)
+    if (
+        em <= 0
+        or re.fullmatch(r"[A-Za-z\u0370-\u03ff]", base.get_text()) is None
+        or not (
+            _MATH_FONT_RE.search(_font_name(base.fontname))
+            or _is_prose_italic_font(base.fontname)
+        )
+        or any(
+            re.fullmatch(r"[a-z0-9]", char.get_text()) is None
+            or float(char.size) >= 0.79 * em
+            for char in script
+        )
+    ):
+        return False
+    base_center = (float(base.y0) + float(base.y1)) / 2
+    script_center = (float(script[0].y0) + float(script[0].y1)) / 2
+    if not 0.10 * em <= abs(script_center - base_center) <= 0.70 * em:
+        return False
+    if min(base.y1, script[0].y1) <= max(base.y0, script[0].y0):
+        return False
+    previous = base
+    for char in script:
+        if (
+            not -0.25 * em <= char.x0 - previous.x1 <= 0.30 * em
+            or abs((float(char.y0) + float(char.y1)) / 2 - script_center)
+            > 0.12 * em
+        ):
+            return False
+        previous = char
+    return True
+
+
+def _table_line_cells(line: list[LTChar]) -> list[list[LTChar]]:
+    cells: list[list[LTChar]] = []
+    for char in sorted(line, key=lambda ch: (ch.x0, -ch.y0)):
+        if not cells or char.x0 - cells[-1][-1].x1 > 1.8 * max(
+            char.size, cells[-1][-1].size
+        ):
+            cells.append([])
+        cells[-1].append(char)
+    return cells
+
+
+def _wrapped_table_label_pairs(lines: list[list[LTChar]]) -> dict[int, int]:
+    """Join an indented label continuation with values on its final line.
+
+    A row label can wrap above its numeric columns.  Releasing each physical
+    line as an independent table cell loses the noun phrase's context.  Require
+    both the hanging indent and two numeric value cells before sharing a class;
+    aligned neighboring rows and separate prose columns remain independent.
+    """
+    pairs: dict[int, int] = {}
+    rows = [_table_line_cells(line) for line in lines]
+    for previous, current in zip(rows, rows[1:]):
+        if len(previous) != 1 or len(current) < 3:
+            continue
+        left, right = previous[0], current[0]
+        before = _reconstruct_italic_run(left).strip()
+        after = _reconstruct_italic_run(right).strip()
+        if (
+            len(re.findall(r"[A-Za-z]{2,}", before)) < 3
+            or re.search(r"[A-Za-z]$", before) is None
+            or re.match(r"[a-z]{2,}\b", after) is None
+            or any(
+                re.match(r"^[+\-−]?\d", _reconstruct_italic_run(cell).strip())
+                is None
+                or re.search(r"[A-Za-z]{2,}", _reconstruct_italic_run(cell))
+                for cell in current[1:]
+            )
+        ):
+            continue
+        left_size = max(float(ch.size) for ch in left)
+        right_size = max(float(ch.size) for ch in right)
+        if min(left_size, right_size) <= 0:
+            continue
+        em = max(left_size, right_size)
+        indent = right[0].x0 - left[0].x0
+        baseline_gap = _char_baseline(left[0]) - _char_baseline(right[0])
+        if (
+            min(left_size, right_size) < 0.9 * em
+            or not 0.35 * em <= indent <= 2 * em
+            or not 0.85 * em <= baseline_gap <= 1.5 * em
+            or max(ch.x1 for ch in right) > max(ch.x1 for ch in left) + 2 * em
+            or any(_is_non_horizontal_text_matrix(ch.matrix) for ch in left + right)
+        ):
+            continue
+        pairs[object_id(right[0])] = object_id(left[0])
+    return pairs
+
+
 def _recover_preserved_region_prose(
     chars: list[LTChar],
     layout,
@@ -2539,6 +2719,9 @@ def _recover_preserved_region_prose(
                 for line in lines
                 if (remaining := [ch for ch in line if object_id(ch) not in recovered])
             ]
+        table_continuations = (
+            _wrapped_table_label_pairs(lines) if region.class_name == "table" else {}
+        )
         previous_footnote = None
         footnote_history = []
         for line in lines:
@@ -2555,13 +2738,7 @@ def _recover_preserved_region_prose(
             cells = [line]
             kind = "plain text"
             if region.class_name == "table":
-                cells = [[]]
-                for char in line:
-                    if cells[-1] and char.x0 - cells[-1][-1].x1 > 1.8 * max(
-                        char.size, cells[-1][-1].size
-                    ):
-                        cells.append([])
-                    cells[-1].append(char)
+                cells = _table_line_cells(line)
                 kind = "table_cell"
             elif region.class_name == "abandon":
                 if max(ch.y1 for ch in line) > height * 0.30 or (
@@ -2606,7 +2783,7 @@ def _recover_preserved_region_prose(
                     continue
                 if kind == "table_cell":
                     prose = "".join(ch.get_text() for ch in cell_words)
-                    if len(prose) < 4:
+                    if len(prose) < 4 or _is_scripted_table_symbol(cell):
                         continue
                 if kind == "footnote":
                     baseline = float(np.median([_char_baseline(ch) for ch in cell]))
@@ -2643,6 +2820,10 @@ def _recover_preserved_region_prose(
                         ):
                             cell.append(candidate)
                 class_id = new_class
+                if kind == "table_cell":
+                    prior_id = table_continuations.get(object_id(cell[0]))
+                    if prior_id in recovered:
+                        class_id = recovered[prior_id]
                 if kind == "footnote":
                     previous_footnote = next(
                         (
@@ -3770,6 +3951,28 @@ def _gen_preserved_text_op(
         f"{a:f} {b:f} {c:f} {d:f} {e:f} {f:f} Tm "
         f"[<{rtxt}>] TJ 100 Tz 0 Ts "
     )
+
+
+def _source_fill_color_op(char: LTChar) -> str:
+    """Keep the device fill color of an original protected glyph."""
+    color = getattr(getattr(char, "graphicstate", None), "ncolor", None)
+    name = getattr(getattr(char, "ncs", None), "name", None)
+    expected = {"DeviceGray": (1, "g"), "DeviceRGB": (3, "rg"), "DeviceCMYK": (4, "k")}
+    if name not in expected or color is None:
+        return ""
+    count, operator = expected[name]
+    components = color if isinstance(color, (tuple, list)) else (color,)
+    if len(components) != count:
+        return ""
+    try:
+        return " ".join(f"{float(value):f}" for value in components) + f" {operator} "
+    except (TypeError, ValueError):
+        return ""
+
+
+def _with_source_fill_color(ops: str, fill_color: str) -> str:
+    # Color belongs to this source glyph, not the following translated text.
+    return f"q {fill_color}{ops}Q " if fill_color else ops
 
 
 class PDFConverterEx(PDFConverter):
@@ -5160,7 +5363,7 @@ class TranslateConverter(PDFConverterEx):
                     or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79)  # 2. 角标字体，有 0.76 的角标和 0.799 的大写，这里用 0.79 取中，同时考虑首字母放大的情况
                     or (vflag(child.fontname, quote or child.get_text())
                         and not (not self.vfont and getattr(child, "_pdf2zh_cm_prose", False)))                                              # 3. 公式字体
-                    or (child.matrix[0] == 0 and child.matrix[3] == 0)                                      # 4. 垂直字体
+                    or _is_non_horizontal_text_matrix(child.matrix)                                      # 4. 旋转文字
                 ):
                     cur_v = True
                 if (
@@ -5499,6 +5702,8 @@ class TranslateConverter(PDFConverterEx):
             paragraph_text_chars,
         )
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
+        _release_caption_prose_delimiters(sstk, var, varp, pstk)
+        _release_prose_slash_connectives(sstk, var, varp, pstk)
         for paragraph in pstk:
             if paragraph.region_kind == "toc_entry":
                 entry = toc_layout.entries[paragraph.layout_class - toc_class_start]
@@ -5972,11 +6177,15 @@ class TranslateConverter(PDFConverterEx):
                         )
                         preserve_source_transform = (
                             source_state is not None
-                            and getattr(vch, "_pdf2zh_layout_class", None) == 0
                             and (
-                                getattr(vch, "_pdf2zh_preserved_code", False)
-                                or getattr(vch, "_pdf2zh_preserved_identity", False)
-                                or _is_non_horizontal_text_matrix(source_state.matrix)
+                                _is_non_horizontal_text_matrix(source_state.matrix)
+                                or (
+                                    getattr(vch, "_pdf2zh_layout_class", None) == 0
+                                    and (
+                                        getattr(vch, "_pdf2zh_preserved_code", False)
+                                        or getattr(vch, "_pdf2zh_preserved_identity", False)
+                                    )
+                                )
                             )
                         )
                         if preserve_source_transform:
@@ -5986,6 +6195,7 @@ class TranslateConverter(PDFConverterEx):
                                 "font": source_font,
                                 "state": source_state,
                                 "rtxt": raw_string(source_font, vc),
+                                "fill_color": _source_fill_color_op(vch),
                             })
                             continue
                         ops_vals.append({
@@ -5997,6 +6207,7 @@ class TranslateConverter(PDFConverterEx):
                             "rtxt": raw_string(self.fontid[vch.font], vc),
                             "lidx": lidx,
                             "italic": False,
+                            "fill_color": _source_fill_color_op(vch),
                         })
                         if log.isEnabledFor(logging.DEBUG):
                             lstk.append(LTLine(0.1, (_x, _y), (x + vch.x0 - vx0[vid], fix + y + vch.y0 - var[vid][0].y0)))
@@ -6087,7 +6298,7 @@ class TranslateConverter(PDFConverterEx):
 
             for vals in ops_vals:
                 if vals["type"] == OpType.TEXT:
-                    ops_list.append(_gen_target_text_op(
+                    ops_list.append(_with_source_fill_color(_gen_target_text_op(
                         vals["font"],
                         vals["size"] * render_scale,
                         x0 + (vals["x"] - x0) * render_scale,
@@ -6096,9 +6307,12 @@ class TranslateConverter(PDFConverterEx):
                         - vals["lidx"] * size * render_scale * line_height,
                         vals["rtxt"],
                         vals.get("italic", False),
-                    ))
+                    ), vals.get("fill_color", "")))
                 elif vals["type"] == OpType.PRESERVED_TEXT:
-                    ops_list.append(_gen_preserved_text_op(vals["font"], vals["state"], vals["rtxt"]))
+                    ops_list.append(_with_source_fill_color(
+                        _gen_preserved_text_op(vals["font"], vals["state"], vals["rtxt"]),
+                        vals.get("fill_color", ""),
+                    ))
                 elif vals["type"] == OpType.SCANNED_FRAGMENT:
                     ops_list.append(scan_background.fragment_ops(
                         vals["bounds"],

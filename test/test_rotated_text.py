@@ -45,23 +45,28 @@ class FakeTranslator:
 def render_single_protected_char(
     matrix: tuple[float, float, float, float, float, float],
     fontsize: float,
+    *,
+    layout_class: int = 0,
+    text: str = "T",
 ) -> str:
     font = FakeFont()
     converter = TranslateConverter.__new__(TranslateConverter)
     PDFConverterEx.__init__(converter, PDFResourceManager())
     page = LTPage(0, (0.0, 0.0, 200.0, 200.0))
     converter.cur_item = page
-    converter.render_char(
-        matrix,
-        font,
-        fontsize,
-        1.0,
-        0.0,
-        ord("T"),
-        None,
-        PDFGraphicState(),
-    )
-    converter.layout = {0: np.zeros((200, 200))}
+    a, b, c, d, e, f = matrix
+    for index, char in enumerate(text):
+        converter.render_char(
+            (a, b, c, d, e + index * a * fontsize * 0.5, f + index * b * fontsize * 0.5),
+            font,
+            fontsize,
+            1.0,
+            0.0,
+            ord(char),
+            None,
+            PDFGraphicState(),
+        )
+    converter.layout = {0: np.full((200, 200), layout_class)}
     converter.translator = FakeTranslator()
     converter.vfont = ""
     converter.vchar = ""
@@ -76,6 +81,22 @@ def render_single_protected_char(
 
 
 class RotatedTextTests(unittest.TestCase):
+    def test_rotated_axis_keeps_each_matrix_even_outside_a_protected_detection(self) -> None:
+        # Figure XObjects may be classified as unassigned (1), not protected (0).
+        # Multiple glyph widths must not become independent horizontal font sizes.
+        for matrix in (
+            (0.0, 9.0, -9.0, 0.0, 50.0, 80.0),
+            (8.0, 4.0, -4.0, 8.0, 70.0, 90.0),
+        ):
+            with self.subTest(matrix=matrix):
+                text = "Gate rate"
+                ops = render_single_protected_char(matrix, 1.0, layout_class=1, text=text)
+                self.assertEqual(ops.count("TJ 100 Tz 0 Ts"), len(text))
+                a, b, c, d, e, f = matrix
+                for index in range(len(text)):
+                    expected = (a, b, c, d, e + index * a * 0.5, f + index * b * 0.5)
+                    self.assertIn(" ".join(f"{value:f}" for value in expected) + " Tm", ops)
+
     def test_protected_rotated_text_keeps_source_font_state_and_matrix(self) -> None:
         ops = render_single_protected_char(
             (0.0, 9.0, -9.0, 0.0, 50.0, 80.0),

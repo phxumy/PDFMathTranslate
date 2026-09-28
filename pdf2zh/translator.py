@@ -39,6 +39,11 @@ from pdf2zh.source_segmentation import scientific_sentence_parts, safe_chunk_bou
 from pdf2zh.config import ConfigManager
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START
 from pdf2zh.translation_quality import (
+    has_incomplete_scientific_caption,
+    has_new_unbalanced_prose_parentheses,
+    has_reversed_not_only_condition,
+    has_changed_numeric_citations,
+    has_suspicious_physics_translation,
     has_detached_norm_relation,
     has_suspicious_english_residue,
     has_suspicious_reference_title_residue,
@@ -1256,6 +1261,18 @@ class ScientificTranslator(BaseTranslator):
         ) as executor:
             return list(executor.map(worker, batches))
 
+    @staticmethod
+    def _scientific_fidelity_hint() -> str:
+        return (
+            "Preserve every measured quantity, qualifier, condition, and citation, "
+            "including bare numbered citations such as [12]. Do not summarize "
+            "captions or drop a sensitivity, maximum, or comparison. Preserve the "
+            "scope of negation and of constructions such as 'not only ... but ...'. "
+            "In quantum-state contexts, population means state occupation "
+            "(Chinese: 布居), not demographic population; use the terminology "
+            "appropriate to the scientific context. "
+        )
+
     def _build_codex_prompt(
         self,
         text: str,
@@ -1294,6 +1311,7 @@ class ScientificTranslator(BaseTranslator):
             "Preserve authors, journal and conference names, publishers, institutions, "
             "years, volume and issue numbers, pages, DOI, URL, ISBN, and reference labels "
             "exactly.\n"
+            f"{self._scientific_fidelity_hint()}\n"
             f"{completeness_requirement}"
             "- Do not add explanations, comments, or code fences.\n"
         )
@@ -1333,7 +1351,7 @@ class ScientificTranslator(BaseTranslator):
             "only the cited work title and preserve all authors, venues, publishers, "
             "institutions, dates, volume/issue/page fields, DOI, URL, ISBN, and labels "
             "exactly. Preserve every [[PDF2ZH_FLOW_N]] layout token exactly once and "
-            f"in source order. {completeness_requirement}"
+            f"in source order. {self._scientific_fidelity_hint()}{completeness_requirement}"
             f"There are exactly {len(texts)} items. Return exactly {len(texts)} "
             "translated strings in ascending `index` order. Do not merge, drop, "
             "or reorder items.\n\n"
@@ -1573,7 +1591,8 @@ class ScientificTranslator(BaseTranslator):
             "reordered relative to one another. "
             "Preserve Markdown, scientific meaning, units, symbols, personal names, "
             "and citation markers. Preserve every [[PDF2ZH_FLOW_N]] layout token "
-            f"exactly once and in source order. {completeness_requirement}\n\n"
+            f"exactly once and in source order. {self._scientific_fidelity_hint()}"
+            f"{completeness_requirement}\n\n"
             f"There are exactly {len(texts)} items. Return exactly {len(texts)} "
             "translated strings in ascending index order; never merge, drop, or "
             "reorder items. JSON `\\uXXXX` escapes in the input have their standard "
@@ -1653,7 +1672,8 @@ class ScientificTranslator(BaseTranslator):
             "source order, and in that same fragment. Formula and style tokens may "
             "not cross the physical boundary. Each read_only_formulas array is only a "
             "semantic aid; never copy or output its unicode_formula values. Preserve "
-            "personal names, units, citations, and scientific meaning.\n\n"
+            "personal names, units, citations, and scientific meaning. "
+            f"{self._scientific_fidelity_hint()}\n\n"
             f"Continuation JSON: {serialized}\n\n"
             f"Return exactly {len(texts)} strings in fragment_index order as "
             '{"translations":["...","..."]}.'
@@ -1773,7 +1793,8 @@ class ScientificTranslator(BaseTranslator):
             "the sentence. Never translate, expand, explain, copy, or output any "
             "`unicode_formula` value. "
             "Preserve all personal names exactly as written. Preserve Markdown and "
-            f"scientific meaning. {completeness_requirement}\n\n"
+            f"scientific meaning. {self._scientific_fidelity_hint()}"
+            f"{completeness_requirement}\n\n"
             f"There are exactly {len(texts)} items. Return exactly {len(texts)} "
             "translated strings in ascending index order; never merge, drop, or "
             "reorder items.\n\n"
@@ -3665,6 +3686,11 @@ class ScientificTranslator(BaseTranslator):
             has_unchanged_translatable_english(source, normalized)
             or has_suspicious_english_residue(source, normalized)
             or has_detached_norm_relation(source, normalized)
+            or has_suspicious_physics_translation(source, normalized)
+            or has_changed_numeric_citations(source, normalized)
+            or has_reversed_not_only_condition(source, normalized)
+            or has_incomplete_scientific_caption(source, normalized)
+            or has_new_unbalanced_prose_parentheses(source, normalized)
         ):
             return None
         return normalized
