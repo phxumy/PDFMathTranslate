@@ -674,7 +674,7 @@ def _release_tex_accented_prose_words(
         if source.count(marker) != 1:
             continue
         left, right = source.split(marker)
-        prefix = re.search(r"(?<![A-Za-z])([A-Z][a-z]*)$", left)
+        prefix = re.search(r"(?<![A-Za-z])([A-Z][a-z]*|[a-z]{2,})$", left)
         if prefix is None or re.match(r"[A-Za-z]", right):
             continue
         em = float(paragraph.size)
@@ -682,6 +682,12 @@ def _release_tex_accented_prose_words(
         # glyph in prose, leaving only the overprinted accent in the island.
         # Recover it only with the same touching source-glyph evidence.
         dotless = re.match(r"\{\\i\}([a-z]{2,})(?![A-Za-z])", right)
+        if prefix.group(1).islower() and (
+            len(chars) != 1
+            or dotless is None
+            or len(prefix.group(1)) + 1 + len(dotless.group(1)) < 5
+        ):
+            continue
         if len(chars) == 1 and dotless is not None:
             accent = chars[0]
             candidates = [char for char in paragraph_text_chars[paragraph_id] if (

@@ -76,9 +76,18 @@ def test_constructive_interference_is_a_physics_relation():
     assert translator._accepted_translation("The feedback is constructive.", "反馈具有建设性。") is not None
 
 
-def test_subgradient_lead_in_retains_relation_to_following_display():
+@pytest.mark.parametrize("noun", ["次梯度", "子梯度", "亚梯度", "次导数"])
+def test_subgradient_lead_in_retains_relation_to_following_display(noun):
     source = "The cost is dominated by computing the subgradient of"
     translator = translator_stub()
-    assert translator._accepted_translation(source, "成本主要来自计算次梯度的") is None
-    assert translator._accepted_translation(source, "成本主要来自计算下式的次梯度：") is not None
+    assert translator._accepted_translation(source, f"成本主要来自计算{noun}的") is None
+    assert translator._accepted_translation(source, f"成本主要来自计算下式的{noun}：") is not None
     assert translator._accepted_translation("Computing the subgradient of this norm is easy.", "计算该范数的次梯度很容易。") is not None
+
+
+def test_iid_adjective_does_not_leave_a_detached_gaussian_noun_phrase():
+    source = "The entries are i.i.d. Gaussian random variables with appropriate scaling."
+    translator = translator_stub()
+    assert translator._accepted_translation(source, "元素均为独立同分布的（i.i.d.）。经过适当缩放的高斯随机变量。") is None
+    assert translator._accepted_translation(source, "元素均为经过适当缩放的独立同分布（i.i.d.）高斯随机变量。") is not None
+    assert translator._accepted_translation(source, "元素是独立同分布的（i.i.d.）。它们是经过适当缩放的高斯随机变量。") is not None

@@ -200,7 +200,12 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     # lead-in with "次梯度的" would instead make that function modify the
     # subgradient, reversing the grammatical relation across the display.
     if re.search(r"\bcomputing\s+the\s+subgradient\s+of\s*$", source, re.I) and re.search(
-        r"(?:次梯度|次导数|次導數)的\s*[：:]?\s*$", target
+        r"(?:(?:次|子|亚|亞)梯度|次导数|次導數)的\s*[：:]?\s*$", target
+    ):
+        return True
+    if re.search(r"\bi\.\s*i\.\s*d\.\s+Gaussian\s+random\s+variables\b", source, re.I) and re.search(
+        r"(?:独立同分布|獨立同分布)的\s*\(\s*i\.\s*i\.\s*d\.\s*\)\s*[。!]\s*"
+        r"(?:经过适当缩放的|經過適當縮放的)?高斯(?:随机变量|隨機變量)", target, re.I
     ):
         return True
     concepts = (

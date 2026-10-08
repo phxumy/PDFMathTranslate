@@ -53,6 +53,30 @@ def test_overprinted_dotless_i_is_decoded_from_the_actual_source_glyph(valid):
     assert segments == (["M. Díaz, Numerical analysis."] if valid else [source])
 
 
+@pytest.mark.parametrize("change", [None, "short_variable", "math_font", "noncontiguous", "far_accent", "code"])
+def test_lowercase_dotless_i_word_uses_long_text_word_and_source_geometry(change):
+    # SHARPNESS p23 contains na + a diaeresis glyph + {\i}vely.
+    prefix, suffix = "na", "vely"
+    if change == "short_variable":
+        prefix, suffix = "x", "yz"
+    prose = [char(v, i * 5) for i, v in enumerate(prefix)]
+    x = len(prefix) * 5
+    prose += [char(r"{\i}", x)] + [char(v, x + (i + 1) * 5) for i, v in enumerate(suffix)]
+    formula = [char('\\"', x - 0.7)]
+    source = "We apply the argument " + prefix + r"{v0}{\i}" + suffix + " to the objective."
+    if change == "math_font":
+        prose[len(prefix)].fontname = "CMMI10"
+    elif change == "noncontiguous":
+        prose[-1].x0 += 8
+    elif change == "far_accent":
+        formula[0].x0 -= 5
+    elif change == "code":
+        formula[0].fontname = "CMTT10"
+    segments = [source]
+    _release_tex_accented_prose_words(segments, [formula], [0], [paragraph()], [prose])
+    assert segments == (["We apply the argument naïvely to the objective."] if change is None else [source])
+
+
 @pytest.mark.parametrize("change", [
     "math_font", "code_font", "protected", "small", "rotated", "not_overprinted",
     "prefix_gap", "tail_gap", "no_prefix", "variable", "figure", "different_font",
