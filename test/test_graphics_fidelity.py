@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import re
 from types import SimpleNamespace
 import unittest
 
 import numpy as np
 import pymupdf as fitz
+from PIL import ImageCms
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfinterp import PDFResourceManager
 from pdfminer.pdfpage import PDFPage
@@ -51,6 +53,53 @@ def text_colors(page):
 
 
 class GraphicsFidelityTests(unittest.TestCase):
+    def test_mirrored_stretched_and_sheared_symbols_survive_real_pdf_roundtrip(self):
+        for matrix in (
+            (-13.5889, 0, 0, 23.0399, 80, 120),
+            (13.5889, 0, 0, 23.0399, 80, 120),
+            (13.5889, 0, 0, -23.0399, 80, 120),
+            (13, 0, 4, 13, 80, 120),
+            (13, 0, 0, 13, 80, 120),
+        ):
+            with self.subTest(matrix=matrix), fitz.open() as doc:
+                page = doc.new_page(width=240, height=200)
+                page.insert_text((80, 80), ")", fontsize=1)
+                for xref in page.get_contents():
+                    operations = doc.xref_stream(xref)
+                    operations = operations.replace(
+                        b"1 0 0 1 80 120 Tm",
+                        (" ".join(str(v) for v in matrix) + " Tm").encode(),
+                    )
+                    doc.update_stream(xref, operations)
+                before = page.get_pixmap(matrix=fitz.Matrix(3, 3)).samples
+                preserve_locally(doc)
+                self.assertEqual(doc[0].get_pixmap(matrix=fitz.Matrix(3, 3)).samples, before)
+
+    def test_named_icc_text_keeps_original_profile_and_escaped_resource_name(self):
+        with fitz.open() as doc:
+            page = doc.new_page(width=240, height=200)
+            page.insert_text((20, 40), "Profile color", fontsize=12, color=(0.13725, 0.094118, 0.082353))
+            profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+            xref = doc.get_new_xref()
+            doc.update_object(xref, "<< /N 3 /Alternate /DeviceRGB >>")
+            doc.update_stream(xref, profile)
+            resources = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])
+            doc.xref_set_key(resources, "ColorSpace", f"<< /Original#20ICC#E8#89#B2 [/ICCBased {xref} 0 R] >>")
+            for content in page.get_contents():
+                operations = doc.xref_stream(content)
+                operations = re.sub(
+                    rb"[\d.]+ [\d.]+ [\d.]+ rg",
+                    b"/Original#20ICC#E8#89#B2 cs 0.13725 0.094118 0.082353 scn",
+                    operations,
+                )
+                doc.update_stream(content, operations)
+            before = text_colors(page)
+            before_pixels = page.get_pixmap(matrix=fitz.Matrix(2, 2)).samples
+            operations = preserve_locally(doc)
+            self.assertIn("/Original#20ICC#E8#89#B2 cs", operations)
+            self.assertEqual(text_colors(doc[0]), before)
+            self.assertEqual(doc[0].get_pixmap(matrix=fitz.Matrix(2, 2)).samples, before_pixels)
+
     def test_dash_arrays_and_phase_survive_real_pdf_roundtrip(self):
         with fitz.open() as doc:
             page = doc.new_page(width=240, height=200)

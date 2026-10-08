@@ -13,8 +13,9 @@ _REFERENCE_IDENTIFIER = (
     rf"(?:{_FORMULA})*(?:\([A-Za-z]\))?"
 )
 _ABBREVIATED_REFERENCE = re.compile(
-    r"\b(?:figs?|eqs?|secs?|refs?|tbls?)\.\s+"
-    rf"(?:[（(]\s*)?{_REFERENCE_IDENTIFIER}(?![A-Za-z0-9])(?:[）)])?",
+    r"\b(?:figs?|eqs?|secs?|refs?|tbls?)\.\s*"
+    rf"(?:\[\s*\d+[^\]\r\n]{{0,80}}\]|［\s*\d+[^］\r\n]{{0,80}}］|"
+    rf"(?:[（(]\s*)?{_REFERENCE_IDENTIFIER}(?![A-Za-z0-9])(?:[）)])?)",
     re.IGNORECASE,
 )
 _SENTENCE_END = re.compile(r"[.!?;:](?:\s+|$)")

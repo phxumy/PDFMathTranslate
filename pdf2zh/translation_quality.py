@@ -147,8 +147,17 @@ def has_reversed_not_only_condition(source: str, target: str) -> bool:
 
 def has_incomplete_scientific_caption(source: str, target: str) -> bool:
     """Catch missing panel labels and a visibly omitted plotted quantity."""
+    source = unicodedata.normalize("NFKC", source)
     caption = re.match(r"\s*fig(?:ure)?\.?\s*(?:\d+|\{v\d+\})\s*[.:]", source, re.I)
     if caption:
+        # A legend's "fit (line)" describes how a fit is drawn. It does not
+        # assert that the model is a straight line.
+        if (
+            re.search(r"\bfit\s*\(line\)", source, re.I)
+            and not re.search(r"\b(?:straight|linear)\b", source, re.I)
+            and re.search(r"拟合\s*[（(]\s*直线\s*[）)]|擬合\s*[（(]\s*直線\s*[）)]", target)
+        ):
+            return True
         panels = set(re.findall(r"\(([a-z])\)\s+[A-Z][a-z]", source))
         for panel in panels:
             if re.search(rf"[（(]\s*{panel}\s*[）)]|分图\s*{panel}\b", target) is None:
@@ -169,6 +178,40 @@ def has_new_unbalanced_prose_parentheses(source: str, target: str) -> bool:
         return text.count("(") - text.count(")")
     before, after = balance(source), balance(target)
     return after > max(0, before) or after < min(0, before)
+
+
+def has_omitted_scientific_content(source: str, target: str) -> bool:
+    """Reject clear loss of a scientific object, without prescribing a sentence.
+
+    These few unambiguous concepts accept standard paraphrases and traditional
+    Chinese. They are evidence that the model has dropped content even when all
+    formula placeholders survived. New ellipses cannot stand in for an object
+    supplied by the PDF's following displayed expression.
+    """
+    source = unicodedata.normalize("NFKC", _strip_non_prose(source))
+    target = unicodedata.normalize("NFKC", _strip_non_prose(target))
+    if re.search(r"…|⋯|\.{3}", target) and not re.search(r"…|⋯|\.{3}", source):
+        return True
+    concepts = (
+        (r"\bdenominator\b", r"分母|除数|除數"),
+        (r"\bsecond\s+excited\s+state\b", r"二激发|二激發|第二.*?激发|第二.*?激發|激发态\s*2|激發態\s*2"),
+        (r"\breference\s+experiment\b", r"(?=[\s\S]*(?:参考|參考|参照|參照|对照|對照|基准|基準))(?=[\s\S]*(?:实验|實驗|测试|測試))"),
+        (r"\bbench[- ]?mark(?:ing|ed)\b", r"基准|基準|标杆|標杆|对标|對標|评测|評測|测评|測評|性能|参照|參照"),
+    )
+    return any(
+        re.search(english, source, re.I) and re.search(chinese, target) is None
+        for english, chinese in concepts
+    )
+
+
+def has_changed_section_identifier(source: str, target: str) -> bool:
+    """Keep a numbered section's full identifier together in translated prose."""
+    source = _mask_cross_reference_opaque_text(source)
+    for match in re.finditer(r"\b(?:sub)?sections?\s+(\d+(?:\.\d+)+)\b", source, re.I):
+        identifier = re.escape(match.group(1))
+        if re.search(rf"(?<![\d.]){identifier}(?![\d.]|[A-Za-z])", target) is None:
+            return True
+    return False
 
 
 _MODEL_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:/-]*")
@@ -560,7 +603,8 @@ def normalize_scientific_cross_reference_placement(
         key = (kind, identifier.casefold())
         used = consumed.get(key, 0)
         correct = _target_cross_reference_pattern(kind, identifier)
-        correct_count = len(_balanced_cross_reference_matches(correct, normalized))
+        opaque_references = tuple((k, i) for k, i, _ in references if _FORMULA_PLACEHOLDER_RE.search(i))
+        correct_count = len(_balanced_cross_reference_matches(correct, normalized, opaque_references))
         if correct_count > used:
             consumed[key] = used + 1
             continue
@@ -579,7 +623,7 @@ def normalize_scientific_cross_reference_placement(
         )
         if (
             repaired is None
-            or len(_balanced_cross_reference_matches(correct, repaired)) <= used
+            or len(_balanced_cross_reference_matches(correct, repaired, opaque_references)) <= used
         ):
             return None
         normalized = repaired
@@ -797,7 +841,11 @@ def _target_identifier_pattern(
     # Parentheses are optional, but they must be balanced when present.  The
     # former pair of independent optionals accepted malformed output such as
     # ``式(8中`` and allowed it into the cache as a valid cross-reference.
-    bare_end = "" if enclosed_reference else r"(?!\s*[）)］\]])"
+    # A bare identifier can end immediately before an outer prose delimiter,
+    # e.g. ``（见图1(a)）``. Check that outer wrapper with its actual context in
+    # _balanced_cross_reference_matches instead of rejecting it here and then
+    # misrepairing a valid reference by inserting another opening parenthesis.
+    bare_end = ""
     return (
         rf"(?<![A-Za-z0-9.])(?:"
         rf"[（(]\s*{escaped}\s*[）)]|[［\[]\s*{escaped}\s*[］\]]|"
@@ -836,7 +884,7 @@ def _target_cross_reference_pattern(kind: str, identifier: str) -> re.Pattern[st
 
 
 def _balanced_cross_reference_matches(
-    pattern: re.Pattern[str], target: str
+    pattern: re.Pattern[str], target: str, opaque_references=()
 ) -> tuple[re.Match[str], ...]:
     """Check only outer delimiters immediately surrounding a reference.
 
@@ -847,13 +895,31 @@ def _balanced_cross_reference_matches(
     masked = _mask_cross_reference_opaque_text(target)
     pairs = {"(": ")", "（": "）", "[": "]", "［": "］"}
     closing = set(pairs.values())
+    opaque_openers = set()
+    for kind, identifier in opaque_references:
+        for opaque in _target_cross_reference_pattern(kind, identifier).finditer(masked):
+            # A source-proven split identifier may hide its closing delimiter
+            # in the formula glyphs. It must not enclose a later reference.
+            token = _FORMULA_PLACEHOLDER_RE.search(opaque.group())
+            prefix = opaque.group()[:token.start()] if token else ""
+            if prefix.count("(") + prefix.count("（") > prefix.count(")") + prefix.count("）"):
+                opaque_openers.update(opaque.start() + offset for offset, char in enumerate(prefix) if char in "(（")
     accepted = []
     for match in pattern.finditer(masked):
-        start = match.start()
-        while (prefix := masked[:start].rstrip()) and prefix[-1] in pairs:
-            start = len(prefix) - 1
+        prefix_stack = []
+        for offset, char in enumerate(masked[:match.start()]):
+            if char in pairs and offset not in opaque_openers:
+                prefix_stack.append((offset, pairs[char]))
+            elif char in closing:
+                if prefix_stack and prefix_stack[-1][1] == char:
+                    prefix_stack.pop()
+                else:
+                    prefix_stack.clear()
+        start = prefix_stack[0][0] if prefix_stack else match.start()
         if start == match.start() and masked[start] not in pairs:
-            accepted.append(match)
+            following = masked[match.end():].lstrip()
+            if not following or following[0] not in closing:
+                accepted.append(match)
             continue
         stack = []
         cursor = start
@@ -871,7 +937,10 @@ def _balanced_cross_reference_matches(
                     valid = False
                     break
             cursor += 1
-        if valid and not stack:
+        # A protected formula may itself contain a closing delimiter. Without
+        # its glyph context, an outer wrapper's apparent imbalance is unknown;
+        # do not reject or rewrite an otherwise valid reference inside it.
+        if (valid and not stack) or _FORMULA_PLACEHOLDER_RE.search(masked[start:cursor]):
             accepted.append(match)
     return tuple(accepted)
 

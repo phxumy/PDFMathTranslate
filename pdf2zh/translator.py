@@ -39,6 +39,8 @@ from pdf2zh.source_segmentation import scientific_sentence_parts, safe_chunk_bou
 from pdf2zh.config import ConfigManager
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START
 from pdf2zh.translation_quality import (
+    has_omitted_scientific_content,
+    has_changed_section_identifier,
     has_incomplete_scientific_caption,
     has_new_unbalanced_prose_parentheses,
     has_reversed_not_only_condition,
@@ -3691,6 +3693,8 @@ class ScientificTranslator(BaseTranslator):
             or has_reversed_not_only_condition(source, normalized)
             or has_incomplete_scientific_caption(source, normalized)
             or has_new_unbalanced_prose_parentheses(source, normalized)
+            or has_omitted_scientific_content(source, normalized)
+            or has_changed_section_identifier(source, normalized)
         ):
             return None
         return normalized
@@ -3969,9 +3973,13 @@ class ScientificTranslator(BaseTranslator):
         cls,
         left_entry: str,
         right_prefix: str,
+        formula_context: str = "",
     ) -> str:
+        context = {"left_entry": left_entry, "right_prefix": right_prefix}
+        if formula_context:
+            context["scoped_formulas"] = formula_context
         payload = json.dumps(
-            {"left_entry": left_entry, "right_prefix": right_prefix},
+            context,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -3995,17 +4003,42 @@ class ScientificTranslator(BaseTranslator):
             for value in (source_left, source_right, target_left, target_right)
         ):
             return None
-        if not source_left or not source_right or not target_left or not target_right:
+        if not source_left and not source_right:
             return None
+        if any(bool(source) != bool(target) for source, target in (
+            (source_left, target_left), (source_right, target_right)
+        )):
+            return None
+        one_sided = not source_left or not source_right
         if (
-            left_entry.count(source_left) != 1
-            or right_prefix.count(source_right) != 1
+            (source_left and left_entry.count(source_left) != 1)
+            or (source_right and right_prefix.count(source_right) != 1)
             or not left_entry.endswith(source_left)
             or not right_prefix.startswith(source_right)
         ):
             return None
+        if one_sided:
+            logical_entry = left_entry + right_prefix
+            source_title = source_left + source_right
+            title_start = logical_entry.find(source_title)
+            metadata = logical_entry[title_start + len(source_title):].lstrip(
+                " \t\r\n\"'’”)]}》」』】.,;:!?—–-"
+            )
+            if (
+                not looks_like_reference_title_prefix(logical_entry[:title_start])
+                or not self._reference_title_boundary_is_safe(logical_entry, source_title)
+                or not self._reference_metadata_tail_is_safe(metadata, require_complete=True)
+            ):
+                return None
         normalized_left = self._normalize_translation_output(target_left)
         normalized_right = self._normalize_translation_output(target_right)
+        if not all(
+            (not source and not target) or self._validate_formula_translation(source, target)
+            for source, target in (
+                (source_left, normalized_left), (source_right, normalized_right)
+            )
+        ):
+            return None
         logical_source = source_left + source_right
         logical_target = normalized_left + normalized_right
         if self._checks_english_residue() and (
@@ -4042,6 +4075,27 @@ class ScientificTranslator(BaseTranslator):
             return None
         replacement = replacements[0]
         boundary = self.REFERENCE_BOUNDARY_TOKEN
+        if boundary not in replacement.source and boundary not in replacement.translated:
+            # A column/page boundary may separate the author block from the
+            # entire title, or the complete title from publication metadata.
+            # Certify the combined entry before overriding only that one side.
+            logical_entry = left_entry + right_prefix
+            _, valid = self._apply_reference_title_replacements(logical_entry, replacements)
+            if not valid:
+                return None
+            if right_prefix.startswith(replacement.source):
+                left_source, left_target = "", ""
+                right_source, right_target = replacement.source, replacement.translated
+            elif left_entry.endswith(replacement.source):
+                left_source, left_target = replacement.source, replacement.translated
+                right_source, right_target = "", ""
+            else:
+                return None
+            return self._validated_reference_continuation_payload(
+                left_entry, right_prefix,
+                dict(source_left=left_source, target_left=left_target,
+                     source_right=right_source, target_right=right_target),
+            )
         if (
             replacement.source.count(boundary) != 1
             or replacement.translated.count(boundary) != 1
@@ -4140,12 +4194,64 @@ class ScientificTranslator(BaseTranslator):
         right_prefix: str,
         *,
         ignore_cache: bool = False,
+        formula_contexts: tuple[dict[str, str], dict[str, str]] | None = None,
     ) -> tuple[ExactReplacement, ExactReplacement] | None:
-        """Translate one work title split across consecutive physical pages."""
+        """Keep page-local formula identities separate across a title boundary."""
+        fragments = (left_entry, right_prefix)
+        if not self.FORMULA_TOKEN_RE.search(left_entry + right_prefix):
+            return self._translate_reference_continuation_fragments(
+                left_entry, right_prefix, ignore_cache=ignore_cache
+            )
+        if formula_contexts is None or len(formula_contexts) != 2:
+            return None
+        scoped_fragments = []
+        reverse_maps: list[dict[str, str]] = []
+        context: dict[str, str] = {}
+        for fragment, formulas in zip(fragments, formula_contexts, strict=True):
+            forward: dict[str, str] = {}
+            for match in self.FORMULA_TOKEN_RE.finditer(fragment):
+                token = match.group()
+                if token not in formulas or not formulas[token] or formulas[token] == "<missing>":
+                    return None
+                if token not in forward:
+                    scoped = f"{{v{len(context)}}}"
+                    forward[token] = scoped
+                    context[scoped] = formulas[token]
+            scoped_fragments.append(self.FORMULA_TOKEN_RE.sub(
+                lambda match: forward[match.group()], fragment
+            ))
+            reverse_maps.append({value: key for key, value in forward.items()})
+        replacements = self._translate_reference_continuation_fragments(
+            *scoped_fragments, ignore_cache=ignore_cache,
+            formula_context=json.dumps(context, ensure_ascii=False, sort_keys=True),
+        )
+        if replacements is None:
+            return None
+        restored = []
+        for replacement, reverse in zip(replacements, reverse_maps, strict=True):
+            if any(match.group() not in reverse for match in self.FORMULA_TOKEN_RE.finditer(
+                replacement.source + replacement.translated
+            )):
+                return None
+            restored.append(ExactReplacement(*(
+                self.FORMULA_TOKEN_RE.sub(lambda match: reverse[match.group()], text)
+                for text in (replacement.source, replacement.translated)
+            )))
+        return tuple(restored)
+
+    def _translate_reference_continuation_fragments(
+        self,
+        left_entry: str,
+        right_prefix: str,
+        *,
+        ignore_cache: bool = False,
+        formula_context: str = "",
+    ) -> tuple[ExactReplacement, ExactReplacement] | None:
+        """Translate one certified entry split across columns or pages."""
         if not left_entry.strip() or not right_prefix.strip():
             return None
         unsafe_marker = (
-            self.FORMULA_TOKEN_RE.search(left_entry + right_prefix) is not None
+            (not formula_context and self.FORMULA_TOKEN_RE.search(left_entry + right_prefix) is not None)
             or self.ITALIC_TAG_PREFIX in left_entry + right_prefix
             or self.FLOW_TOKEN_PREFIX in left_entry + right_prefix
             or "[[PDF2ZH_REF_BOUNDARY_" in left_entry + right_prefix
@@ -4156,6 +4262,7 @@ class ScientificTranslator(BaseTranslator):
         cache_key = self._reference_continuation_cache_key(
             left_entry,
             right_prefix,
+            formula_context,
         )
         if not (self.ignore_cache or ignore_cache):
             cached = self.cache.get(cache_key)
@@ -4216,6 +4323,10 @@ class ScientificTranslator(BaseTranslator):
         compact = re.sub(r"\s+", " ", candidate).strip(" \t\r\n\"'()[]{}.,;:")
         if not compact or len(compact) > 100:
             return False
+        # These complete container names are ordinary capitalized nouns, with
+        # neither an abbreviation dot nor a generic journal-word signal.
+        if compact in {"Quantum", "PRX Quantum"}:
+            return True
         words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*", compact)
         if not words or len(words) > 14:
             return False
@@ -4760,6 +4871,7 @@ class ScientificTranslator(BaseTranslator):
         compact = re.sub(r"\s+", " ", source_title).strip()
         container_pattern = re.compile(
             r"^(?:"
+            r"(?:PRX\s+)?Quantum|"
             r"Nature(?:\s+(?:Physics|Communications|Materials|Methods))?|"
             r"Science(?:\s+(?:Advances|Translational\s+Medicine))?|Cell|"
             r"Physical\s+Review(?:\s+[A-E]|\s+Letters|\s+Applied|"
@@ -4775,7 +4887,7 @@ class ScientificTranslator(BaseTranslator):
         if container_pattern.fullmatch(compact):
             return False
         if re.search(
-            r"[.;,]\s*(?:Nature|Science|Cell|Physical\s+Review|"
+            r"[.;,]\s*(?:(?:PRX\s+)?Quantum(?=\s*$)|Nature|Science|Cell|Physical\s+Review|"
             r"Phys\.?\s+Rev|IEEE|ACM|(?:New\s+)?Journal\s+of)\b",
             compact,
             re.IGNORECASE,

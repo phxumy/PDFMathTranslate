@@ -651,6 +651,171 @@ def _split_trailing_runin_connector(
     return chars, "", []
 
 
+def _release_tex_accented_prose_words(
+    segments, formulas, formula_paragraphs, paragraphs, paragraph_text_chars
+):
+    """Expose a complete text word split by an overprinted TeX accent.
+
+    A text accent can look like a control sequence and start a formula island
+    halfway through a surname. Require a touching ordinary-font word prefix,
+    an overprinted accent/base pair, and at least two following letters. Math
+    accents, isolated variables, code and preserved areas stay as source glyphs.
+    """
+    accents = {"`": "\u0300", "'": "\u0301", '"': "\u0308", "^": "\u0302", "~": "\u0303", "=": "\u0304"}
+    for formula_id, chars in enumerate(formulas):
+        if not chars or chars[0].get_text() not in {"\\" + key for key in accents}:
+            continue
+        paragraph_id = formula_paragraphs[formula_id]
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            continue
+        marker = f"{{v{formula_id}}}"
+        source = segments[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        left, right = source.split(marker)
+        prefix = re.search(r"(?<![A-Za-z])([A-Z][a-z]*)$", left)
+        if prefix is None or re.match(r"[A-Za-z]", right):
+            continue
+        em = float(paragraph.size)
+        # CM small caps can encode dotless i as one multi-character ToUnicode
+        # glyph in prose, leaving only the overprinted accent in the island.
+        # Recover it only with the same touching source-glyph evidence.
+        dotless = re.match(r"\{\\i\}([a-z]{2,})(?![A-Za-z])", right)
+        if len(chars) == 1 and dotless is not None:
+            accent = chars[0]
+            candidates = [char for char in paragraph_text_chars[paragraph_id] if (
+                char.get_text() == r"{\i}"
+                and abs(char.x0 - accent.x0) <= 0.25 * em
+                and abs(_char_baseline(char) - _char_baseline(accent)) <= 0.15 * em
+            )]
+            if len(candidates) != 1:
+                continue
+            expanded = [accent, candidates[0]]
+            for value in dotless.group(1):
+                previous = expanded[-1]
+                candidates = [char for char in paragraph_text_chars[paragraph_id] if (
+                    char.get_text() == value
+                    and -0.12 * em <= char.x0 - previous.x1 <= 0.16 * em
+                    and abs(_char_baseline(char) - _char_baseline(previous)) <= 0.15 * em
+                )]
+                if len(candidates) != 1:
+                    break
+                expanded.append(candidates[0])
+            if len(expanded) != len(dotless.group(1)) + 2:
+                continue
+            chars = expanded
+            right = right[dotless.end():]
+        if len(chars) < 3:
+            continue
+        tail = "".join("i" if char.get_text() == r"{\i}" else char.get_text() for char in chars[1:])
+        if re.fullmatch(r"[a-z]{2,}", tail) is None:
+            continue
+        accent, base = chars[:2]
+        if em <= 0 or any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0
+            or re.match(r"^CM(?:R|TI|SL|BX|CSC)\d", _font_name(char.fontname)) is None
+            or char.fontname != base.fontname
+            or not 0.9 * em <= float(char.size) <= 1.1 * em
+            or _is_non_horizontal_text_matrix(char.matrix)
+            or abs(_char_baseline(char) - _char_baseline(base)) > 0.15 * em
+            for char in chars
+        ):
+            continue
+        if abs(accent.x0 - base.x0) > 0.25 * em or base.x0 >= accent.x1 - 0.2 * em:
+            continue
+        if any(not -0.12 * em <= b.x0 - a.x1 <= 0.16 * em for a, b in zip(chars[1:], chars[2:])):
+            continue
+        previous = base
+        matched = []
+        for value in reversed(prefix.group(1)):
+            candidates = [char for char in paragraph_text_chars[paragraph_id] if (
+                char.get_text() == value
+                and char.fontname == base.fontname
+                and not _is_non_horizontal_text_matrix(char.matrix)
+                and 0.9 * em <= char.size <= 1.1 * em
+                and abs(_char_baseline(char) - _char_baseline(base)) <= 0.15 * em
+                and -0.12 * em <= previous.x0 - char.x1 <= 0.16 * em
+            )]
+            if len(candidates) != 1:
+                break
+            previous = candidates[0]
+            matched.append(previous)
+        if len(matched) != len(prefix.group(1)):
+            continue
+        decoded = unicodedata.normalize("NFC", tail[0] + accents[accent.get_text()[1]])
+        if len(decoded) != 1 or not decoded.isalpha():
+            continue
+        segments[paragraph_id] = left + decoded + tail[1:] + right
+        known = {id(char) for char in paragraph_text_chars[paragraph_id]}
+        paragraph_text_chars[paragraph_id].extend(char for char in chars if id(char) not in known)
+
+
+def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, links):
+    """Recover vector-drawn URI underscores using the source link and glyphs.
+
+    Only a complete same-line URI whose visible characters exactly match the
+    annotation is eligible. Each absent underscore also needs its own short
+    source line between the adjacent glyphs. The consumed lines are removed
+    because the reconstructed URI will draw the underscores with the text.
+    """
+    for uri, bounds in links:
+        if "_" not in uri or re.fullmatch(r"https?://[^\s<>]+", uri) is None:
+            continue
+        x0, y0, x1, y1 = bounds
+        for index, paragraph in enumerate(paragraphs):
+            if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+                continue
+            if not (paragraph.x0 <= x0 + 2 and paragraph.x1 >= x1 - 2 and paragraph.y0 <= y0 + 2 and paragraph.y1 >= y1 - 2):
+                continue
+            chars = [char for char in text_chars[index] if (
+                x0 <= (char.x0 + char.x1) / 2 <= x1
+                and y0 <= (char.y0 + char.y1) / 2 <= y1
+                and not char.get_text().isspace()
+            )]
+            if not chars or "".join(char.get_text() for char in chars) != uri.replace("_", ""):
+                continue
+            em = float(paragraph.size)
+            if any(len(char.get_text()) != 1 or _is_non_horizontal_text_matrix(char.matrix) for char in chars):
+                continue
+            if max(_char_baseline(char) for char in chars) - min(_char_baseline(char) for char in chars) > 0.15 * em:
+                continue
+            used_lines = []
+            offset = 0
+            for value in uri:
+                if value != "_":
+                    offset += 1
+                    continue
+                if not 0 < offset < len(chars):
+                    break
+                before, after = chars[offset - 1:offset + 1]
+                candidates = [line for line in lines if (
+                    len(line.pts) == 2
+                    and abs(line.pts[0][1] - line.pts[1][1]) < 0.05 * em
+                    and 0.1 * em <= abs(line.pts[1][0] - line.pts[0][0]) <= 0.75 * em
+                    and abs(min(line.pts[0][0], line.pts[1][0]) - before.x1) <= 0.15 * em
+                    and abs(max(line.pts[0][0], line.pts[1][0]) - after.x0) <= 0.15 * em
+                    and abs(line.pts[0][1] - _char_baseline(before)) <= 0.25 * em
+                )]
+                if len(candidates) != 1 or candidates[0] in used_lines:
+                    break
+                used_lines.append(candidates[0])
+            if len(used_lines) != uri.count("_"):
+                continue
+            pattern = re.compile(
+                r"(?<![A-Za-z0-9])"
+                + re.escape(uri).replace("_", r"\s+")
+                + r"(?![A-Za-z0-9_/])"
+            )
+            matches = list(pattern.finditer(segments[index]))
+            if len(matches) != 1:
+                continue
+            match = matches[0]
+            segments[index] = segments[index][:match.start()] + uri + segments[index][match.end():]
+            for line in used_lines:
+                lines.remove(line)
+
+
 def _release_caption_prose_delimiters(segments, formulas, formula_paragraphs, paragraphs):
     """Expose caption punctuation hidden after a subscripted variable.
 
@@ -715,15 +880,27 @@ def _release_prose_slash_connectives(segments, formulas, formula_paragraphs, par
         paragraph = paragraphs[paragraph_id]
         if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
             continue
-        if "".join(char.get_text() for char in chars) != "/or":
+        if len(chars) != 3 or "".join(char.get_text() for char in chars) != "/or":
             continue
         if any(
             getattr(char, "_pdf2zh_layout_class", None) == 0
-            or _MATH_FONT_RE.search(_formula_font_name(char)) is not None
             or not 0.9 * paragraph.size <= char.size <= 1.1 * paragraph.size
             or _is_non_horizontal_text_matrix(char.matrix)
             for char in chars
         ):
+            continue
+        # Some publishers use a math-font slash even in ordinary and/or prose.
+        # The two letters must still be text glyphs on the same baseline and
+        # touching the slash; do not release mathematical o/r expressions.
+        if any(
+            not _is_non_math_text_font(char.fontname)
+            or re.search(r"(?:Mono|Code|^CMTT|^CMITT)", _font_name(char.fontname), re.I)
+            for char in chars[1:]
+        ):
+            continue
+        if max(_char_baseline(char) for char in chars) - min(_char_baseline(char) for char in chars) > 0.15 * paragraph.size:
+            continue
+        if any(not -0.12 * paragraph.size <= b.x0 - a.x1 <= 0.20 * paragraph.size for a, b in zip(chars, chars[1:])):
             continue
         marker = f"{{v{index}}}"
         source = segments[paragraph_id]
@@ -3938,6 +4115,32 @@ def _is_non_horizontal_text_matrix(
     return baseline_scale > tolerance and abs(b) > baseline_scale * tolerance
 
 
+def _has_reversed_text_matrix(matrix: Matrix) -> bool:
+    """Detect reflected glyph axes, including horizontal mirrored symbols."""
+    a, _, _, d, _, _ = matrix
+    return a < 0 or d < 0
+
+
+def _requires_source_text_transform(
+    state: OriginalTextState,
+    tolerance: float = 1e-6,
+) -> bool:
+    """Keep transforms that one horizontal font size cannot reproduce.
+
+    This is a rendering decision for glyphs already protected by layout.  A
+    stretched or sheared prose font alone must not prevent its translation.
+    """
+    a, b, c, d, _, _ = state.matrix
+    scale = max(abs(a), abs(b), abs(c), abs(d), tolerance)
+    return (
+        _has_reversed_text_matrix(state.matrix)
+        or abs(b) > scale * tolerance
+        or abs(c) > scale * tolerance
+        or abs(a - d) > scale * tolerance
+        or abs(state.scaling - 1.0) > tolerance
+    )
+
+
 def _gen_preserved_text_op(
     font: str,
     state: OriginalTextState,
@@ -3954,10 +4157,23 @@ def _gen_preserved_text_op(
 
 
 def _source_fill_color_op(char: LTChar) -> str:
-    """Keep the device fill color of an original protected glyph."""
+    """Keep the device or named fill color of an original protected glyph."""
     color = getattr(getattr(char, "graphicstate", None), "ncolor", None)
-    name = getattr(getattr(char, "ncs", None), "name", None)
+    colorspace = getattr(char, "ncs", None)
+    name = getattr(colorspace, "name", None)
     expected = {"DeviceGray": (1, "g"), "DeviceRGB": (3, "rg"), "DeviceCMYK": (4, "k")}
+    resource_name = getattr(colorspace, "_pdf2zh_resource_name", None)
+    prefix = ""
+    if name in ("ICCBased", "DeviceN") and isinstance(resource_name, str):
+        # PDF names escape delimiters and arbitrary bytes using #XX, not string
+        # quoting.  The page or figure retains this source resource dictionary.
+        encoded_name = "".join(
+            chr(value) if 33 <= value <= 126 and chr(value) not in "()<>[]{}/%#"
+            else f"#{value:02X}"
+            for value in resource_name.encode("utf-8")
+        )
+        prefix = f"/{encoded_name} cs "
+        expected[name] = (colorspace.ncomponents, "scn")
     if name not in expected or color is None:
         return ""
     count, operator = expected[name]
@@ -3965,7 +4181,7 @@ def _source_fill_color_op(char: LTChar) -> str:
     if len(components) != count:
         return ""
     try:
-        return " ".join(f"{float(value):f}" for value in components) + f" {operator} "
+        return prefix + " ".join(f"{float(value):f}" for value in components) + f" {operator} "
     except (TypeError, ValueError):
         return ""
 
@@ -4946,7 +5162,20 @@ class TranslateConverter(PDFConverterEx):
             right_span.start : right_span.end
         ]
         try:
-            replacements = translate(left_entry, right_prefix)
+            kwargs = {}
+            if _FORMULA_MARKER_RE.search(left_entry + right_prefix):
+                contexts = []
+                for text, draft in ((left_entry, left_draft), (right_prefix, right_draft)):
+                    formulas = getattr(draft, "formula_texts", [])
+                    context = {}
+                    for match in _FORMULA_MARKER_RE.finditer(text):
+                        index = int(match.group(1))
+                        if index >= len(formulas):
+                            return None
+                        context[match.group()] = formulas[index]
+                    contexts.append(context)
+                kwargs["formula_contexts"] = tuple(contexts)
+            replacements = translate(left_entry, right_prefix, **kwargs)
         except (TranslationAbortedError, CodexPermanentError):
             raise
         except BaseException as exc:
@@ -4958,31 +5187,23 @@ class TranslateConverter(PDFConverterEx):
         if replacements is None or len(replacements) != 2:
             return None
         left_replacement, right_replacement = replacements
-        if (
-            left_entry.count(left_replacement.source) != 1
-            or right_prefix.count(right_replacement.source) != 1
+        overrides = []
+        for entry, span, replacement in (
+            (left_entry, left_span, left_replacement),
+            (right_prefix, right_span, right_replacement),
         ):
-            return None
-        left_start = left_span.start + left_entry.index(left_replacement.source)
-        right_start = right_span.start + right_prefix.index(right_replacement.source)
-        return [
-            FragmentOverride(
-                FragmentSpan(
-                    left_span.ref,
-                    left_start,
-                    left_start + len(left_replacement.source),
-                ),
-                left_replacement.translated,
-            ),
-            FragmentOverride(
-                FragmentSpan(
-                    right_span.ref,
-                    right_start,
-                    right_start + len(right_replacement.source),
-                ),
-                right_replacement.translated,
-            ),
-        ]
+            if not replacement.source:
+                if replacement.translated:
+                    return None
+                continue
+            if entry.count(replacement.source) != 1:
+                return None
+            start = span.start + entry.index(replacement.source)
+            overrides.append(FragmentOverride(
+                FragmentSpan(span.ref, start, start + len(replacement.source)),
+                replacement.translated,
+            ))
+        return overrides or None
 
     def _prepare_continuation_overrides(
         self,
@@ -5012,11 +5233,15 @@ class TranslateConverter(PDFConverterEx):
             for override in draft.overrides
         ]
         draft_lookup = self._draft_by_ref(drafts)
+        reference_pairs = [(flow_by_page[pending.page_id], flow_by_page[pending.page_id])]
         if following is not None:
+            reference_pairs.append((flow_by_page[pending.page_id], flow_by_page[following.page_id]))
+        for previous_flow, following_flow in reference_pairs:
             reference_group = detect_reference_continuation(
-                flow_by_page[pending.page_id],
-                flow_by_page[following.page_id],
+                previous_flow,
+                following_flow,
                 occupied=occupied,
+                allow_formulas=True,
             )
             if reference_group is not None:
                 reference_overrides = (
@@ -5364,6 +5589,7 @@ class TranslateConverter(PDFConverterEx):
                     or (vflag(child.fontname, quote or child.get_text())
                         and not (not self.vfont and getattr(child, "_pdf2zh_cm_prose", False)))                                              # 3. 公式字体
                     or _is_non_horizontal_text_matrix(child.matrix)                                      # 4. 旋转文字
+                    or _has_reversed_text_matrix(child.matrix)
                 ):
                     cur_v = True
                 if (
@@ -5702,6 +5928,12 @@ class TranslateConverter(PDFConverterEx):
             paragraph_text_chars,
         )
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
+        if not self.vfont and not self.vchar:
+            _release_tex_accented_prose_words(sstk, var, varp, pstk, paragraph_text_chars)
+            _restore_drawn_uri_underscores(
+                sstk, pstk, paragraph_text_chars, lstk,
+                getattr(self, "source_uri_links", {}).get(ltpage.pageid, ()),
+            )
         _release_caption_prose_delimiters(sstk, var, varp, pstk)
         _release_prose_slash_connectives(sstk, var, varp, pstk)
         for paragraph in pstk:
@@ -6179,10 +6411,12 @@ class TranslateConverter(PDFConverterEx):
                             source_state is not None
                             and (
                                 _is_non_horizontal_text_matrix(source_state.matrix)
+                                or _has_reversed_text_matrix(source_state.matrix)
                                 or (
                                     getattr(vch, "_pdf2zh_layout_class", None) == 0
                                     and (
-                                        getattr(vch, "_pdf2zh_preserved_code", False)
+                                        _requires_source_text_transform(source_state)
+                                        or getattr(vch, "_pdf2zh_preserved_code", False)
                                         or getattr(vch, "_pdf2zh_preserved_identity", False)
                                     )
                                 )

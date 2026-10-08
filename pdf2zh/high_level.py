@@ -353,6 +353,22 @@ def translate_patch(
     device.latin_name = latin_name
     device.scan_backgrounds = {}
     device.source_spelling = collect_source_spelling(doc_zh)
+    device.source_uri_links = {
+        page.number: [
+            (
+                link["uri"],
+                (
+                    link["from"].x0,
+                    page.rect.height - link["from"].y1,
+                    link["from"].x1,
+                    page.rect.height - link["from"].y0,
+                ),
+            )
+            for link in page.get_links()
+            if link.get("uri") and link.get("from")
+        ]
+        for page in doc_zh
+    }
 
     assert device is not None
     obj_patch = {}

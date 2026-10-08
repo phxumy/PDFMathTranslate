@@ -214,11 +214,15 @@ def _has_reference_terminal(text: str) -> bool:
     )
 
 
-def _has_unsafe_reference_token(text: str) -> bool:
+def _has_unsafe_reference_token(text: str, *, allow_formulas: bool = False) -> bool:
+    if allow_formulas:
+        text = re.sub(r"\{v\d+\}", "", text)
     return _REFERENCE_INTERNAL_TOKEN_RE.search(text) is not None
 
 
-def _reference_tail(segment: FlowSegment) -> _ReferenceTail | None:
+def _reference_tail(
+    segment: FlowSegment, *, allow_formulas: bool = False
+) -> _ReferenceTail | None:
     if segment.region_kind != "plain text":
         return None
     region = split_numbered_reference_region(segment.text)
@@ -229,7 +233,7 @@ def _reference_tail(segment: FlowSegment) -> _ReferenceTail | None:
         return None
     span = FragmentSpan(segment.ref, marker.start, region.end)
     candidate = segment.text[span.start : span.end]
-    if _has_unsafe_reference_token(candidate) or _has_reference_terminal(candidate):
+    if _has_unsafe_reference_token(candidate, allow_formulas=allow_formulas) or _has_reference_terminal(candidate):
         return None
     return _ReferenceTail(
         segment=segment,
@@ -240,7 +244,9 @@ def _reference_tail(segment: FlowSegment) -> _ReferenceTail | None:
     )
 
 
-def _reference_head(segment: FlowSegment) -> _ReferenceHead | None:
+def _reference_head(
+    segment: FlowSegment, *, allow_formulas: bool = False
+) -> _ReferenceHead | None:
     if segment.region_kind != "plain text":
         return None
     markers = find_reference_markers(segment.text)
@@ -253,7 +259,7 @@ def _reference_head(segment: FlowSegment) -> _ReferenceHead | None:
     candidate = segment.text[span.start : span.end]
     if (
         not candidate.strip()
-        or _has_unsafe_reference_token(candidate)
+        or _has_unsafe_reference_token(candidate, allow_formulas=allow_formulas)
         or not _has_reference_terminal(candidate)
     ):
         return None
@@ -268,10 +274,15 @@ def _reference_head(segment: FlowSegment) -> _ReferenceHead | None:
 def _reference_geometry_is_compatible(
     left: FlowSegment,
     right: FlowSegment,
+    *,
+    same_page: bool = False,
 ) -> bool:
     left_column = _column_index(left)
     right_column = _column_index(right)
-    if left_column not in {1, None} or right_column not in {0, None}:
+    if same_page:
+        if left_column != 0 or right_column != 1:
+            return False
+    elif left_column not in {1, None} or right_column not in {0, None}:
         return False
     largest_size = max(abs(left.size), abs(right.size), 0.01)
     if abs(left.size - right.size) / largest_size > 0.15:
@@ -651,6 +662,7 @@ def detect_reference_continuation(
     following: Sequence[FlowSegment],
     *,
     occupied: Sequence[FragmentSpan] = (),
+    allow_formulas: bool = False,
 ) -> ReferenceContinuationGroup | None:
     """Detect a high-confidence bibliography entry split across two pages.
 
@@ -668,14 +680,17 @@ def detect_reference_continuation(
         return None
     previous_page = next(iter(previous_pages))
     following_page = next(iter(following_pages))
-    if following_page != previous_page + 1:
+    same_page = following_page == previous_page
+    if not same_page and following_page != previous_page + 1:
         return None
 
     tails = [
-        candidate for segment in previous if (candidate := _reference_tail(segment))
+        candidate for segment in previous
+        if (candidate := _reference_tail(segment, allow_formulas=allow_formulas))
     ]
     heads = [
-        candidate for segment in following if (candidate := _reference_head(segment))
+        candidate for segment in following
+        if (candidate := _reference_head(segment, allow_formulas=allow_formulas))
     ]
     tails.sort(
         key=lambda item: (
@@ -698,7 +713,9 @@ def detect_reference_continuation(
         for head in heads:
             if head.prefix != tail.prefix or head.number != tail.number + 1:
                 continue
-            if not _reference_geometry_is_compatible(tail.segment, head.segment):
+            if not _reference_geometry_is_compatible(
+                tail.segment, head.segment, same_page=same_page
+            ):
                 continue
             if _span_overlaps(tail.span, occupied) or _span_overlaps(
                 head.span, occupied

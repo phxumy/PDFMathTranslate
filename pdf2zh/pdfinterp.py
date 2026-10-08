@@ -111,6 +111,11 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                 for csid, spec in dict_value(v).items():
                     colorspace = get_colorspace(resolve1(spec))
                     if colorspace is not None:
+                        if colorspace.name in ("ICCBased", "DeviceN"):
+                            # Keep the original resource and profile for source
+                            # glyphs; converting its components to RGB changes
+                            # colors when the profile is not device RGB.
+                            colorspace._pdf2zh_resource_name = csid
                         self.csmap[csid] = colorspace
             elif k == "ProcSet":
                 self.rsrcmgr.get_procset(list_value(v))

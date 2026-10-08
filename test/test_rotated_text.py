@@ -4,13 +4,16 @@ import re
 import unittest
 
 import numpy as np
+import pymupdf as fitz
 from pdfminer.layout import LTPage
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 
 from pdf2zh.converter import (
+    OriginalTextState,
     PDFConverterEx,
     TranslateConverter,
     _is_non_horizontal_text_matrix,
+    _requires_source_text_transform,
 )
 
 
@@ -71,7 +74,7 @@ def render_single_protected_char(
     converter.vfont = ""
     converter.vchar = ""
     converter.noto_name = "noto"
-    converter.noto = None
+    converter.noto = fitz.Font("helv")
     converter.fontid = {font: "F1"}
     converter.fontmap = {"F1": font}
     converter._translate_planned_segments = (
@@ -81,6 +84,43 @@ def render_single_protected_char(
 
 
 class RotatedTextTests(unittest.TestCase):
+    def test_mirrored_and_stretched_diagram_symbols_keep_the_source_matrix(self) -> None:
+        for matrix in (
+            (-7.0, 0.0, 0.0, 13.0, 70.0, 90.0),
+            (7.0, 0.0, 0.0, 13.0, 70.0, 90.0),
+            (7.0, 0.0, 0.0, -13.0, 70.0, 90.0),
+            (9.0, 0.0, 3.0, 9.0, 70.0, 90.0),
+        ):
+            with self.subTest(matrix=matrix):
+                ops = render_single_protected_char(matrix, 1.0, text=")")
+                self.assertIn(" ".join(f"{value:f}" for value in matrix) + " Tm", ops)
+                self.assertIn("/F1 1.000000 Tf", ops)
+
+    def test_mirrored_symbol_keeps_matrix_outside_a_detected_figure(self) -> None:
+        matrix = (-7.0, 0.0, 0.0, 13.0, 70.0, 90.0)
+        ops = render_single_protected_char(matrix, 1.0, layout_class=1, text=")")
+        self.assertIn(" ".join(f"{value:f}" for value in matrix) + " Tm", ops)
+
+    def test_uniform_positive_scale_keeps_existing_horizontal_rendering(self) -> None:
+        matrix = (3.0, 0.0, 0.0, 3.0, 50.0, 80.0)
+        ops = render_single_protected_char(matrix, 3.0)
+        self.assertIn("/F1 9.000000 Tf 1 0 0 1 50.000000 80.000000 Tm", ops)
+        self.assertNotIn(" Tz ", ops)
+        self.assertFalse(_requires_source_text_transform(OriginalTextState(matrix, 3, 1, 0)))
+
+    def test_positive_stretch_outside_figure_keeps_reflow_path(self) -> None:
+        ops = render_single_protected_char(
+            (7.0, 0.0, 0.0, 13.0, 70.0, 90.0), 1.0, layout_class=1, text=")"
+        )
+        self.assertNotIn(" Tz ", ops)
+
+    def test_preserved_transform_detection_includes_horizontal_scaling(self) -> None:
+        state = OriginalTextState((1, 0, 0, 1, 50, 80), 9, 0.7, 0)
+        self.assertTrue(_requires_source_text_transform(state))
+        self.assertFalse(_requires_source_text_transform(
+            OriginalTextState((9, 1e-10, 0, 9, 50, 80), 1, 1, 0)
+        ))
+
     def test_rotated_axis_keeps_each_matrix_even_outside_a_protected_detection(self) -> None:
         # Figure XObjects may be classified as unassigned (1), not protected (0).
         # Multiple glyph widths must not become independent horizontal font sizes.
