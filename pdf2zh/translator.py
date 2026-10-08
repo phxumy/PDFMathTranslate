@@ -4541,7 +4541,23 @@ class ScientificTranslator(BaseTranslator):
             r"(?:neural\s+)?networks?)\b",
             re.IGNORECASE,
         )
-        return source_context.search(source_title) is not None
+        if source_context.search(source_title) is not None:
+            return True
+        # Named physical transitions can use several hyphenated surnames.
+        # Require a capitalized compound, not an ordinary single title word
+        # such as "Quantum" or a modifier such as "Non-adiabatic".
+        return bool(
+            re.fullmatch(
+                r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ]+"
+                r"(?:[-–][A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ]+){1,5}",
+                source_eponym,
+            )
+            and re.search(
+                rf"(?<![A-Za-z]){re.escape(source_eponym)}\s+transitions?\b",
+                source_title,
+                re.IGNORECASE,
+            )
+        )
 
     @staticmethod
     def _reference_prefix_is_author_et_al(prefix: str) -> bool:

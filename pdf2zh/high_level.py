@@ -306,6 +306,28 @@ def _chatgpt_document_task_id(
     ).hexdigest()
 
 
+def _collect_source_uri_links(document):
+    """Read URI actions directly, including relative URIs reported as Launch."""
+    return {
+        page.number: [
+            (
+                document.xref_get_key(link["xref"], "A/URI")[1],
+                (
+                    link["from"].x0,
+                    page.rect.height - link["from"].y1,
+                    link["from"].x1,
+                    page.rect.height - link["from"].y0,
+                ),
+            )
+            for link in page.get_links()
+            if link.get("xref") and link.get("from")
+            and document.xref_get_key(link["xref"], "A/S") == ("name", "/URI")
+            and document.xref_get_key(link["xref"], "A/URI")[0] == "string"
+        ]
+        for page in document
+    }
+
+
 def translate_patch(
     inf: BinaryIO,
     pages: Optional[list[int]] = None,
@@ -353,22 +375,7 @@ def translate_patch(
     device.latin_name = latin_name
     device.scan_backgrounds = {}
     device.source_spelling = collect_source_spelling(doc_zh)
-    device.source_uri_links = {
-        page.number: [
-            (
-                link["uri"],
-                (
-                    link["from"].x0,
-                    page.rect.height - link["from"].y1,
-                    link["from"].x1,
-                    page.rect.height - link["from"].y0,
-                ),
-            )
-            for link in page.get_links()
-            if link.get("uri") and link.get("from")
-        ]
-        for page in doc_zh
-    }
+    device.source_uri_links = _collect_source_uri_links(doc_zh)
 
     assert device is not None
     obj_patch = {}
@@ -426,6 +433,8 @@ def translate_patch(
                     f"deferred translation refers to unknown page xref {page_xref}"
                 )
             obj_patch[page_xref] += translated_ops
+    for xref, operations in obj_patch.items():
+        obj_patch[xref] = device.resolve_uri_underline_markers(operations)
     device.close()
     return obj_patch
 

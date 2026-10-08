@@ -138,6 +138,18 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             else:
                 return color == 0
 
+        self._pending_uri_underline_marker = ""
+        marker = getattr(self.device, "mark_uri_underline", None)
+        if callable(marker) and len(self.curpath) == 2 and self.curpath[0][0] == "m" and self.curpath[1][0] == "l":
+            self._pending_uri_underline_marker = marker(
+                apply_matrix_pt(self.ctm, self.curpath[0][-2:]),
+                apply_matrix_pt(self.ctm, self.curpath[1][-2:]),
+                self.graphicstate,
+            )
+            if self._pending_uri_underline_marker:
+                self.curpath = []
+                return
+
         if (
             len(self.curpath) == 2
             and self.curpath[0][0] == "m"
@@ -368,6 +380,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                             targs = []
                         if not (name[0] == "T" or name in ["BI", "ID", "EMC"]):
                             p = " ".join(_serialize_pdf_operand(x) for x in targs)
+                            if name == "S" and getattr(self, "_pending_uri_underline_marker", ""):
+                                ops += self._pending_uri_underline_marker + "\n"
+                                self._pending_uri_underline_marker = ""
                             ops += f"{p} {name} "
                 elif settings.STRICT:
                     error_msg = "Unknown operator: %r" % name

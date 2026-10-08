@@ -816,6 +816,66 @@ def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, link
                 lines.remove(line)
 
 
+def _release_standalone_prose_periods(
+    segments, formulas, formula_paragraphs, paragraphs, paragraph_text_chars
+):
+    """Expose a text-font sentence period that was classified as mathematics.
+
+    Text-italic captions sometimes switch to roman digits for a citation and
+    back to italic for the period. Require established prose, a touching text
+    glyph on the left, and a sentence end or a new capitalized word on the right.
+    Decimal points, abbreviations, code and mathematical punctuation stay opaque.
+    """
+    for index, chars in enumerate(formulas):
+        if len(chars) != 1 or chars[0].get_text() != ".":
+            continue
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            continue
+        char = chars[0]
+        em = float(paragraph.size)
+        if (
+            em <= 0
+            or getattr(char, "_pdf2zh_layout_class", None) == 0
+            or not _is_non_math_text_font(char.fontname)
+            or re.search(r"(?:Mono|Code|^CMTT|^CMITT)", _font_name(char.fontname), re.I)
+            or not 0.9 * em <= char.size <= 1.1 * em
+            or _is_non_horizontal_text_matrix(char.matrix)
+        ):
+            continue
+        marker = f"{{v{index}}}"
+        source = segments[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        left, right = source.split(marker)
+        if right.strip() and re.match(r"\s+[A-Z][a-z]{1,}\b", right) is None:
+            continue
+        if re.search(r"\b(?:e\.g|i\.e|w\.r\.t|w\.h\.p|i\.i\.d|cf|viz|vs|Dr|Prof|Mr|Mrs)$", left, re.I):
+            continue
+        prose = re.sub(r"\{v\d+\}", " ", source)
+        if len(re.findall(r"\b[A-Za-z]{3,}\b", prose)) < 3:
+            continue
+        neighbors = [previous for previous in paragraph_text_chars[paragraph_id] if (
+            previous.get_text() and previous.get_text()[-1] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789)]"
+            and getattr(previous, "_pdf2zh_layout_class", None) != 0
+            and _is_non_math_text_font(previous.fontname)
+            and not re.search(r"(?:Mono|Code|^CMTT|^CMITT)", _font_name(previous.fontname), re.I)
+            and 0.9 * em <= previous.size <= 1.1 * em
+            and not _is_non_horizontal_text_matrix(previous.matrix)
+            and abs(_char_baseline(previous) - _char_baseline(char)) <= 0.15 * em
+            and -0.20 * em <= char.x0 - previous.x1 <= 0.35 * em
+        )]
+        neighbors.sort(key=lambda previous: abs(char.x0 - previous.x1))
+        if not neighbors or (
+            len(neighbors) > 1
+            and abs(abs(char.x0 - neighbors[0].x1) - abs(char.x0 - neighbors[1].x1)) < 0.05 * em
+        ):
+            continue
+        segments[paragraph_id] = left + "." + right
+        paragraph_text_chars[paragraph_id].append(char)
+
+
 def _release_caption_prose_delimiters(segments, formulas, formula_paragraphs, paragraphs):
     """Expose caption punctuation hidden after a subscripted variable.
 
@@ -3475,6 +3535,47 @@ def _collect_translatable_italic_runs(
     return candidates
 
 
+def _restore_italic_affiliation_layout(segments, formulas, paragraphs, candidates, page_height):
+    """Recover body size and separate rows for numbered italic institutions.
+
+    These blocks otherwise contain only small superscript digits in prose;
+    the actual 9–10 point addresses live inside recovered italic runs.
+    """
+    for source, paragraph in zip(segments, paragraphs):
+        if paragraph.page_id != 0 or paragraph.y0 < page_height * 0.5:
+            continue
+        matches = list(re.finditer(r"(\d{1,2})\s*\{v(\d+)\}\s*", source))
+        if (
+            len(matches) < 2 or matches[0].start() != 0
+            or "".join(match.group() for match in matches) != source
+            or [int(match[1]) for match in matches] != list(range(1, len(matches) + 1))
+        ):
+            continue
+        runs = []
+        for match in matches:
+            index = int(match[2])
+            if index not in candidates or index >= len(formulas):
+                break
+            chars = formulas[index]
+            if _standalone_italic_affiliation(chars, source, paragraph) is None:
+                break
+            runs.append(chars)
+        if len(runs) != len(matches):
+            continue
+        size = float(np.median([char.size for run in runs for char in run]))
+        baselines = [_char_baseline(run[0]) for run in runs]
+        if any(not 0.8 * size <= a - b <= 2.2 * size for a, b in zip(baselines, baselines[1:])):
+            continue
+        paragraph.size = size
+        paragraph.y = runs[0][0].y0
+        paragraph.x = paragraph.x0
+        paragraph.brk = True
+        paragraph.affiliation_parts = tuple(
+            SegmentPart(ROLE_AFFILIATION, match.group().strip(), break_before=index > 0)
+            for index, match in enumerate(matches)
+        )
+
+
 def _collect_reference_title_italic_runs(
     formula_runs: list[list[LTChar]],
     formula_paragraphs: list[int],
@@ -4198,6 +4299,74 @@ class PDFConverterEx(PDFConverter):
     ) -> None:
         PDFConverter.__init__(self, rsrcmgr, None, "utf-8", 1, None)
 
+    def mark_uri_underline(self, start, end, graphicstate) -> str:
+        """Mark only a thin URI text underline; decide removal after reflow."""
+        # A Form XObject may contain ordinary publisher prose. Its LTFigure
+        # container is not a scientific-figure classification; the final
+        # paragraph's layout class determines whether the stroke can go.
+        width = float(graphicstate.linewidth or 0)
+        color = graphicstate.scolor
+        if (
+            not 0 < width <= 1.0
+            or (graphicstate.dash and graphicstate.dash[0])
+            or not isinstance(color, (tuple, list)) or len(color) != 3
+            or max(color) - min(color) < 0.05
+            or abs(start[1] - end[1]) > 0.02
+        ):
+            return ""
+        left, right = sorted((float(start[0]), float(end[0])))
+        y = float(start[1])
+        page_id = int(self.cur_item.pageid)
+        for _, rect in getattr(self, "source_uri_links", {}).get(page_id, ()):
+            x0, y0, x1, y1 = rect
+            if (
+                3 <= y1 - y0 <= 16
+                and x1 - x0 >= 5
+                and abs(left - x0) <= 0.1 and abs(right - x1) <= 0.1
+                and 0 <= y - y0 <= 1.0
+            ):
+                records = getattr(self, "_uri_underline_records", None)
+                if records is None:
+                    records = self._uri_underline_records = []
+                marker = f"%PDF2ZH_URI_UNDERLINE_{len(records)}%"
+                records.append((page_id, tuple(rect)))
+                return marker
+        return ""
+
+    def _record_reflowed_uri_prose(self, page_id, sources, targets, paragraphs):
+        changed = getattr(self, "_reflowed_uri_prose", None)
+        if changed is None:
+            changed = self._reflowed_uri_prose = []
+        for source, target, paragraph in zip(sources, targets, paragraphs):
+            if (
+                source != target and paragraph.brk
+                and paragraph.layout_class != 0
+                and paragraph.region_kind == "plain text"
+            ):
+                changed.append((
+                    int(page_id),
+                    (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
+                ))
+
+    def resolve_uri_underline_markers(self, operations: str) -> str:
+        """Remove stale decorations only after their ordinary prose changed."""
+        records = getattr(self, "_uri_underline_records", ())
+        changed = getattr(self, "_reflowed_uri_prose", ())
+
+        def resolve(match):
+            page_id, rect = records[int(match.group(1))]
+            x0, y0, x1, y1 = rect
+            for changed_page, bounds in changed:
+                a, b, c, d = bounds
+                if changed_page == page_id and (
+                    a - 0.1 <= x0 <= x1 <= c + 0.1
+                    and b - 1 <= y0 <= y1 <= d + 1
+                ):
+                    return "n"
+            return "S"
+
+        return re.sub(r"%PDF2ZH_URI_UNDERLINE_(\d+)%\s*S\b", resolve, operations)
+
     def begin_page(self, page, ctm) -> None:
         # 重载替换 cropbox
         x0, y0, x1, y1 = page.cropbox
@@ -4360,6 +4529,7 @@ class Paragraph:
         self.layout_class = int(layout_class)
         self.region_kind = region_kind
         self.formula_annotation_context: dict[str, str] = {}
+        self.affiliation_parts: tuple[SegmentPart, ...] = ()
 
 
 @dataclass
@@ -4868,6 +5038,9 @@ class TranslateConverter(PDFConverterEx):
             )
             if segment_index in already_english:
                 plans.append(SegmentPlan(source, (SegmentPart(ROLE_PRESERVE, text),)))
+                continue
+            if paragraph.affiliation_parts:
+                plans.append(SegmentPlan(source, paragraph.affiliation_parts))
                 continue
             plans.append(
                 self.translation_policy.plan_segment(
@@ -5930,6 +6103,7 @@ class TranslateConverter(PDFConverterEx):
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
         if not self.vfont and not self.vchar:
             _release_tex_accented_prose_words(sstk, var, varp, pstk, paragraph_text_chars)
+            _release_standalone_prose_periods(sstk, var, varp, pstk, paragraph_text_chars)
             _restore_drawn_uri_underscores(
                 sstk, pstk, paragraph_text_chars, lstk,
                 getattr(self, "source_uri_links", {}).get(ltpage.pageid, ()),
@@ -6000,6 +6174,7 @@ class TranslateConverter(PDFConverterEx):
             if _supports_scientific_translation(self.translator) and not self.vfont
             else {}
         )
+        _restore_italic_affiliation_layout(sstk, var, pstk, italic_candidates, float(ltpage.height))
         reference_title_italic_candidates = (
             _collect_reference_title_italic_runs(var, varp, pstk, sstk)
             if _supports_scientific_translation(self.translator) and not self.vfont
@@ -6078,6 +6253,7 @@ class TranslateConverter(PDFConverterEx):
             news = self._restore_fragment_overrides(news, replacement_map)
         if len(source_sstk) != len(news):
             raise ValueError("continuation translation changed segment count")
+        self._record_reflowed_uri_prose(ltpage.pageid, source_sstk, news, pstk)
 
         ############################################################
         # C. 新文档排版

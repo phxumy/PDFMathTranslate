@@ -62,7 +62,7 @@ def has_detached_norm_relation(source: str, target: str) -> bool:
 
 
 def has_suspicious_physics_translation(source: str, target: str) -> bool:
-    """Reject clear quantum-population mistranslation or a lost sensitivity.
+    """Reject clear physics mistranslations or a lost population sensitivity.
 
     These checks reject a result for normal retranslation, never rewrite it.
     A physical context is required to avoid treating demographic populations as
@@ -71,11 +71,15 @@ def has_suspicious_physics_translation(source: str, target: str) -> bool:
     """
     source = _strip_non_prose(source)
     target = _strip_non_prose(target)
+    if re.search(r"\bconstructive\s+interference\b", source, re.I) and re.search(
+        r"建设性干涉|建設性干涉", target
+    ):
+        return True
     if not re.search(r"\bpopulation\b", source, re.IGNORECASE):
         return False
     physics = re.search(
         r"\b(?:qubits?|quantum|excited\s+states?|ground\s+states?|"
-        r"conditional\s+phase|rabi|pulses?|CZ)\b",
+        r"conditional\s+phase|rabi|pulses?|gate\s+sets?|CZ)\b",
         source,
         re.IGNORECASE,
     )
@@ -191,6 +195,13 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     source = unicodedata.normalize("NFKC", _strip_non_prose(source))
     target = unicodedata.normalize("NFKC", _strip_non_prose(target))
     if re.search(r"…|⋯|\.{3}", target) and not re.search(r"…|⋯|\.{3}", source):
+        return True
+    # A displayed function follows this source fragment. Ending the Chinese
+    # lead-in with "次梯度的" would instead make that function modify the
+    # subgradient, reversing the grammatical relation across the display.
+    if re.search(r"\bcomputing\s+the\s+subgradient\s+of\s*$", source, re.I) and re.search(
+        r"(?:次梯度|次导数|次導數)的\s*[：:]?\s*$", target
+    ):
         return True
     concepts = (
         (r"\bdenominator\b", r"分母|除数|除數"),

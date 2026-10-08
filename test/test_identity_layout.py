@@ -116,3 +116,15 @@ def test_author_geometry_requires_first_page_affiliation_and_strict_name_rows():
     )
     page.pageid = 2
     assert not author_byline_chars(page)
+
+
+def test_numbered_affiliation_anchors_ligatures_and_overprinted_name_accents():
+    _, page = page_with_lines([
+        "A study of continuous quantum gates",
+        "Stefania Laza˘r1, A. Wallraﬀ2 and K. Hanke1",
+        "1Department of Physics, ETH Zurich, Switzerland",
+    ], fontname="Times-Roman")
+    selected = author_byline_chars(page)
+    assert "".join(char.get_text() for char in page if char in selected) == (
+        "Stefania Laza˘r1, A. Wallraﬀ2 and K. Hanke1"
+    )

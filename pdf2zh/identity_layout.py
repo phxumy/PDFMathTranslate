@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from statistics import median
 
 from pdfminer.layout import LTChar, LTPage
@@ -26,6 +27,14 @@ def _spaced_text(line: list[LTChar]) -> str:
     return "".join(pieces).strip()
 
 
+def _byline_classification_text(text: str) -> str:
+    # Classify a copy: PDF overprinted accents and ligatures must keep their
+    # original glyphs and positions in the selected source rows.
+    text = text.translate(str.maketrans("", "", "˘ˇ˙˚´`¨ˆ˜"))
+    return "".join(char for char in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(char))
+
+
 def author_byline_chars(page: LTPage) -> set[LTChar]:
     """Anchor a strict first-page byline beside publisher identity artwork.
 
@@ -40,7 +49,8 @@ def author_byline_chars(page: LTPage) -> set[LTChar]:
     lines = _lines([item for item in page if isinstance(item, LTChar)])
     selected: set[LTChar] = set()
     for index, affiliation in enumerate(lines):
-        if not looks_like_affiliation(_spaced_text(affiliation)):
+        affiliation_text = re.sub(r"^\s*\d{1,2}(?=[A-Z])", "", _spaced_text(affiliation))
+        if not looks_like_affiliation(affiliation_text):
             continue
         rows = []
         following = affiliation
@@ -58,7 +68,7 @@ def author_byline_chars(page: LTPage) -> set[LTChar]:
                 )
             ):
                 break
-            text = _spaced_text(line)
+            text = _byline_classification_text(_spaced_text(line))
             names = re.sub(r"[\d*†‡§#]+", "", text)
             entries = [
                 entry.strip()
@@ -77,7 +87,7 @@ def author_byline_chars(page: LTPage) -> set[LTChar]:
             rows.append(line)
             following = line
         chars = [char for row in reversed(rows) for char in row]
-        text = " ".join(_spaced_text(row) for row in reversed(rows))
+        text = " ".join(_byline_classification_text(_spaced_text(row)) for row in reversed(rows))
         if (
             chars
             and looks_like_author_list(text)

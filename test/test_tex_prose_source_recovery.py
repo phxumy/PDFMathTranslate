@@ -5,6 +5,7 @@ import pytest
 from pdf2zh.converter import (
     _release_tex_accented_prose_words,
     _release_prose_slash_connectives,
+    _release_standalone_prose_periods,
     _restore_drawn_uri_underscores,
 )
 
@@ -182,3 +183,64 @@ def test_chow_math_font_slash_in_and_or_requires_touching_text_letters(change):
     _release_prose_slash_connectives(segments, formulas, [0], [p])
     assert segments == ([source.replace("and{v0}", "and/or")] if change is None else [source])
     assert formulas[0] == chars
+
+
+@pytest.mark.parametrize("left,right", [
+    ("The map follows subsection 4.1", " The number of observations is fixed."),
+    ("The threshold estimate is described in [17]", " See the implementation details."),
+    ("The rate is predicted by Theorem 6.6 and Proposition 6.9", ""),
+])
+def test_math_caption_text_font_period_is_released_before_translation(left, right):
+    period = char(".", 100, font="CMTI8", size=8)
+    previous = char(left[-1], 95, font="CMR8", size=8)
+    p = paragraph()
+    p.size, p.region_kind = 8, "figure_caption"
+    source = left + "{v0}" + right
+    segments, formulas = [source], [[period]]
+    text_chars = [previous]
+    if left.endswith("]"):
+        preceding_digit = char("7", 90, font="CMR8", size=8)
+        preceding_digit.x1 = 97.7
+        text_chars.insert(0, preceding_digit)
+    _release_standalone_prose_periods(segments, formulas, [0], [p], [text_chars])
+    assert segments == [left + "." + right]
+    assert formulas == [[period]]
+
+
+@pytest.mark.parametrize("change", [
+    "decimal", "math_font", "math_neighbor", "code_font", "protected", "small",
+    "rotated", "different_line", "gap", "abbreviation", "math_fragment", "figure",
+])
+def test_unproven_periods_and_decimal_points_stay_in_original_glyph_islands(change):
+    period = char(".", 100, font="CMTI8", size=8)
+    previous = char("1", 95, font="CMR8", size=8)
+    p = paragraph()
+    p.size = 8
+    source = "The map follows subsection 4.1{v0} The next statement follows."
+    if change == "decimal":
+        source = "The value is 4{v0}1 times larger."
+    elif change == "math_font":
+        period.fontname = "CMMI8"
+    elif change == "math_neighbor":
+        previous.fontname = "CMMI8"
+    elif change == "code_font":
+        period.fontname = "CMTT8"
+    elif change == "protected":
+        period._pdf2zh_layout_class = 0
+    elif change == "small":
+        period.size = 5
+    elif change == "rotated":
+        period.matrix = (0, 1, -1, 0, 100, 100)
+    elif change == "different_line":
+        previous.y0 -= 15
+    elif change == "gap":
+        previous.x1 -= 8
+    elif change == "abbreviation":
+        source = "The description follows, e.g{v0} The next statement follows."
+    elif change == "math_fragment":
+        source = "x{v0}"
+    elif change == "figure":
+        p.region_kind = "figure"
+    segments = [source]
+    _release_standalone_prose_periods(segments, [[period]], [0], [p], [[previous]])
+    assert segments == [source]

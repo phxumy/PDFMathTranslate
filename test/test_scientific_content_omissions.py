@@ -58,3 +58,27 @@ def test_fitted_curve_legend_does_not_invent_a_straight_line():
     assert not has_incomplete_scientific_caption(source.replace("the model", "the linear model"), "图16. 拟合（直线）。")
     assert not has_incomplete_scientific_caption("The fit (line) is linear.", "拟合（直线）是线性的。")
     assert translator_stub()._accepted_translation(source, "图16. 放大泄漏（点），使用式(F7)中模型拟合（直线）。") is None
+
+
+def test_population_recovery_near_a_quantum_gate_set():
+    source = "We now study the behavior of the population recovery in the neighborhood of the continuous gate set."
+    translator = translator_stub()
+    assert translator._accepted_translation(source, "我们现在研究连续门集邻域中种群恢复的行为。") is None
+    assert translator._accepted_translation(source, "我们现在研究连续门集邻域中布居恢复的行为。") is not None
+    assert translator._accepted_translation("The population near the city gate is growing.", "城门附近的人口正在增长。") is not None
+
+
+def test_constructive_interference_is_a_physics_relation():
+    source = "For constructive interference, the denominator cancels."
+    translator = translator_stub()
+    assert translator._accepted_translation(source, "对于建设性干涉，分母相消。") is None
+    assert translator._accepted_translation(source, "对于相长干涉，分母相消。") is not None
+    assert translator._accepted_translation("The feedback is constructive.", "反馈具有建设性。") is not None
+
+
+def test_subgradient_lead_in_retains_relation_to_following_display():
+    source = "The cost is dominated by computing the subgradient of"
+    translator = translator_stub()
+    assert translator._accepted_translation(source, "成本主要来自计算次梯度的") is None
+    assert translator._accepted_translation(source, "成本主要来自计算下式的次梯度：") is not None
+    assert translator._accepted_translation("Computing the subgradient of this norm is easy.", "计算该范数的次梯度很容易。") is not None

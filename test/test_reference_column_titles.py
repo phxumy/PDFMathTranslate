@@ -196,3 +196,25 @@ def test_whole_left_title_before_metadata_keeps_original_symbol():
         ExactReplacement("High-fidelity controlled-{v25} gates", "高保真受控-{v25}门"),
         ExactReplacement("", ""),
     )
+
+
+def test_named_transition_compound_is_preserved_but_not_ordinary_title_words():
+    translator = translator_stub()
+    title = "Nona-diabatic Landau–Zener–Stückelberg–Majorana transitions, dynamics, and interference"
+    translated = "非绝热 Landau–Zener–Stückelberg–Majorana 跃迁、动力学与干涉"
+    entry = "[65] O. V. Ivakhnenko, S. N. Shevchenko, and F. Nori, " + title + ", Phys. Rep. 995, 1 (2023). "
+    assert translator._apply_reference_title_replacements(
+        entry, [ExactReplacement(title, translated)]
+    ) == (entry.replace(title, translated), True)
+    for source, target in (
+        ("Quantum transitions", "Quantum 跃迁"),
+        ("Non-adiabatic transitions", "Non-adiabatic 跃迁"),
+        ("quantum–phase transitions", "quantum–phase 跃迁"),
+        ("Landau–Zener transitions", "Landau–Majorana 跃迁"),
+    ):
+        assert not translator._reference_preserves_single_eponym_name(source, target)
+    for source, target in (
+        ("Landau–Zener transitions and interference", "Landau–Zener 跃迁和 interference"),
+        ("Landau–Zener transitions", "Landau–Zener transitions"),
+    ):
+        assert translator._reference_title_has_unsafe_residue(source, target)
