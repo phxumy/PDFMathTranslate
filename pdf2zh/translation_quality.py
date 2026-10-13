@@ -74,7 +74,7 @@ def has_suspicious_physics_translation(source: str, target: str) -> bool:
     if (
         re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", source, re.I)
         and not re.search(r"\bproximal\b", source, re.I)
-        and re.search(r"近端(?:量子)?(?:处理器|處理器)", target)
+        and re.search(r"近(?:端|程)(?:量子)?(?:处理器|處理器)", target)
     ):
         return True
     if re.search(r"\bconstructive\s+interference\b", source, re.I) and re.search(
@@ -210,7 +210,7 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     ):
         return True
     if re.search(r"\bi\.\s*i\.\s*d\.\s+Gaussian\s+random\s+variables\b", source, re.I) and re.search(
-        r"(?:独立同分布|獨立同分布)的\s*\(\s*i\.\s*i\.\s*d\.\s*\)\s*[。!]\s*"
+        r"(?:独立同分布|獨立同分布)(?:的)?\s*\(\s*i\.\s*i\.\s*d\.\s*\)\s*(?:的)?\s*[。.!！]\s*"
         r"(?:经过适当缩放的|經過適當縮放的)?高斯(?:随机变量|隨機變量)", target, re.I
     ):
         return True

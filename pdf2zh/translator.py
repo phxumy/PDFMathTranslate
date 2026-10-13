@@ -1270,9 +1270,18 @@ class ScientificTranslator(BaseTranslator):
             "including bare numbered citations such as [12]. Do not summarize "
             "captions or drop a sensitivity, maximum, or comparison. Preserve the "
             "scope of negation and of constructions such as 'not only ... but ...'. "
+            "Keep distribution adjectives attached to the random variables they "
+            "describe, even when abbreviations contain periods. Keep each formula's "
+            "scientific role: a Lipschitz constant must not become the norm. "
             "In quantum-state contexts, population means state occupation "
             "(Chinese: 布居), not demographic population; use the terminology "
             "appropriate to the scientific context. "
+            "If a prose fragment introduces a following displayed expression, "
+            "for example by ending with 'computing the subgradient of', leave "
+            "the expression outside the translation and write a natural lead-in "
+            "referring to that following expression. Preserve which object the "
+            "subgradient belongs to; do not use an ellipsis or end the Chinese "
+            "lead-in with a dangling possessive after the word for subgradient. "
         )
 
     def _build_codex_prompt(
@@ -1804,6 +1813,16 @@ class ScientificTranslator(BaseTranslator):
             'Return JSON with exactly one field: {"translations": ["...", "..."]}.'
         )
 
+    @staticmethod
+    def _reference_semantic_context(texts: list[str]) -> str:
+        if any(re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", text, re.I) for text in texts):
+            return (
+                "Terminology context: near-term processors describes a time horizon, "
+                "meaning processors available now or in the near future; it does not "
+                "describe physical proximity or short transmission range.\n\n"
+            )
+        return ""
+
     def _build_reference_title_prompt(self, entries: list[str]) -> str:
         indexed_entries = [
             {"index": idx, "reference_entry": entry}
@@ -1841,6 +1860,7 @@ class ScientificTranslator(BaseTranslator):
             "- If no explicit work title is present, or if any title boundary is "
             "uncertain, return an empty `replacements` array for that entry.\n"
             f"- Return exactly {len(entries)} objects in ascending index order.\n\n"
+            f"{self._reference_semantic_context(entries)}"
             f"Reference Entries JSON: {serialized_entries}\n\n"
             "Return JSON with exactly one field named `title_translations`; each item "
             "must contain exactly `index` and `replacements`; each replacement must "
@@ -1867,6 +1887,7 @@ class ScientificTranslator(BaseTranslator):
             "metadata, commentary, or code fences.\n\n"
             f"There are exactly {len(titles)} titles. Return exactly {len(titles)} "
             "translated strings in ascending index order.\n\n"
+            f"{self._reference_semantic_context(titles)}"
             f"Exact Titles JSON: {serialized_titles}\n\n"
             'Return JSON with exactly one field: {"translations": ["...", "..."]}.'
         )
@@ -2989,8 +3010,6 @@ class ScientificTranslator(BaseTranslator):
         """
         expected = cls._formula_token_sequence(source)
         actual = list(cls._formula_token_sequence(target))
-        if tuple(actual) == expected:
-            return True
         token = r"\{v\d+\}"
         for match in re.finditer(
             rf"(?P<bound>{token})\s*[-–]?\s*Lipschitz\s+"
@@ -3000,11 +3019,16 @@ class ScientificTranslator(BaseTranslator):
             bound, norm = match['bound'], match['norm']
             if any(expected.count(t) != 1 or actual.count(t) != 1 for t in (bound, norm)):
                 continue
+            norm_label = re.escape(norm) + r"\s*(?:范数|範數|范數)"
+            bound_label = re.escape(bound) + r"\s*[-–]?\s*(?:Lipschitz(?![A-Za-z])|利普希茨)"
+            if re.search(cls.CJK_CHAR_RE, target):
+                explicit_norm = norm_label + r"|(?:范数|範數|范數)\s*" + re.escape(norm)
+                explicit_bound = bound_label + r"|(?:Lipschitz|利普希茨)(?:连续性|連續性)?(?:常数|常數|系数|係數)\s*(?:为|為|是)?\s*" + re.escape(bound)
+                if not re.search(explicit_norm, target) or not re.search(explicit_bound, target):
+                    return False
             index = actual.index(norm)
             if index + 1 >= len(actual) or actual[index + 1] != bound:
                 continue
-            norm_label = re.escape(norm) + r"\s*(?:范数|範數|范數)"
-            bound_label = re.escape(bound) + r"\s*[-–]?\s*Lipschitz\b"
             qualifier = r"\s*(?:的|是|为|為|下(?:是|为|為)?|(?:意义下|意義下|而言)(?:是|为|為))\s*"
             if re.search(norm_label + qualifier + bound_label, target) is None:
                 continue
@@ -3344,11 +3368,6 @@ class ScientificTranslator(BaseTranslator):
                 author_end = candidate_end
                 break
         if author_end is None:
-            for year in re.finditer(r"\b(?:19|20)\d{2}[a-z]?\b", entry):
-                if looks_like_reference_title_prefix(entry[: year.end()]):
-                    author_end = year.end()
-                    break
-        if author_end is None:
             # Initials/surname authors may end with a comma instead of a
             # period. Require that grammar for every name, rather than taking
             # the last comma of arbitrary Title Case text as the delimiter.
@@ -3363,8 +3382,16 @@ class ScientificTranslator(BaseTranslator):
             )
             if comma_authors is not None:
                 following = entry[label.end() + comma_authors.end() :]
-                if not re.match(r"(?:[A-Z]\.|and\b|&)", following):
+                if not re.match(r"(?:[A-Z]\.|and\b|&|(?:19|20)\d{2}\b)", following):
                     author_end = label.end() + comma_authors.end()
+        if author_end is None:
+            # Prefer the explicit initials/author comma above. A long series
+            # and publisher tail contains many proper names and can otherwise
+            # make the distant publication year look like an author/year block.
+            for year in re.finditer(r"\b(?:19|20)\d{2}[a-z]?\b", entry):
+                if looks_like_reference_title_prefix(entry[: year.end()]):
+                    author_end = year.end()
+                    break
         if author_end is None:
             return ()
         title_start = author_end
@@ -4786,12 +4813,21 @@ class ScientificTranslator(BaseTranslator):
         # Complete university-press catalogues have a publisher, optional
         # publication place, year, and optional page range.  Do not accept an
         # arbitrary phrase merely because it contains 'Press'.
-        press = re.fullmatch(
+        press_catalogue = (
             rf"(?:[A-Z][A-Za-z'’\-]*\s+){{1,5}}University\s+Press,\s*"
-            rf"(?:{location},\s*){{0,2}}{year}(?:,\s*{pages})?\.?\s*",
+            rf"(?:{location},\s*){{0,2}}{year}(?:,\s*{pages})?\.?\s*"
+        )
+        if re.fullmatch(press_catalogue, remaining):
+            return True
+        series_press = re.fullmatch(
+            rf"(?P<series>[A-Z][A-Za-z'’\-]*(?:\s+(?:[A-Z][A-Za-z'’\-]*|"
+            rf"and|in|of|on|the)){{1,12}})\s+\d{{1,4}},\s*{press_catalogue}",
             remaining,
         )
-        if press is not None:
+        if series_press is not None and re.search(
+            r"\b(?:Series|Landmarks|Monographs|Lecture Notes)\b",
+            series_press.group("series"),
+        ):
             return True
 
         report = re.fullmatch(
@@ -4820,6 +4856,22 @@ class ScientificTranslator(BaseTranslator):
             remaining,
         )
         if collection is not None:
+            return True
+
+        # Conference proceedings/series can put the volume before publisher,
+        # publication place, and year.  Recognize that whole catalogue rather
+        # than using only the final year as the work-title boundary.  An
+        # arbitrary 'in a ...' phrase inside a title is not this structure.
+        catalogue_word = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*"
+        proceedings = re.fullmatch(
+            rf"[Ii]n\s+(?:Advances\s+in|Proceedings\s+of)\s+"
+            rf"{catalogue_word}(?:\s+(?:{catalogue_word}|and|for|in|of|on|the)){{1,12}}"
+            rf"\s+(?:[Vv]ol\.?\s+)?\d{{1,4}},\s*"
+            rf"{catalogue_word}(?:\s+{catalogue_word}){{0,5}},\s*"
+            rf"(?:{location},\s*){{1,2}}{year}(?:,\s*{pages})?\.?\s*",
+            remaining,
+        )
+        if proceedings is not None:
             return True
         # Some bibliographies give only a numeric publication month and year.
         # Validate the month and consume the entire field so "11 2022 methods"

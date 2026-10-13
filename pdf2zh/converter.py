@@ -846,6 +846,63 @@ def _release_reference_prose_fragments(segments, formulas, formula_paragraphs, p
         text_chars[paragraph_id].extend(char for char in chars if id(char) not in known)
 
 
+def _release_formula_case_explanations(segments, formulas, formula_paragraphs, paragraphs, text_chars):
+    """Return an ordinary-font '(in the ... case)' suffix to translated prose."""
+    for index, chars in enumerate(formulas):
+        if len(chars) < 4 or "".join(ch.get_text() for ch in chars[-3:]) != "(in":
+            continue
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            continue
+        source, marker = segments[paragraph_id], f"{{v{index}}}"
+        if source.count(marker) != 1:
+            continue
+        following = source[source.index(marker) + len(marker):]
+        phrase = re.match(r"\s+the\s+(?:[A-Za-z-]+\s+){0,4}(?:case|setting|regime|limit)(?:\)|\{v(?P<closer>\d+)\})", following)
+        if phrase is None:
+            continue
+        prefix, suffix = chars[:-3], chars[-3:]
+        joined = "".join(ch.get_text() for ch in chars)
+        em = float(paragraph.size)
+        if joined.count("(") <= joined.count(")") or em <= 0:
+            continue
+        if any(
+            getattr(ch, "_pdf2zh_layout_class", None) == 0
+            or not _is_non_math_text_font(ch.fontname)
+            or re.search(r"(?:Mono|Code|^CMTT|^CMITT)", _font_name(ch.fontname), re.I)
+            or not 0.9 * em <= ch.size <= 1.1 * em
+            or _is_non_horizontal_text_matrix(ch.matrix)
+            or abs(_char_baseline(ch) - _char_baseline(suffix[0])) > 0.15 * em
+            for ch in suffix
+        ):
+            continue
+        base = [ch for ch in prefix if 0.9 * em <= ch.size <= 1.1 * em]
+        if not base or not any(abs(_char_baseline(ch) - _char_baseline(suffix[0])) < 0.15 * em for ch in base):
+            continue
+        gap = suffix[0].x0 - max(ch.x1 for ch in prefix)
+        if not 0.12 * em < gap <= 0.7 * em:
+            continue
+        if any(not -0.1 * em <= b.x0 - a.x1 <= 0.2 * em for a, b in zip(suffix, suffix[1:])):
+            continue
+        closer_id = int(phrase['closer']) if phrase['closer'] is not None else None
+        if closer_id is not None:
+            if closer_id >= len(formulas) or formula_paragraphs[closer_id] != paragraph_id:
+                continue
+            closer = formulas[closer_id]
+            if (len(closer) != 1 or closer[0].get_text() != ")"
+                    or closer[0].fontname != suffix[0].fontname
+                    or abs(closer[0].size - em) > 0.1 * em
+                    or _is_non_horizontal_text_matrix(closer[0].matrix)
+                    or source.count(f"{{v{closer_id}}}") != 1):
+                continue
+            source = source.replace(f"{{v{closer_id}}}", ")", 1)
+            text_chars[paragraph_id].extend(closer)
+        formulas[index] = prefix
+        segments[paragraph_id] = source.replace(marker, marker + " (in", 1)
+        text_chars[paragraph_id].extend(suffix)
+
+
 def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, links):
     """Recover vector-drawn URI underscores using the source link and glyphs.
 
@@ -909,6 +966,72 @@ def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, link
             segments[index] = segments[index][:match.start()] + uri + segments[index][match.end():]
             for line in used_lines:
                 lines.remove(line)
+
+
+def _restore_wrapped_source_uris(segments, paragraphs, text_chars, links):
+    """Remove extraction spaces only at annotation-proven URI line wraps.
+
+    Every linked row must have contiguous source glyphs, and concatenating the
+    rows must exactly equal their common URI action. No visible character or
+    actual whitespace glyph is removed, and the original actions stay intact.
+    """
+    by_uri = {}
+    for uri, bounds in links:
+        if re.fullmatch(r"https?://[^\s<>]+", uri):
+            by_uri.setdefault(uri, []).append(bounds)
+    for uri, rectangles in by_uri.items():
+        if len(rectangles) < 2:
+            continue
+        for index, paragraph in enumerate(paragraphs):
+            if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+                continue
+            em = float(paragraph.size)
+            rows = []
+            for x0, y0, x1, y1 in rectangles:
+                chars = sorted((char for char in text_chars[index] if (
+                    x0 <= (char.x0 + char.x1) / 2 <= x1
+                    and y0 <= (char.y0 + char.y1) / 2 <= y1
+                )), key=lambda char: char.x0)
+                if not chars or any(
+                    len(char.get_text()) != 1 or char.get_text().isspace()
+                    or getattr(char, "_pdf2zh_layout_class", None) == 0
+                    or _is_non_horizontal_text_matrix(char.matrix)
+                    or not 0.9 * em <= char.size <= 1.1 * em
+                    for char in chars
+                ):
+                    break
+                baseline = _char_baseline(chars[0])
+                if (
+                    any(abs(_char_baseline(char) - baseline) > 0.15 * em for char in chars)
+                    or any(not -0.15 * em <= b.x0 - a.x1 <= 0.2 * em for a, b in zip(chars, chars[1:]))
+                    or abs(chars[0].x0 - x0) > 0.3 * em
+                    or abs(chars[-1].x1 - x1) > 0.3 * em
+                ):
+                    break
+                rows.append((baseline, "".join(char.get_text() for char in chars)))
+            if len(rows) != len(rectangles):
+                continue
+            rows.sort(reverse=True)
+            if (
+                any(not 0.7 * em <= a[0] - b[0] <= 2 * em for a, b in zip(rows, rows[1:]))
+                or "".join(row[1] for row in rows) != uri
+            ):
+                continue
+            pattern = re.compile(
+                r"(?<![A-Za-z0-9_/])" + r"\s+".join(re.escape(row[1]) for row in rows)
+                + r"(?![A-Za-z0-9_/%?#=&+\-]|\.[A-Za-z0-9])"
+            )
+            matches = list(pattern.finditer(segments[index]))
+            if len(matches) != 1:
+                continue
+            match = matches[0]
+            removed = [match.start() + offset for offset, value in enumerate(match[0]) if value.isspace()]
+            if hasattr(paragraph, "break_offsets"):
+                paragraph.break_offsets = [
+                    offset - sum(position < offset for position in removed)
+                    for offset in paragraph.break_offsets
+                ]
+            segments[index] = segments[index][:match.start()] + uri + segments[index][match.end():]
 
 
 def _release_standalone_prose_periods(
@@ -6383,12 +6506,17 @@ class TranslateConverter(PDFConverterEx):
             paragraph_text_chars,
         )
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
+        _release_formula_case_explanations(sstk, var, varp, pstk, paragraph_text_chars)
         if not self.vfont and not self.vchar:
             _release_tex_accented_prose_words(sstk, var, varp, pstk, paragraph_text_chars)
             _release_reference_prose_fragments(sstk, var, varp, pstk, paragraph_text_chars)
             _release_standalone_prose_periods(sstk, var, varp, pstk, paragraph_text_chars)
             _restore_drawn_uri_underscores(
                 sstk, pstk, paragraph_text_chars, lstk,
+                getattr(self, "source_uri_links", {}).get(ltpage.pageid, ()),
+            )
+            _restore_wrapped_source_uris(
+                sstk, pstk, paragraph_text_chars,
                 getattr(self, "source_uri_links", {}).get(ltpage.pageid, ()),
             )
         _release_caption_prose_delimiters(sstk, var, varp, pstk)

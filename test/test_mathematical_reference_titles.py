@@ -253,3 +253,99 @@ def test_anthology_container_cannot_be_translated_as_an_additional_title(authors
     )
     assert not accepted
     assert result == entry
+
+
+def test_proceedings_volume_publisher_and_location_are_outside_exact_title():
+    title = "Factor group-sparse regularization for efficient low-rank matrix recovery"
+    tail = (
+        "in Advances in Neural Information Processing Systems 32, "
+        "Curran Associates, Red Hook, NY, 2019."
+    )
+    entry = f"[29] J. Fan, L. Ding, Y. Chen, and M. Udell, {title}, {tail}"
+    translator = translator_stub()
+    requested = []
+
+    def exact_request(titles):
+        requested.extend(titles)
+        return ["用于高效低秩矩阵恢复的因子组稀疏正则化"]
+
+    translator._run_exact_reference_title_batch = exact_request
+    translator._run_discovered_reference_title_batch = lambda entries: pytest.fail(
+        "complete proceedings catalogue must yield the exact work title"
+    )
+    replacements = translator._run_reference_title_batch([entry])[0]
+    assert requested == [title]
+    result, accepted = translator._apply_reference_title_replacements(entry, replacements)
+    assert accepted
+    assert result == entry.replace(title, "用于高效低秩矩阵恢复的因子组稀疏正则化")
+    assert result.endswith(tail)
+
+    # Actual erroneous response from the first final candidate: publisher and
+    # location text survived, but the model translated the proceedings name.
+    consumed_metadata = f"{title}, {tail.rsplit(', 2019.', 1)[0]}"
+    result, accepted = translator._apply_reference_title_replacements(
+        entry, [ExactReplacement(
+            consumed_metadata,
+            "用于高效低秩矩阵恢复的因子组稀疏正则化，载于《神经信息处理系统进展》"
+            "第32卷，Curran Associates，Red Hook，NY",
+        )]
+    )
+    assert not accepted
+    assert result == entry
+
+
+@pytest.mark.parametrize("tail", [
+    "in a scalable framework, 2019.",
+    "in Advances in theoretical methods 32, Curran Associates, Red Hook, NY, 2019.",
+    "in Advances in Neural Information Processing Systems 32, new algorithms, 2019.",
+    "in Advances in Neural Information Processing Systems 32, Curran Associates, Red Hook, NY, 2019, new applications.",
+])
+def test_title_prose_does_not_become_proceedings_metadata(tail):
+    assert not CodexTranslator._reference_complete_metadata_tail_is_safe(tail)
+    entry = f"[1] A. Smith, Learning methods {tail}"
+    assert CodexTranslator._structured_reference_title_spans(entry) != ("Learning methods",)
+
+
+def test_proceedings_catalogue_never_truncates_in_a_title_phrase():
+    title = "Learning methods in a scalable framework"
+    tail = (
+        "in Advances in Neural Information Processing Systems 32, "
+        "Curran Associates, Red Hook, NY, 2019."
+    )
+    entry = f"[1] A. Smith, {title}, {tail}"
+    assert CodexTranslator._structured_reference_title_spans(entry) == (title,)
+    result, accepted = translator_stub()._apply_reference_title_replacements(
+        entry, [ExactReplacement("Learning methods", "学习方法")]
+    )
+    assert not accepted
+    assert result == entry
+
+
+def test_comma_author_preference_keeps_book_series_outside_the_work_title():
+    title = "Convex Analysis"
+    tail = (
+        "Princeton Landmarks in Mathematics and Physics 11, "
+        "Princeton University Press, Princeton, NJ, 1997."
+    )
+    entry = f"[46] R. T. Rockafellar, {title}, {tail} "
+    assert CodexTranslator._structured_reference_title_spans(entry) == (title,)
+    result, accepted = translator_stub()._apply_reference_title_replacements(
+        entry, [ExactReplacement(title, "凸分析")]
+    )
+    assert accepted
+    assert result == entry.replace(title, "凸分析")
+
+
+def test_book_series_rule_cannot_skip_an_ordinary_second_title_clause():
+    entry = (
+        "[46] A. Smith, Convex Analysis, New Applications in Optimization 11, "
+        "Princeton University Press, Princeton, NJ, 1997."
+    )
+    assert not CodexTranslator._reference_complete_metadata_tail_is_safe(
+        entry.split("Convex Analysis, ")[1]
+    )
+    result, accepted = translator_stub()._apply_reference_title_replacements(
+        entry, [ExactReplacement("Convex Analysis", "凸分析")]
+    )
+    assert not accepted
+    assert result == entry
