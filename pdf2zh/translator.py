@@ -2980,10 +2980,42 @@ class ScientificTranslator(BaseTranslator):
         return rebalanced
 
     @classmethod
+    def _formula_order_preserves_labelled_relations(cls, source: str, target: str) -> bool:
+        """Allow a local Chinese norm qualifier to precede its Lipschitz bound.
+
+        Both labels must still name the exact original formulas, which must be
+        unique adjacent tokens. Every other formula stays in source order.
+        This validates prose order only; it never rewrites text or formula data.
+        """
+        expected = cls._formula_token_sequence(source)
+        actual = list(cls._formula_token_sequence(target))
+        if tuple(actual) == expected:
+            return True
+        token = r"\{v\d+\}"
+        for match in re.finditer(
+            rf"(?P<bound>{token})\s*[-–]?\s*Lipschitz\s+"
+            rf"(?:w\.\s*r\.\s*t\.|with\s+respect\s+to)\s+(?:the\s+)?"
+            rf"(?P<norm>{token})\s+norm\b", source, re.I
+        ):
+            bound, norm = match['bound'], match['norm']
+            if any(expected.count(t) != 1 or actual.count(t) != 1 for t in (bound, norm)):
+                continue
+            index = actual.index(norm)
+            if index + 1 >= len(actual) or actual[index + 1] != bound:
+                continue
+            norm_label = re.escape(norm) + r"\s*(?:范数|範數|范數)"
+            bound_label = re.escape(bound) + r"\s*[-–]?\s*Lipschitz\b"
+            qualifier = r"\s*(?:的|是|为|為|下(?:是|为|為)?|(?:意义下|意義下|而言)(?:是|为|為))\s*"
+            if re.search(norm_label + qualifier + bound_label, target) is None:
+                continue
+            actual[index:index + 2] = [bound, norm]
+        return tuple(actual) == expected
+
+    @classmethod
     def _validate_formula_translation(cls, source: str, target: str) -> bool:
         if not isinstance(target, str) or not target.strip():
             return False
-        if cls._formula_token_sequence(source) != cls._formula_token_sequence(target):
+        if not cls._formula_order_preserves_labelled_relations(source, target):
             return False
         if not cls._validate_compact_formula_adjacency(source, target):
             return False
@@ -4524,6 +4556,8 @@ class ScientificTranslator(BaseTranslator):
         source_title: str,
         translated_title: str,
     ) -> bool:
+        if has_suspicious_physics_translation(source_title, translated_title):
+            return True
         # "Low-rank" is one source word to the general English detector, so
         # the partial translation "低-rank" otherwise escapes its exact-word
         # comparison.  Rank in these mathematical constructions is ordinary

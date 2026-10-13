@@ -71,6 +71,12 @@ def has_suspicious_physics_translation(source: str, target: str) -> bool:
     """
     source = _strip_non_prose(source)
     target = _strip_non_prose(target)
+    if (
+        re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", source, re.I)
+        and not re.search(r"\bproximal\b", source, re.I)
+        and re.search(r"近端(?:量子)?(?:处理器|處理器)", target)
+    ):
+        return True
     if re.search(r"\bconstructive\s+interference\b", source, re.I) and re.search(
         r"建设性干涉|建設性干涉", target
     ):
