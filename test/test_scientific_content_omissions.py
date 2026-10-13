@@ -90,5 +90,8 @@ def test_iid_adjective_does_not_leave_a_detached_gaussian_noun_phrase():
     translator = translator_stub()
     assert translator._accepted_translation(source, "元素均为独立同分布的（i.i.d.）。经过适当缩放的高斯随机变量。") is None
     assert translator._accepted_translation(source, "元素均为独立同分布（i.i.d.）的。经过适当缩放的高斯随机变量。") is None
+    assert translator._accepted_translation(source, "元素均为独立同分布的（i.i.d.）。具有适当缩放的高斯随机变量。") is None
+    assert translator._accepted_translation(source, "元素均为独立同分布的（i.i.d.）。适当缩放后的高斯随机变量（见第4.1小节）。") is None
+    assert translator._accepted_translation(source, "元素是独立同分布的（i.i.d.）。这些经过适当缩放的高斯随机变量满足条件。") is not None
     assert translator._accepted_translation(source, "元素均为经过适当缩放的独立同分布（i.i.d.）高斯随机变量。") is not None
     assert translator._accepted_translation(source, "元素是独立同分布的（i.i.d.）。它们是经过适当缩放的高斯随机变量。") is not None

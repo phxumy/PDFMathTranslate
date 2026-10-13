@@ -211,7 +211,8 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
         return True
     if re.search(r"\bi\.\s*i\.\s*d\.\s+Gaussian\s+random\s+variables\b", source, re.I) and re.search(
         r"(?:独立同分布|獨立同分布)(?:的)?\s*\(\s*i\.\s*i\.\s*d\.\s*\)\s*(?:的)?\s*[。.!！]\s*"
-        r"(?:经过适当缩放的|經過適當縮放的)?高斯(?:随机变量|隨機變量)", target, re.I
+        r"(?:(?!它们|它們|这些|這些|它是|其为|其為|是|为|為)[^。.!！?？;；]){0,60}?"
+        r"高斯(?:随机变量|隨機變量)\s*(?:\([^()]{0,80}\))?\s*[。.!！]", target, re.I
     ):
         return True
     concepts = (

@@ -1271,8 +1271,10 @@ class ScientificTranslator(BaseTranslator):
             "captions or drop a sensitivity, maximum, or comparison. Preserve the "
             "scope of negation and of constructions such as 'not only ... but ...'. "
             "Keep distribution adjectives attached to the random variables they "
-            "describe, even when abbreviations contain periods. Keep each formula's "
-            "scientific role: a Lipschitz constant must not become the norm. "
+            "describe, even when abbreviations contain periods. In particular, "
+            "'i.i.d. Gaussian random variables' is one noun phrase; "
+            "never put a sentence break between the distribution and its variables. "
+            "Keep each formula's scientific role: a Lipschitz constant must not become the norm. "
             "In quantum-state contexts, population means state occupation "
             "(Chinese: 布居), not demographic population; use the terminology "
             "appropriate to the scientific context. "
@@ -3029,7 +3031,7 @@ class ScientificTranslator(BaseTranslator):
             index = actual.index(norm)
             if index + 1 >= len(actual) or actual[index + 1] != bound:
                 continue
-            qualifier = r"\s*(?:的|是|为|為|下(?:是|为|為)?|(?:意义下|意義下|而言)(?:是|为|為))\s*"
+            qualifier = r"\s*(?:的|是|为|為|满足|滿足|下(?:是|为|為|满足|滿足)?|(?:意义下|意義下|而言)(?:是|为|為|满足|滿足))\s*"
             if re.search(norm_label + qualifier + bound_label, target) is None:
                 continue
             actual[index:index + 2] = [bound, norm]

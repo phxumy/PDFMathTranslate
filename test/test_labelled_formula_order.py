@@ -14,6 +14,7 @@ SOURCE = "Thus, if {v64} is {v65}Lipschitz w.r.t. the {v66} norm, the output {v6
     "若{v64}相对于{v66}范数而言是{v65}-Lipschitz 连续的，则输出{v67}的次优性上界为",
     "若{v64}是{v65}Lipschitz连续的（关于{v66}范数），输出{v67}的次优性上界为",
     "若{v64}是{v65}利普希茨连续的（关于范数{v66}），输出{v67}的次优性上界为",
+    "因此，如果{v64}关于{v66}范数满足{v65}Lipschitz 条件，则输出{v67}的次优性上界为",
 ])
 def test_norm_qualifier_order_preserves_each_labelled_mathematical_object(target):
     assert CodexTranslator._validate_formula_translation(SOURCE, target)
