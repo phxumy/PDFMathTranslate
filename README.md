@@ -47,16 +47,24 @@ English | [简体中文](docs/README_zh-CN.md) | [繁體中文](docs/README_zh-T
 The ready-to-use package is for **Windows 10/11 x64** and does not require
 Python.
 
-- **Recommended:** [download the latest desktop ZIP with offline layout assets](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-win64-with-assets.zip)
+- **Recommended:** [download the Windows EXE installer with offline layout assets](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-Setup-win64.exe)
 - [Open the latest release page and SHA-256 checksums](https://github.com/phxumy/PDFMathTranslate/releases/latest)
 - [Read the detailed Chinese desktop guide](./docs/DESKTOP_APP_zh-CN.md)
 
 Quick start:
 
-1. Download the ZIP above and extract the entire archive to a normal folder. Do not run the program from inside the ZIP preview.
-2. To use Codex, double-click `Login-Codex.cmd` once and complete the official browser sign-in. Skip this step if you only use another translation service.
-3. Double-click `PDFMathTranslate-Codex.exe`.
-4. Choose `Codex` under **Service**, upload a PDF, and start translating.
+1. Download and run `PDFMathTranslate-Codex-Setup-win64.exe`. The installer creates a Start menu shortcut and an uninstaller.
+2. Launch **PDFMathTranslate Codex Studio** and click **登录 Codex** inside the app. Complete the official browser sign-in; the app updates the login status automatically.
+3. Upload a PDF, choose languages and pages, then click **Translate**.
+4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
+
+### New in v1.9.11-codex.5
+
+- In-app Codex account status, browser/device-code login, and login cancellation.
+- Adjustable batch concurrency (default 4), a **2× concurrency** option, and an independent **Codex Fast mode** switch. Double concurrency does not guarantee half the elapsed time; Fast mode can consume more account allowance and requires model/account support.
+- Completed pages appear during standard translation, including cross-page paragraph handling. The full PDF replaces the page previews when final file generation completes. The experimental BabelDOC workflow still shows its PDF after completion.
+- Remaining time uses a rolling range from actually completed pages, excludes the first cold-start sample and waits for sufficient observations. Font processing and final PDF writing are shown as a separate stage.
+- A Windows EXE installer and explicit in-app GitHub updates, with size and SHA-256 verification before installation. Translation must finish or be cancelled before updating.
 
 The release includes the official **Codex CLI 0.145.0 program** so a separate
 Python or Codex installation is unnecessary. It does **not** include an account,
@@ -66,7 +74,10 @@ translation provider you select; Codex requests are sent to OpenAI according to
 the account that signs in. See the [official OpenAI Codex CLI documentation](https://developers.openai.com/codex/cli)
 for account and sign-in details.
 
-### Codex fields and model IDs (verified September 5, 2026)
+### Codex fields and model IDs
+
+Field defaults below apply to codex.5. The model table records the catalog
+checked on September 5, 2026; the account's current availability may differ.
 
 The Codex fields in the WebUI map to the bundled `codex exec` command as
 follows:
@@ -76,14 +87,18 @@ follows:
 | `CODEX_BIN` | Keep the fresh Release default, `codex`. This means automatic discovery and selects the bundled CLI first. If the field instead shows a full path ending in `codex-cli/x86_64-pc-windows-msvc/bin/codex.exe` inside the extracted Release, that is also correct. You may enter a full path to another `codex.exe`; do not enter a directory. | Treated as `codex`; the app searches the portable package, `CODEX_CLI_PATH`, `PATH`, and Codex Desktop in that order. An explicit missing path is an error and is not silently replaced. |
 | `CODEX_PROFILE` | Usually leave blank. To use a profile, enter only its exact name, such as `translation`, for `$CODEX_HOME/translation.config.toml`. | No `--profile` is passed. With the bundled CLI, the normal fast path also ignores user `config.toml` and user rules. Whitespace is not a blank value. |
 | `CODEX_MODEL` | Leave blank for automatic selection, or enter an exact model ID from the table below. | No `--model` is passed. With no profile, Codex selects the recommended model for the CLI/account rather than inheriting the model selected in Codex Desktop or user `config.toml`. On the bundled CLI 0.145.0 catalog checked on this date, that is normally `gpt-5.6-sol`, but it is not pinned and can change. With a profile, its/base configuration may supply the model. |
-| `CODEX_REASONING_EFFORT` | Enter `none`, `low`, `medium`, `high`, `xhigh`, or `max`, subject to model support. | The translator explicitly changes blank to `none` on every request. It does not inherit the CLI, model, or profile default. |
+| `CODEX_REASONING_EFFORT` | `low` (default), or a value supported by the selected model. | Starting in codex.5, blank means `low`; it overrides the CLI/model/profile default. Explicit `none` is only suitable for models that support it. |
 | `CODEX_TIMEOUT` | `120`, or a larger number of seconds for slow/long requests. | Treated as `120` seconds. |
 
 In short, blank `CODEX_MODEL` and blank `CODEX_REASONING_EFFORT` behave
 differently: the model is delegated to Codex, while reasoning is explicitly
-forced to `none`. If a profile is selected, an explicit model overrides the
-profile model, and the reasoning field (including blank -> `none`) overrides
+forced to `low`. If a profile is selected, an explicit model overrides the
+profile model, and the reasoning field (including blank -> `low`) overrides
 the profile reasoning setting.
+
+The desktop automatic-model configuration migrates the old `none` default to
+`low`, because current automatic models can reject `none`. Explicit model and
+profile choices retain their selected reasoning value.
 
 `CODEX_BIN` is only an executable path. It contains no developer account,
 allowance, or credentials; every user must sign in with their own account.
@@ -93,7 +108,7 @@ model ID, not a short nickname.
 
 | Official name | Exact `CODEX_MODEL` value | Intended use |
 | --- | --- | --- |
-| GPT-6 Astra | `gpt-6-astra` | OpenAI's most capable model for difficult end-to-end work. Rollout is still account-dependent. Its documented efforts are `low`, `medium`, `high`, `xhigh`, and `max`, so select at least `low` instead of leaving effort blank. |
+| GPT-6 Astra | `gpt-6-astra` | A model for difficult end-to-end work. Availability is account-dependent. Its documented efforts are `low`, `medium`, `high`, `xhigh`, and `max`; use `low` or a higher supported value. |
 | GPT-5.6 Sol | `gpt-5.6-sol` | Flagship model for complex reasoning and high-quality work. The moving alias `gpt-5.6` currently routes to Sol. |
 | GPT-5.6 Terra | `gpt-5.6-terra` | Balanced intelligence and cost for everyday work. |
 | GPT-5.6 Luna | `gpt-5.6-luna` | Fast, cost-efficient model for repeatable or high-volume work such as translation. |
@@ -120,7 +135,7 @@ This release validates reasoning values `none`, `low`, `medium`, `high`,
 `xhigh`, and `max`; it does not accept `ultra` in the PDF translation backend.
 Each model supports only a subset, and an unsupported model/effort combination
 fails rather than falling back. In particular, do not combine GPT-6 Astra with
-blank/`none`. Model availability still depends on the signed-in plan, workspace
+explicit `none`. Model availability still depends on the signed-in plan, workspace
 policy, region, and OpenAI rollout. See the [official OpenAI model catalog](https://developers.openai.com/api/docs/models),
 [GPT-6 Astra model page](https://developers.openai.com/api/docs/models/gpt-6-astra),
 the [official Codex models guide](https://learn.chatgpt.com/docs/models), and

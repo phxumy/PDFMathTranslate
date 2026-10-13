@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from collections import Counter
 from copy import copy
@@ -1255,13 +1256,42 @@ class ScientificTranslator(BaseTranslator):
     ) -> list[BatchResultT]:
         """Run the same precomputed batches serially or concurrently, in order."""
 
+        def run(batch):
+            self._check_cancellation()
+            return worker(batch)
+
         if len(batches) < 2 or self.max_concurrency == 1:
-            return [worker(batch) for batch in batches]
-        with concurrent.futures.ThreadPoolExecutor(
+            return [run(batch) for batch in batches]
+        # Keep only max_concurrency tasks submitted. A failed request must not
+        # leave a whole page's queued requests consuming the user's allowance.
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.max_concurrency, len(batches)),
             thread_name_prefix=f"pdf2zh-{self.name}",
-        ) as executor:
-            return list(executor.map(worker, batches))
+        )
+        pending = {}
+        results = [None] * len(batches)
+        next_index = 0
+        try:
+            while next_index < len(batches) or pending:
+                self._check_cancellation()
+                while next_index < len(batches) and len(pending) < self.max_concurrency:
+                    pending[executor.submit(run, batches[next_index])] = next_index
+                    next_index += 1
+                done, _ = concurrent.futures.wait(
+                    pending,
+                    timeout=0.2,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    results[pending.pop(future)] = future.result()
+            return results
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def _check_cancellation(self):
+        event = getattr(self, "cancellation_event", None)
+        if event is not None and event.is_set():
+            raise TranslationAbortedError("Translation cancelled.")
 
     @staticmethod
     def _scientific_fidelity_hint() -> str:
@@ -1817,7 +1847,10 @@ class ScientificTranslator(BaseTranslator):
 
     @staticmethod
     def _reference_semantic_context(texts: list[str]) -> str:
-        if any(re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", text, re.I) for text in texts):
+        if any(
+            re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", text, re.I)
+            for text in texts
+        ):
             return (
                 "Terminology context: near-term processors describes a time horizon, "
                 "meaning processors available now or in the near future; it does not "
@@ -2385,12 +2418,19 @@ class ScientificTranslator(BaseTranslator):
         result = {}
         for key in ("position", "left_math", "right_math"):
             value = context.get(key, "")
-            if not isinstance(value, str) or len(value) > 512 or any(
-                unicodedata.category(char).startswith("C") for char in value
+            if (
+                not isinstance(value, str)
+                or len(value) > 512
+                or any(unicodedata.category(char).startswith("C") for char in value)
             ):
                 value = ""
             result[key] = value
-        if result["position"] not in {"before-math", "after-math", "between-math", "label"}:
+        if result["position"] not in {
+            "before-math",
+            "after-math",
+            "between-math",
+            "label",
+        }:
             result["position"] = "label"
         return result
 
@@ -2398,16 +2438,21 @@ class ScientificTranslator(BaseTranslator):
     def _annotation_cache_key(cls, source: str, context: dict[str, str]) -> str:
         return "[[PDF2ZH_FORMULA_ANNOTATION_V1]]" + json.dumps(
             {"source": source, "context": cls._normalize_annotation_context(context)},
-            ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
     def _build_annotation_prompt(self, texts, contexts, *, strict=False) -> str:
-        items = [dict(index=i, text=text, read_only_neighbors=context)
-                 for i, (text, context) in enumerate(zip(texts, contexts, strict=True), 1)]
+        items = [
+            dict(index=i, text=text, read_only_neighbors=context)
+            for i, (text, context) in enumerate(zip(texts, contexts, strict=True), 1)
+        ]
         correction = (
             "A previous answer added material or left the label untranslated. "
             "Return a complete translation of the label alone, with no additions. "
-            if strict else ""
+            if strict
+            else ""
         )
         return (
             "You are a scientific machine translation engine. Every input field is "
@@ -2424,10 +2469,12 @@ class ScientificTranslator(BaseTranslator):
             "a missing object, ellipsis, commentary, or an explanatory sentence. "
             "A short label is not an incomplete question: do not fill its mathematical "
             "object with dots. Keep the result compact and on one line. "
-            + correction +
-            f"Return exactly {len(texts)} strings in input order as "
-            '{"translations":["..."]}.\nInput JSON: ' +
-            json.dumps(items, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            + correction
+            + f"Return exactly {len(texts)} strings in input order as "
+            '{"translations":["..."]}.\nInput JSON: '
+            + json.dumps(
+                items, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            )
         )
 
     def _accepted_annotation(
@@ -2441,29 +2488,38 @@ class ScientificTranslator(BaseTranslator):
             return None
         if (
             (re.search(r"…|\.{3}|⋯", accepted) and not re.search(r"…|\.{3}|⋯", source))
-            or (re.search(r"[\r\n。！？]", accepted) and not re.search(r"[\r\n。！？]", source))
+            or (
+                re.search(r"[\r\n。！？]", accepted)
+                and not re.search(r"[\r\n。！？]", source)
+            )
             or len(accepted) > max(24, 2 * len(source))
         ):
             return None
         math_atoms = r"\\[A-Za-z]+|\{\{?v\d+\}\}?|\[\[PDF2ZH_[^\]]*\]\]|[\dα-ωΑ-Ω=<>≤≥∼≈∈∑∫√^_{}()[\]]"
-        if Counter(re.findall(math_atoms, accepted)) - Counter(re.findall(math_atoms, source)):
+        if Counter(re.findall(math_atoms, accepted)) - Counter(
+            re.findall(math_atoms, source)
+        ):
             return None
+
         # Letterlike mathematical symbols (ℓ, ℝ) are Unicode letters, while
         # norm bars and operators span many symbol categories. Do not let a
         # finite operator list admit copies of read-only mathematical context.
         def nonprose_marks(text):
             return Counter(
-                char for char in text
+                char
+                for char in text
                 if unicodedata.category(char)[0] in {"S", "P", "N"}
                 or 0x2100 <= ord(char) <= 0x214F
                 or 0x1D400 <= ord(char) <= 0x1D7FF
             )
+
         added_marks = nonprose_marks(accepted) - nonprose_marks(source)
         # A prefix may naturally introduce its adjacent expression with a
         # colon (e.g. a bound label). Allow only that one terminal separator;
         # a suffix/standalone label or a colon followed by commentary cannot.
         if (
-            context and context.get("position") == "before-math"
+            context
+            and context.get("position") == "before-math"
             and context.get("right_math", "").strip()
             and accepted.endswith((":", "："))
             and added_marks == Counter({accepted[-1]: 1})
@@ -2472,8 +2528,13 @@ class ScientificTranslator(BaseTranslator):
         if added_marks:
             return None
         if self._checks_english_residue():
-            source_words = {word.casefold() for word in re.findall(r"[A-Za-z]+", source)}
-            if any(word.casefold() not in source_words for word in re.findall(r"[A-Za-z]+", accepted)):
+            source_words = {
+                word.casefold() for word in re.findall(r"[A-Za-z]+", source)
+            }
+            if any(
+                word.casefold() not in source_words
+                for word in re.findall(r"[A-Za-z]+", accepted)
+            ):
                 return None
         return accepted
 
@@ -2482,13 +2543,19 @@ class ScientificTranslator(BaseTranslator):
             return self._execute_codex_request(
                 self._build_annotation_prompt(texts, contexts, strict=strict),
                 self.batch_output_schema,
-                lambda output_path: self._load_batch_translations(output_path, len(texts)),
+                lambda output_path: self._load_batch_translations(
+                    output_path, len(texts)
+                ),
             )
         except (CodexOutputError, CodexTimeoutError):
             if len(texts) == 1:
                 return [None]
             middle = len(texts) // 2
-            return self._run_annotation_batch(texts[:middle], contexts[:middle], strict=strict) + self._run_annotation_batch(texts[middle:], contexts[middle:], strict=strict)
+            return self._run_annotation_batch(
+                texts[:middle], contexts[:middle], strict=strict
+            ) + self._run_annotation_batch(
+                texts[middle:], contexts[middle:], strict=strict
+            )
 
     def translate_formula_annotations(self, texts, contexts, ignore_cache=False):
         """Translate fixed labels using isolated, geometry-context-sensitive cache."""
@@ -2500,9 +2567,13 @@ class ScientificTranslator(BaseTranslator):
         for index, (source, context) in enumerate(zip(texts, contexts, strict=True)):
             key = self._annotation_cache_key(source, context)
             if not (self.ignore_cache or ignore_cache):
-                results[index] = self._accepted_annotation(source, self.cache.get(key), context)
+                results[index] = self._accepted_annotation(
+                    source, self.cache.get(key), context
+                )
             if results[index] is None:
-                pending.append((index, json.dumps({"text": source, "context": context})))
+                pending.append(
+                    (index, json.dumps({"text": source, "context": context}))
+                )
         for batch in self._chunk_batch(pending):
             indices = [index for index, _ in batch]
             targets = self._run_annotation_batch(
@@ -2511,17 +2582,22 @@ class ScientificTranslator(BaseTranslator):
             for i, target in zip(indices, targets, strict=True):
                 accepted = self._accepted_annotation(texts[i], target, contexts[i])
                 if accepted is None:
-                    retry = self._run_annotation_batch([texts[i]], [contexts[i]], strict=True)[0]
+                    retry = self._run_annotation_batch(
+                        [texts[i]], [contexts[i]], strict=True
+                    )[0]
                     accepted = self._accepted_annotation(texts[i], retry, contexts[i])
                 if accepted is None:
                     logger.warning(
                         "Formula annotation translation was invalid; preserving source "
-                        "without caching: %r", texts[i],
+                        "without caching: %r",
+                        texts[i],
                     )
                     results[i] = texts[i]
                 else:
                     results[i] = accepted
-                    self.cache.set(self._annotation_cache_key(texts[i], contexts[i]), accepted)
+                    self.cache.set(
+                        self._annotation_cache_key(texts[i], contexts[i]), accepted
+                    )
         return results
 
     def translate_batch_with_formula_contexts(
@@ -3003,7 +3079,9 @@ class ScientificTranslator(BaseTranslator):
         return rebalanced
 
     @classmethod
-    def _formula_order_preserves_labelled_relations(cls, source: str, target: str) -> bool:
+    def _formula_order_preserves_labelled_relations(
+        cls, source: str, target: str
+    ) -> bool:
         """Allow a local Chinese norm qualifier to precede its Lipschitz bound.
 
         Both labels must still name the exact original formulas, which must be
@@ -3016,17 +3094,29 @@ class ScientificTranslator(BaseTranslator):
         for match in re.finditer(
             rf"(?P<bound>{token})\s*[-–]?\s*Lipschitz\s+"
             rf"(?:w\.\s*r\.\s*t\.|with\s+respect\s+to)\s+(?:the\s+)?"
-            rf"(?P<norm>{token})\s+norm\b", source, re.I
+            rf"(?P<norm>{token})\s+norm\b",
+            source,
+            re.I,
         ):
-            bound, norm = match['bound'], match['norm']
-            if any(expected.count(t) != 1 or actual.count(t) != 1 for t in (bound, norm)):
+            bound, norm = match["bound"], match["norm"]
+            if any(
+                expected.count(t) != 1 or actual.count(t) != 1 for t in (bound, norm)
+            ):
                 continue
             norm_label = re.escape(norm) + r"\s*(?:范数|範數|范數)"
-            bound_label = re.escape(bound) + r"\s*[-–]?\s*(?:Lipschitz(?![A-Za-z])|利普希茨)"
+            bound_label = (
+                re.escape(bound) + r"\s*[-–]?\s*(?:Lipschitz(?![A-Za-z])|利普希茨)"
+            )
             if re.search(cls.CJK_CHAR_RE, target):
                 explicit_norm = norm_label + r"|(?:范数|範數|范數)\s*" + re.escape(norm)
-                explicit_bound = bound_label + r"|(?:Lipschitz|利普希茨)(?:连续性|連續性)?(?:常数|常數|系数|係數)\s*(?:为|為|是)?\s*" + re.escape(bound)
-                if not re.search(explicit_norm, target) or not re.search(explicit_bound, target):
+                explicit_bound = (
+                    bound_label
+                    + r"|(?:Lipschitz|利普希茨)(?:连续性|連續性)?(?:常数|常數|系数|係數)\s*(?:为|為|是)?\s*"
+                    + re.escape(bound)
+                )
+                if not re.search(explicit_norm, target) or not re.search(
+                    explicit_bound, target
+                ):
                     return False
             index = actual.index(norm)
             if index + 1 >= len(actual) or actual[index + 1] != bound:
@@ -3034,7 +3124,7 @@ class ScientificTranslator(BaseTranslator):
             qualifier = r"\s*(?:的|是|为|為|满足|滿足|下(?:是|为|為|满足|滿足)?|(?:意义下|意義下|而言)(?:是|为|為|满足|滿足))\s*"
             if re.search(norm_label + qualifier + bound_label, target) is None:
                 continue
-            actual[index:index + 2] = [bound, norm]
+            actual[index : index + 2] = [bound, norm]
         return tuple(actual) == expected
 
     @classmethod
@@ -4083,9 +4173,13 @@ class ScientificTranslator(BaseTranslator):
             return None
         if not source_left and not source_right:
             return None
-        if any(bool(source) != bool(target) for source, target in (
-            (source_left, target_left), (source_right, target_right)
-        )):
+        if any(
+            bool(source) != bool(target)
+            for source, target in (
+                (source_left, target_left),
+                (source_right, target_right),
+            )
+        ):
             return None
         one_sided = not source_left or not source_right
         if (
@@ -4099,21 +4193,27 @@ class ScientificTranslator(BaseTranslator):
             logical_entry = left_entry + right_prefix
             source_title = source_left + source_right
             title_start = logical_entry.find(source_title)
-            metadata = logical_entry[title_start + len(source_title):].lstrip(
+            metadata = logical_entry[title_start + len(source_title) :].lstrip(
                 " \t\r\n\"'’”)]}》」』】.,;:!?—–-"
             )
             if (
                 not looks_like_reference_title_prefix(logical_entry[:title_start])
-                or not self._reference_title_boundary_is_safe(logical_entry, source_title)
-                or not self._reference_metadata_tail_is_safe(metadata, require_complete=True)
+                or not self._reference_title_boundary_is_safe(
+                    logical_entry, source_title
+                )
+                or not self._reference_metadata_tail_is_safe(
+                    metadata, require_complete=True
+                )
             ):
                 return None
         normalized_left = self._normalize_translation_output(target_left)
         normalized_right = self._normalize_translation_output(target_right)
         if not all(
-            (not source and not target) or self._validate_formula_translation(source, target)
+            (not source and not target)
+            or self._validate_formula_translation(source, target)
             for source, target in (
-                (source_left, normalized_left), (source_right, normalized_right)
+                (source_left, normalized_left),
+                (source_right, normalized_right),
             )
         ):
             return None
@@ -4153,12 +4253,17 @@ class ScientificTranslator(BaseTranslator):
             return None
         replacement = replacements[0]
         boundary = self.REFERENCE_BOUNDARY_TOKEN
-        if boundary not in replacement.source and boundary not in replacement.translated:
+        if (
+            boundary not in replacement.source
+            and boundary not in replacement.translated
+        ):
             # A column/page boundary may separate the author block from the
             # entire title, or the complete title from publication metadata.
             # Certify the combined entry before overriding only that one side.
             logical_entry = left_entry + right_prefix
-            _, valid = self._apply_reference_title_replacements(logical_entry, replacements)
+            _, valid = self._apply_reference_title_replacements(
+                logical_entry, replacements
+            )
             if not valid:
                 return None
             if right_prefix.startswith(replacement.source):
@@ -4170,9 +4275,14 @@ class ScientificTranslator(BaseTranslator):
             else:
                 return None
             return self._validated_reference_continuation_payload(
-                left_entry, right_prefix,
-                dict(source_left=left_source, target_left=left_target,
-                     source_right=right_source, target_right=right_target),
+                left_entry,
+                right_prefix,
+                dict(
+                    source_left=left_source,
+                    target_left=left_target,
+                    source_right=right_source,
+                    target_right=right_target,
+                ),
             )
         if (
             replacement.source.count(boundary) != 1
@@ -4289,32 +4399,48 @@ class ScientificTranslator(BaseTranslator):
             forward: dict[str, str] = {}
             for match in self.FORMULA_TOKEN_RE.finditer(fragment):
                 token = match.group()
-                if token not in formulas or not formulas[token] or formulas[token] == "<missing>":
+                if (
+                    token not in formulas
+                    or not formulas[token]
+                    or formulas[token] == "<missing>"
+                ):
                     return None
                 if token not in forward:
                     scoped = f"{{v{len(context)}}}"
                     forward[token] = scoped
                     context[scoped] = formulas[token]
-            scoped_fragments.append(self.FORMULA_TOKEN_RE.sub(
-                lambda match: forward[match.group()], fragment
-            ))
+            scoped_fragments.append(
+                self.FORMULA_TOKEN_RE.sub(
+                    lambda match: forward[match.group()], fragment
+                )
+            )
             reverse_maps.append({value: key for key, value in forward.items()})
         replacements = self._translate_reference_continuation_fragments(
-            *scoped_fragments, ignore_cache=ignore_cache,
+            *scoped_fragments,
+            ignore_cache=ignore_cache,
             formula_context=json.dumps(context, ensure_ascii=False, sort_keys=True),
         )
         if replacements is None:
             return None
         restored = []
         for replacement, reverse in zip(replacements, reverse_maps, strict=True):
-            if any(match.group() not in reverse for match in self.FORMULA_TOKEN_RE.finditer(
-                replacement.source + replacement.translated
-            )):
+            if any(
+                match.group() not in reverse
+                for match in self.FORMULA_TOKEN_RE.finditer(
+                    replacement.source + replacement.translated
+                )
+            ):
                 return None
-            restored.append(ExactReplacement(*(
-                self.FORMULA_TOKEN_RE.sub(lambda match: reverse[match.group()], text)
-                for text in (replacement.source, replacement.translated)
-            )))
+            restored.append(
+                ExactReplacement(
+                    *(
+                        self.FORMULA_TOKEN_RE.sub(
+                            lambda match: reverse[match.group()], text
+                        )
+                        for text in (replacement.source, replacement.translated)
+                    )
+                )
+            )
         return tuple(restored)
 
     def _translate_reference_continuation_fragments(
@@ -4329,7 +4455,10 @@ class ScientificTranslator(BaseTranslator):
         if not left_entry.strip() or not right_prefix.strip():
             return None
         unsafe_marker = (
-            (not formula_context and self.FORMULA_TOKEN_RE.search(left_entry + right_prefix) is not None)
+            (
+                not formula_context
+                and self.FORMULA_TOKEN_RE.search(left_entry + right_prefix) is not None
+            )
             or self.ITALIC_TAG_PREFIX in left_entry + right_prefix
             or self.FLOW_TOKEN_PREFIX in left_entry + right_prefix
             or "[[PDF2ZH_REF_BOUNDARY_" in left_entry + right_prefix
@@ -4404,7 +4533,9 @@ class ScientificTranslator(BaseTranslator):
         # These complete container names are ordinary capitalized nouns, with
         # neither an abbreviation dot nor a generic journal-word signal.
         if compact in {
-            "Quantum", "PRX Quantum", "Biometrika",
+            "Quantum",
+            "PRX Quantum",
+            "Biometrika",
             # This established journal subtitle includes punctuation that the
             # general venue grammar must reject in leftover work-title prose.
             "Sci. China: Phys., Mech. Astron",
@@ -4593,7 +4724,9 @@ class ScientificTranslator(BaseTranslator):
         # prose, unlike a named algorithm such as PhaseLift.
         if re.search(
             r"\b(?:low[-\s]+rank|rank[-\s]+one)\b", source_title, re.IGNORECASE
-        ) and re.search(r"(?<![A-Za-z])rank(?![A-Za-z])", translated_title, re.IGNORECASE):
+        ) and re.search(
+            r"(?<![A-Za-z])rank(?![A-Za-z])", translated_title, re.IGNORECASE
+        ):
             return True
         if not has_suspicious_reference_title_residue(
             source_title,
@@ -4637,9 +4770,10 @@ class ScientificTranslator(BaseTranslator):
         for match in accent_name.finditer(source_title):
             name = match.group(0)
             target_name = re.compile(re.escape(name).replace(r"\ ", r"\s*"))
-            if source_title.count(name) == 1 and len(
-                target_name.findall(translated_title)
-            ) == 1:
+            if (
+                source_title.count(name) == 1
+                and len(target_name.findall(translated_title)) == 1
+            ):
                 visible_name = re.sub(
                     r"[-–]\s+", "-", cls.FORMULA_TOKEN_RE.sub("", name)
                 )
@@ -4724,12 +4858,11 @@ class ScientificTranslator(BaseTranslator):
         present in the source, so this does not exempt adjoining English prose.
         """
 
-        target_words = re.findall(
-            r"[A-Za-z]+(?:['’\-–][A-Za-z]+)*", translated_title
-        )
-        if len(target_words) != 1 or re.search(
-            r"[\u3400-\u4dbf\u4e00-\u9fff]", translated_title
-        ) is None:
+        target_words = re.findall(r"[A-Za-z]+(?:['’\-–][A-Za-z]+)*", translated_title)
+        if (
+            len(target_words) != 1
+            or re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", translated_title) is None
+        ):
             return False
         name = target_words[0].casefold()
         if name not in {"lasso", "phaselift"}:
@@ -5370,8 +5503,10 @@ class CodexTranslator(ScientificTranslator):
         "CODEX_BIN": "codex",
         "CODEX_PROFILE": None,
         "CODEX_MODEL": None,
-        "CODEX_REASONING_EFFORT": "none",
+        "CODEX_REASONING_EFFORT": "low",
         "CODEX_TIMEOUT": "120",
+        "CODEX_FAST_MODE": "false",
+        "CODEX_MAX_CONCURRENCY": None,
     }
     REQUIRED_EXEC_FLAGS = {
         "--skip-git-repo-check",
@@ -5392,7 +5527,8 @@ class CodexTranslator(ScientificTranslator):
         if not model:
             model = self.envs["CODEX_MODEL"]
         self.reasoning_effort = (
-            str(self.envs.get("CODEX_REASONING_EFFORT") or "none").strip().lower()
+            str(self.envs.get("CODEX_REASONING_EFFORT") or "low").strip().lower()
+            or "low"
         )
         if self.reasoning_effort not in self.SUPPORTED_REASONING_EFFORTS:
             supported = ", ".join(sorted(self.SUPPORTED_REASONING_EFFORTS))
@@ -5401,6 +5537,13 @@ class CodexTranslator(ScientificTranslator):
                 f"{self.reasoning_effort!r}; expected one of: {supported}."
             )
         super().__init__(lang_in, lang_out, model, prompt, ignore_cache)
+        self.fast_mode = str(self.envs.get("CODEX_FAST_MODE") or "false").lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+        }
+        self.set_concurrency(1)
         configured_codex_bin = self.envs["CODEX_BIN"] or "codex"
         self.codex_bin = find_codex_executable(configured_codex_bin)
         if self.codex_bin is None:
@@ -5420,6 +5563,14 @@ class CodexTranslator(ScientificTranslator):
         self.add_cache_impact_parameters("profile", self.profile)
         self.add_cache_impact_parameters("reasoning_effort", self.reasoning_effort)
         self.add_cache_impact_parameters("command_mode", self.preferred_command_mode)
+
+    def set_concurrency(self, value: int | str | None) -> None:
+        """An explicit Codex limit overrides the general GUI thread setting."""
+        configured = self.envs.get("CODEX_MAX_CONCURRENCY")
+        if configured not in (None, ""):
+            value = configured
+        super().set_concurrency(value)
+        self.max_concurrency = min(self.max_concurrency, 16)
 
     def _run_probe_command(self, args: list[str]) -> subprocess.CompletedProcess:
         try:
@@ -5534,6 +5685,16 @@ class CodexTranslator(ScientificTranslator):
                 f'model_reasoning_effort="{self.reasoning_effort}"',
             ]
         )
+        # The launch fast path above only skips unrelated CLI configuration.
+        # This is the separate, official model service tier selected by the UI.
+        command.extend(
+            ["--config", f"features.fast_mode={str(self.fast_mode).lower()}"]
+        )
+        if self.fast_mode:
+            command.extend(["--config", 'service_tier="fast"'])
+        else:
+            # Override a persisted /fast preference for a Standard translation.
+            command.extend(["--config", 'service_tier="default"'])
         command.extend(
             [
                 "--output-schema",
@@ -5553,6 +5714,7 @@ class CodexTranslator(ScientificTranslator):
     def _execute_codex_request(
         self, prompt_text: str, schema: dict, response_loader, mode_override: str = None
     ):
+        self._check_cancellation()
         with tempfile.TemporaryDirectory(prefix="pdf2zh-codex-") as workdir:
             schema_path = os.path.join(workdir, "output.schema.json")
             output_path = os.path.join(workdir, "output.json")
@@ -5566,18 +5728,7 @@ class CodexTranslator(ScientificTranslator):
                     prompt_text, schema_path, output_path, mode
                 )
                 try:
-                    result = subprocess.run(
-                        command,
-                        cwd=workdir,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=self.timeout,
-                        check=False,
-                        **codex_subprocess_window_kwargs(),
-                    )
+                    result = self._run_translation_command(command, workdir)
                 except FileNotFoundError as exc:
                     raise CodexPermanentError(
                         f"codex executable not found: {self.codex_bin}"
@@ -5606,6 +5757,54 @@ class CodexTranslator(ScientificTranslator):
                 raise last_error
 
             raise last_error
+
+    def _run_translation_command(self, command, workdir):
+        options = dict(
+            cwd=workdir,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **codex_subprocess_window_kwargs(),
+        )
+        if getattr(self, "cancellation_event", None) is None:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                timeout=self.timeout,
+                check=False,
+                **options,
+            )
+        from pdf2zh.codex_account import _terminate_process
+
+        self._check_cancellation()
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **options,
+        )
+        deadline = time.monotonic() + self.timeout
+        try:
+            while True:
+                self._check_cancellation()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, self.timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+                    self._check_cancellation()
+                    return subprocess.CompletedProcess(
+                        command, process.returncode, stdout, stderr
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            if process.poll() is None:
+                _terminate_process(process)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 class QwenMtTranslator(OpenAITranslator):

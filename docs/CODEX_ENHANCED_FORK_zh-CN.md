@@ -75,12 +75,12 @@ pdf2zh -i
 | `CODEX_BIN` | 保持全新 Release 默认的 `codex`，或填写本机 `codex.exe` 的完整路径 | `codex` 表示自动查找并优先选择包内 CLI；若界面显示解压目录中以 `codex-cli/x86_64-pc-windows-msvc/bin/codex.exe` 结尾的完整路径，也同样正确。留空与 `codex` 等效，之后才检查 `CODEX_CLI_PATH`、`PATH` 和 Codex Desktop。显式路径不存在时直接报错；不要只填目录。 |
 | `CODEX_PROFILE` | 留空 | 只填 profile 名，例如 `translation` 对应 `$CODEX_HOME/translation.config.toml`，不要填路径。留空时不传 `--profile`，且内置 CLI 的正常快速路径会忽略用户配置和规则；纯空格会被当作真实名称。 |
 | `CODEX_MODEL` | 留空，或下表中的精确 ID | 留空时不传 `--model`。未选 profile 时由 Codex/当前账户选择推荐模型，而不是继承桌面应用选择器或用户 `config.toml`；内置 CLI 0.145.0 在核对日通常选 `gpt-5.6-sol`，但没有被固定。选了 profile 时，其/基础配置可以提供模型。 |
-| `CODEX_REASONING_EFFORT` | `none`，或模型支持的其他值 | 空值会被本程序明确改成 `none`，每次都覆盖 CLI、模型、profile 和 `config.toml` 的默认值。后端允许 `none`、`low`、`medium`、`high`、`xhigh`、`max`，具体模型可能只支持其中一部分。 |
+| `CODEX_REASONING_EFFORT` | `low`（.5起默认），或模型支持的其他值 | 空值会被本程序明确改成 `low`，每次都覆盖 CLI、模型、profile 和 `config.toml` 的默认值。后端允许 `none`、`low`、`medium`、`high`、`xhigh`、`max`，具体模型可能只支持其中一部分。 |
 | `CODEX_TIMEOUT` | `120` | 留空也使用 `120` 秒；长段落或较慢网络可适当增加。 |
 
 最容易混淆的是两个空值：`CODEX_MODEL` 留空表示让 Codex 选择推荐模型，而
-`CODEX_REASONING_EFFORT` 留空表示本程序强制使用 `none`。如果选择了 profile，
-显式模型会覆盖 profile 模型，effort 字段（包括空值变成的 `none`）也会覆盖 profile
+`CODEX_REASONING_EFFORT` 留空表示本程序强制使用 `low`。如果选择了 profile，
+显式模型会覆盖 profile 模型，effort 字段（包括空值变成的 `low`）也会覆盖 profile
 中的推理强度。
 
 `CODEX_BIN` 显示的是可执行程序路径，不包含开发者的账号、额度或登录凭据。下载者仍须
@@ -90,7 +90,7 @@ pdf2zh -i
 
 | 官方名称 | `CODEX_MODEL` 精确值 | 说明 |
 | --- | --- | --- |
-| GPT-6 Astra | `gpt-6-astra` | OpenAI 当前能力最强的端到端工作模型，仍在逐步开放。官方支持 `low`、`medium`、`high`、`xhigh`、`max`；选它时不要让 effort 留空为 `none`。 |
+| GPT-6 Astra | `gpt-6-astra` | OpenAI 当前能力最强的端到端工作模型，仍在逐步开放。官方支持 `low`、`medium`、`high`、`xhigh`、`max`；选它时不要显式设置 effort 为 `none`。 |
 | GPT-5.6 Sol | `gpt-5.6-sol` | 旗舰模型；`gpt-5.6` 当前是指向 Sol 的滚动别名。 |
 | GPT-5.6 Terra | `gpt-5.6-terra` | 智能和成本均衡。 |
 | GPT-5.6 Luna | `gpt-5.6-luna` | 快速、经济，适合翻译等高吞吐任务。 |
@@ -116,7 +116,7 @@ ChatGPT 登录退役规则影响。
 本后端的输入校验支持 `none`、`low`、`medium`、`high`、`xhigh`、`max` 六种推理
 强度；`ultra` 不是当前 PDF 翻译后端可填写的值。模型自身可能只支持其中一部分，
 不受支持的组合会报错。例如 `gpt-5.6-luna` 与 `max` 表示请求 Luna + Max；
-`gpt-6-astra` 应搭配 `low` 至 `max`，不能搭配空值/`none`。
+`gpt-6-astra` 应搭配 `low` 至 `max`，不能显式设置为 `none`。
 
 选择 Codex 时，WebUI 会把 `number of threads` 默认设为 `4`，输入框仍可编辑。该数值表示最多同时运行多少个相互独立的 Codex 请求；默认设置下，程序会保留原有的批次划分和输出顺序，只把已经划分好的批次最多并行执行 4 个。并行不会把同一内容重复翻译，因此同一文档的总输入/输出量通常与单线程接近，但瞬时请求速率会提高，限流、超时或结果校验失败造成的重试可能带来少量额外消耗。如遇账户限流或电脑负载过高，可以调低为 `1` 或 `2`。
 
@@ -128,7 +128,7 @@ PowerShell 示例：
 
 ```powershell
 $env:CODEX_BIN = "codex"
-$env:CODEX_REASONING_EFFORT = "none"
+$env:CODEX_REASONING_EFFORT = "low"
 $env:CODEX_TIMEOUT = "120"
 pdf2zh "D:\papers\example.pdf" -s codex -li en -lo zh -t 4
 ```

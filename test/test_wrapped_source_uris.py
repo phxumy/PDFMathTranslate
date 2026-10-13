@@ -9,16 +9,29 @@ def make_case():
     first, second = "https://doi.org/10.1016/j.acha.", "2014.09.004"
     chars, links = [], []
     for text, start, y in ((first, 100, 100), (second, 30, 88)):
-        row = [SimpleNamespace(get_text=lambda value=value: value,
-                x0=start+4*i, x1=start+4*i+4, y0=y-2, y1=y+8, size=10,
-                matrix=(1, 0, 0, 1, start+4*i, y), _pdf2zh_layout_class=2)
-               for i, value in enumerate(text)]
+        row = [
+            SimpleNamespace(
+                get_text=lambda value=value: value,
+                x0=start + 4 * i,
+                x1=start + 4 * i + 4,
+                y0=y - 2,
+                y1=y + 8,
+                size=10,
+                matrix=(1, 0, 0, 1, start + 4 * i, y),
+                _pdf2zh_layout_class=2,
+            )
+            for i, value in enumerate(text)
+        ]
         chars.extend(row)
-        links.append((first+second, (start-1, y-3, row[-1].x1+1, y+9)))
+        links.append((first + second, (start - 1, y - 3, row[-1].x1 + 1, y + 9)))
     source = "A reference, " + first + " " + second + ". Next reference."
-    paragraph = SimpleNamespace(layout_class=2, region_kind="plain text", size=10,
-        break_offsets=[source.index(second), source.index("Next")])
-    return first+second, source, paragraph, chars, links
+    paragraph = SimpleNamespace(
+        layout_class=2,
+        region_kind="plain text",
+        size=10,
+        break_offsets=[source.index(second), source.index("Next")],
+    )
+    return first + second, source, paragraph, chars, links
 
 
 def test_annotation_and_two_glyph_rows_restore_wrapped_doi_and_offsets():
@@ -27,16 +40,32 @@ def test_annotation_and_two_glyph_rows_restore_wrapped_doi_and_offsets():
     before = [(c.get_text(), c.x0, c.x1, c.y0, c.y1, c.matrix) for c in chars]
     _restore_wrapped_source_uris(segments, [paragraph], [chars], links)
     assert segments == ["A reference, " + uri + ". Next reference."]
-    assert paragraph.break_offsets == [offset-1 for offset in offsets]
+    assert paragraph.break_offsets == [offset - 1 for offset in offsets]
     assert [(c.get_text(), c.x0, c.x1, c.y0, c.y1, c.matrix) for c in chars] == before
 
 
-@pytest.mark.parametrize("change", [
-    "single_annotation", "different_destination", "wrong_glyph", "same_baseline",
-    "far_rows", "glyph_gap", "protected_glyph", "rotated_glyph", "small_glyph",
-    "two_rows_in_one_rectangle", "wrong_rectangle", "duplicate_source",
-    "longer_path", "longer_dot_suffix", "figure", "real_space_glyph", "different_paragraph",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "single_annotation",
+        "different_destination",
+        "wrong_glyph",
+        "same_baseline",
+        "far_rows",
+        "glyph_gap",
+        "protected_glyph",
+        "rotated_glyph",
+        "small_glyph",
+        "two_rows_in_one_rectangle",
+        "wrong_rectangle",
+        "duplicate_source",
+        "longer_path",
+        "longer_dot_suffix",
+        "figure",
+        "real_space_glyph",
+        "different_paragraph",
+    ],
+)
 def test_unproven_uri_spaces_are_preserved(change):
     uri, source, paragraph, chars, links = make_case()
     if change == "single_annotation":
@@ -70,7 +99,10 @@ def test_unproven_uri_spaces_are_preserved(change):
     elif change == "duplicate_source":
         source += " " + source
     elif change in {"longer_path", "longer_dot_suffix"}:
-        source = source.replace("2014.09.004.", "2014.09.004" + ("/extra." if change == "longer_path" else ".extra."))
+        source = source.replace(
+            "2014.09.004.",
+            "2014.09.004" + ("/extra." if change == "longer_path" else ".extra."),
+        )
     elif change == "figure":
         paragraph.region_kind = "figure"
     elif change == "real_space_glyph":

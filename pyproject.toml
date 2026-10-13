@@ -83,6 +83,9 @@ pdf2zh-desktop = "pdf2zh.desktop:main"
 ignore = ["E203", "E261", "E501", "W503", "E741"]
 max-line-length = 88
 
+[tool.black]
+target-version = ["py310"]
+
 
 
 [bumpver]

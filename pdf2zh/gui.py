@@ -3,6 +3,10 @@ import cgi
 import os
 import shutil
 import uuid
+import time
+from dataclasses import replace
+from queue import Empty, Queue
+from threading import Event, Thread
 from asyncio import CancelledError
 from pathlib import Path
 import typing as T
@@ -18,6 +22,13 @@ from pdf2zh import __version__
 from pdf2zh.high_level import translate
 from pdf2zh.doclayout import ModelInstance
 from pdf2zh.config import ConfigManager
+from pdf2zh.app_update import APP_VERSION, REPOSITORY_URL, update_manager
+from pdf2zh.codex_account import (
+    get_codex_status,
+    start_codex_login,
+    poll_codex_login,
+    cancel_codex_login,
+)
 from pdf2zh.chatgpt import (
     ChatGPTTranslator,
     cancel_chatgpt_wait,
@@ -278,6 +289,10 @@ def translate_file(
     chatgpt_effort=None,
     progress=gr.Progress(),
     *envs,
+    progress_callback=None,
+    preview_callback=None,
+    _session_id=None,
+    _cancellation_event=None,
 ):
     """
     This function translates a PDF file from one language to another.
@@ -315,17 +330,16 @@ def translate_file(
             raise gr.Error(
                 "请先登录 ChatGPT 并刷新模型，选择网页实际提供的模型后再翻译。"
             )
-    session_id = uuid.uuid4()
+    session_id = _session_id or uuid.uuid4()
     state["session_id"] = session_id
     state["service"] = translator.name
-    cancellation_event_map[session_id] = asyncio.Event()
     # Translate PDF content using selected service.
     if flag_demo and not verify_recaptcha(recaptcha_response):
         raise gr.Error("reCAPTCHA fail")
 
     progress(0, desc="Starting translation...")
 
-    output = Path("pdf2zh_files")
+    output = Path("pdf2zh_files") / str(session_id)
     output.mkdir(parents=True, exist_ok=True)
 
     if file_type == "File":
@@ -340,6 +354,9 @@ def translate_file(
             output,
             5 * 1024 * 1024 if flag_demo else None,
         )
+
+    if _cancellation_event is not None and _cancellation_event.is_set():
+        raise CancelledError()
 
     filename = os.path.splitext(os.path.basename(file_path))[0]
     file_raw = output / f"{filename}.pdf"
@@ -374,13 +391,11 @@ def translate_file(
             )
             _envs[k] = real_keys
 
-    print(f"Files before translation: {os.listdir(output)}")
-
     def progress_bar(t: tqdm.tqdm):
         desc = getattr(t, "desc", "Translating...")
         if desc == "":
             desc = "Translating..."
-        progress(t.n / t.total, desc=desc)
+        progress(t.n / max(t.total or 1, 1), desc=desc)
 
     try:
         threads = int(threads)
@@ -388,6 +403,10 @@ def translate_file(
         threads = 1
     if is_chatgpt:
         threads = 1
+
+    cancellation_event_map[session_id] = (
+        _cancellation_event if _cancellation_event is not None else asyncio.Event()
+    )
 
     param = {
         "files": [str(file_raw)],
@@ -407,6 +426,10 @@ def translate_file(
         "model": ModelInstance.value,
     }
 
+    if not use_babeldoc:
+        param["progress_callback"] = progress_callback
+        param["preview_callback"] = preview_callback
+
     try:
         if use_babeldoc:
             return babeldoc_translate_file(**param)
@@ -417,7 +440,6 @@ def translate_file(
         raise gr.Error(str(exc)) from exc
     finally:
         cancellation_event_map.pop(session_id, None)
-    print(f"Files after translation: {os.listdir(output)}")
 
     if not file_mono.exists() or not file_dual.exists():
         raise gr.Error("No output")
@@ -432,6 +454,345 @@ def translate_file(
         gr.update(visible=True),
         gr.update(visible=True),
     )
+
+
+def _codex_settings(env_values, fast_mode, speed, parallel):
+    values = list(env_values)
+    keys = list(CodexTranslator.envs)
+    while len(values) < len(keys):
+        values.append(CodexTranslator.envs[keys[len(values)]])
+    if (
+        not values[keys.index("CODEX_MODEL")]
+        and not values[keys.index("CODEX_PROFILE")]
+        and str(values[keys.index("CODEX_REASONING_EFFORT")] or "").strip()
+        in {"", "none"}
+    ):
+        # Older releases saved "none", which today's automatic model rejects.
+        values[keys.index("CODEX_REASONING_EFFORT")] = "low"
+    workers = max(1, min(8, int(parallel or 4)))
+    if speed == "double":
+        workers *= 2
+    for key, value in {
+        "CODEX_FAST_MODE": "true" if fast_mode else "false",
+        "CODEX_MAX_CONCURRENCY": str(workers),
+    }.items():
+        values[keys.index(key)] = value
+    return values, workers
+
+
+def _duration(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes} 分 {seconds:02d} 秒"
+
+
+def _translation_status(event):
+    phases = {
+        "preparing": "正在准备文档与模型",
+        "analyzing": "正在识别版面",
+        "translating": "正在翻译与排版",
+        "finalizing": "正在生成完整 PDF",
+        "complete": "翻译完成",
+    }
+    status = phases.get(event.phase, event.phase)
+    text = f"**{status}** · 已完成 {event.completed_pages}/{event.total_pages} 页"
+    text += f" · 已用 {_duration(event.elapsed_seconds)}"
+    if event.phase == "complete":
+        return text
+    if event.phase == "finalizing":
+        return text + " · 正在合并、处理字体与保存文件"
+    if event.eta_low_seconds is None or event.eta_high_seconds is None:
+        return text + " · 剩余时间估算中（等待足够的完成样本）"
+    return text + (
+        f" · 翻译预计还需 {_duration(event.eta_low_seconds)}"
+        f"–{_duration(event.eta_high_seconds)}，另需最终文件处理时间"
+    )
+
+
+def translate_file_stream(
+    file_type,
+    file_input,
+    link_input,
+    service,
+    lang_from,
+    lang_to,
+    page_range,
+    page_input,
+    prompt,
+    threads,
+    skip_subset_fonts,
+    ignore_cache,
+    vfont,
+    use_babeldoc,
+    recaptcha_response,
+    state,
+    chatgpt_model,
+    chatgpt_effort,
+    codex_fast,
+    codex_speed,
+    codex_parallel,
+    progress=gr.Progress(),
+    *envs,
+):
+    """Keep the UI responsive while publishing completed page images."""
+    update_manager.begin_translation()
+    events = Queue()
+    worker = None
+    session_id = uuid.uuid4()
+    cancellation_event = Event()
+    cancellation_event_map[session_id] = cancellation_event
+    state["session_id"] = session_id
+    state["service"] = service_map[service].name
+    finished = False
+    preview_dir = Path("pdf2zh_files") / ("preview-" + uuid.uuid4().hex)
+    pages = {}
+    last_preview_at = 0.0
+    started = time.monotonic()
+    last_progress = None
+    last_progress_at = started
+    latest_status = "**正在准备翻译** · 剩余时间估算中"
+    if use_babeldoc:
+        latest_status += " · BabelDOC 模式将在完成后显示完整 PDF"
+    try:
+        if service_map[service].name == "codex":
+            envs, threads = _codex_settings(
+                envs, codex_fast, codex_speed, codex_parallel
+            )
+            ConfigManager.set("PDF2ZH_CODEX_FAST", bool(codex_fast))
+            ConfigManager.set("PDF2ZH_CODEX_SPEED", codex_speed)
+            ConfigManager.set("PDF2ZH_CODEX_PARALLEL", int(codex_parallel))
+
+        def save_preview(event):
+            if cancellation_event.is_set():
+                raise CancelledError()
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            path = preview_dir / f"page-{event.page_number:05d}.png"
+            path.write_bytes(event.png_bytes)
+            events.put(("preview", (event.page_number, str(path))))
+
+        def run():
+            try:
+                result = translate_file(
+                    file_type,
+                    file_input,
+                    link_input,
+                    service,
+                    lang_from,
+                    lang_to,
+                    page_range,
+                    page_input,
+                    prompt,
+                    threads,
+                    skip_subset_fonts,
+                    ignore_cache,
+                    vfont,
+                    use_babeldoc,
+                    recaptcha_response,
+                    state,
+                    chatgpt_model,
+                    chatgpt_effort,
+                    lambda *a, **kw: None,
+                    *envs,
+                    progress_callback=lambda event: events.put(("progress", event)),
+                    preview_callback=save_preview,
+                    _session_id=session_id,
+                    _cancellation_event=cancellation_event,
+                )
+                events.put(("result", result))
+            except BaseException as exc:
+                events.put(("error", exc))
+            finally:
+                cancellation_event_map.pop(session_id, None)
+
+        worker = Thread(target=run, name="pdf2zh-ui-translation", daemon=True)
+        worker.start()
+        yield (
+            gr.update(value=None, visible=False),
+            gr.update(value=file_input if file_type == "File" else None, visible=True),
+            gr.update(value=None, visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(value=[], visible=False),
+            latest_status,
+            state,
+        )
+        while True:
+            try:
+                kind, value = events.get(timeout=1.0)
+            except Empty:
+                if last_progress is not None:
+                    idle = max(0.0, time.monotonic() - last_progress_at)
+                    low, high = (
+                        last_progress.eta_low_seconds,
+                        last_progress.eta_high_seconds,
+                    )
+                    if high is not None and high > idle:
+                        low, high = max(0.0, (low or 0.0) - idle), high - idle
+                    else:
+                        low = high = None
+                    heartbeat = replace(
+                        last_progress,
+                        elapsed_seconds=last_progress.elapsed_seconds + idle,
+                        eta_low_seconds=low,
+                        eta_high_seconds=high,
+                    )
+                    message = _translation_status(heartbeat)
+                else:
+                    message = (
+                        latest_status
+                        + f" · 已用 {_duration(time.monotonic() - started)}"
+                    )
+                yield (*[gr.update() for _ in range(7)], message, state)
+                continue
+            if kind == "progress":
+                last_progress, last_progress_at = value, time.monotonic()
+                latest_status = _translation_status(value)
+                yield (*[gr.update() for _ in range(7)], latest_status, state)
+            elif kind == "preview":
+                number, path = value
+                pages[number] = (path, f"原文第 {number} 页 · 已翻译")
+                if not events.empty() and time.monotonic() - last_preview_at < 0.4:
+                    continue
+                last_preview_at = time.monotonic()
+                gallery = [pages[number] for number in sorted(pages)]
+                yield (
+                    gr.update(),
+                    gr.update(visible=False),
+                    *[gr.update() for _ in range(4)],
+                    gr.update(value=gallery, visible=True),
+                    latest_status,
+                    state,
+                )
+            elif kind == "result":
+                finished = True
+                result = list(value)
+                result[1] = gr.update(value=result[1], visible=True)
+                yield (
+                    *result,
+                    gr.update(visible=False),
+                    f"**翻译完成** · 共用时 {_duration(time.monotonic() - started)} · 可查看或下载完整 PDF",
+                    state,
+                )
+                break
+            else:
+                message = str(value) or "翻译已取消"
+                yield (
+                    gr.update(),
+                    gr.update(visible=not bool(pages)),
+                    *[gr.update() for _ in range(4)],
+                    gr.update(
+                        value=[pages[number] for number in sorted(pages)],
+                        visible=bool(pages),
+                    ),
+                    f"**翻译已停止** · {message} · 已显示的完成页仍可查看",
+                    state,
+                )
+                raise gr.Error(message) from value
+    finally:
+        if worker is not None and worker.is_alive():
+            cancellation_event.set()
+            stop_translate_file(state)
+
+            # Keep update protection until the translation has really stopped.
+            def release_after_stop():
+                worker.join()
+                update_manager.end_translation()
+
+            Thread(target=release_after_stop, daemon=True).start()
+        else:
+            cancellation_event_map.pop(session_id, None)
+            update_manager.end_translation()
+        if finished and preview_dir.is_dir():
+            root = Path("pdf2zh_files").resolve()
+            target = preview_dir.resolve()
+            if target.parent == root and target.name.startswith("preview-"):
+                shutil.rmtree(target, ignore_errors=True)
+
+
+def refresh_codex_account(configured_bin):
+    try:
+        return get_codex_status(configured_bin or "codex")["message"]
+    except Exception as exc:
+        return f"无法读取 Codex 登录状态：{exc}"
+
+
+def _codex_login_updates(result):
+    message = result.get("message") or result.get("status") or "等待登录"
+    if result.get("user_code"):
+        message += "\n设备验证码：" + result["user_code"]
+    url = result.get("auth_url") or ""
+    if url:
+        message += "\n请在浏览器打开：" + url
+    pending = result.get("status") in {"starting", "pending", "waiting", "running"}
+    return (
+        message,
+        result.get("login_id") if pending else None,
+        gr.update(active=pending),
+    )
+
+
+def begin_codex_account_login(configured_bin, mode, login_id=None):
+    if not desktop_mode:
+        raise gr.Error("请在桌面软件中登录 Codex。")
+    try:
+        if login_id:
+            existing = poll_codex_login(login_id)
+            if existing.get("status") == "pending":
+                return _codex_login_updates(existing)
+        return _codex_login_updates(
+            start_codex_login(mode=mode, configured_bin=configured_bin or "codex")
+        )
+    except Exception as exc:
+        return str(exc), None, gr.update(active=False)
+
+
+def poll_codex_account_login(login_id):
+    if not login_id:
+        return gr.update(), None, gr.update(active=False)
+    return _codex_login_updates(poll_codex_login(login_id))
+
+
+def cancel_codex_account_login(login_id):
+    if not login_id:
+        return gr.update(), None, gr.update(active=False)
+    return _codex_login_updates(cancel_codex_login(login_id))
+
+
+def check_app_updates():
+    try:
+        result = update_manager.check()
+        return result["message"], gr.update(
+            interactive=bool(result["available"]) and desktop_mode
+        )
+    except Exception as exc:
+        return f"检查更新失败：{exc}", gr.update(interactive=False)
+
+
+def install_app_update():
+    events = Queue()
+
+    def run():
+        try:
+            message = update_manager.install(
+                progress_callback=lambda value: events.put((False, value))
+            )
+        except Exception as exc:
+            message = f"更新未完成：{exc}"
+        events.put((True, message))
+
+    Thread(target=run, name="pdf2zh-update-download", daemon=True).start()
+    yield "正在准备更新…"
+    while True:
+        try:
+            finished, message = events.get(timeout=1.0)
+        except Empty:
+            continue
+        yield message
+        if finished:
+            break
 
 
 def babeldoc_translate_file(**kwargs):
@@ -834,7 +1195,7 @@ desktop_header_html = f"""
     </div>
     <div class="desktop-badges">
       <span class="desktop-badge">LOCAL · PRIVATE</span>
-      <span class="desktop-badge">v{__version__}</span>
+      <span class="desktop-badge">{APP_VERSION}</span>
     </div>
   </div>
 </div>
@@ -900,15 +1261,69 @@ with gr.Blocks(
             service = gr.Dropdown(
                 label="Service",
                 choices=enabled_services,
-                value=enabled_services[0],
+                value=(
+                    "Codex"
+                    if desktop_mode and "Codex" in enabled_services
+                    else enabled_services[0]
+                ),
             )
-            envs = []
-            for _ in range(MAX_ENV_FIELDS):
-                envs.append(
-                    gr.Textbox(
-                        visible=False,
-                        interactive=True,
+            with gr.Accordion("模型与服务设置", open=False):
+                envs = []
+                for _ in range(MAX_ENV_FIELDS):
+                    envs.append(
+                        gr.Textbox(
+                            visible=False,
+                            interactive=True,
+                        )
                     )
+            with gr.Column(
+                visible=desktop_mode and "Codex" in enabled_services
+            ) as codex_panel:
+                codex_status = gr.Textbox(
+                    label="Codex 登录状态",
+                    value="正在检查登录状态…",
+                    interactive=False,
+                    lines=3,
+                )
+                with gr.Row():
+                    codex_login_btn = gr.Button("登录 Codex", visible=desktop_mode)
+                    codex_refresh_btn = gr.Button("刷新登录状态")
+                    codex_cancel_btn = gr.Button("取消登录", visible=desktop_mode)
+                codex_login_mode = gr.Radio(
+                    choices=[
+                        ("浏览器登录（推荐）", "browser"),
+                        ("设备验证码登录", "device"),
+                    ],
+                    value="browser",
+                    label="登录方式",
+                    visible=desktop_mode,
+                )
+                codex_login_id = gr.State(None)
+                codex_login_timer = gr.Timer(1.5, active=False)
+                gr.Markdown(
+                    "在软件内点击登录，由官方浏览器页面完成账号验证；完成后这里会自动显示状态。"
+                )
+                codex_parallel = gr.Slider(
+                    minimum=1,
+                    maximum=8,
+                    step=1,
+                    value=ConfigManager.get("PDF2ZH_CODEX_PARALLEL", 4),
+                    label="并行批次数",
+                    info="默认 4；遇到限流可降低。实际并行受待翻译批次数限制。",
+                )
+                codex_speed = gr.Radio(
+                    choices=[
+                        ("标准并行", "standard"),
+                        ("双倍并行（2×并发）", "double"),
+                    ],
+                    value=ConfigManager.get("PDF2ZH_CODEX_SPEED", "standard"),
+                    label="翻译速度",
+                    info="双倍模式将上方并行数乘以 2，最多 16；不保证总耗时减半。",
+                )
+                codex_fast = gr.Checkbox(
+                    label="启用 Codex Fast 模式",
+                    value=ConfigManager.get("PDF2ZH_CODEX_FAST", False),
+                    info="官方加速服务，通常增加额度消耗；需模型和账号支持。与并行模式可叠加。",
                 )
             with gr.Column(visible=False) as chatgpt_panel:
                 with gr.Row():
@@ -969,7 +1384,7 @@ with gr.Blocks(
             with gr.Accordion("Open for More Experimental Options!", open=False):
                 gr.Markdown("#### Experimental")
                 threads = gr.Textbox(
-                    label="number of threads",
+                    label="并行数（其他翻译服务）",
                     interactive=True,
                     value="4",
                 )
@@ -1002,7 +1417,22 @@ with gr.Blocks(
                     value = ConfigManager.get_env_by_translatername(
                         translator, env[0], env[1]
                     )
-                    visible = not is_chatgpt
+                    if (
+                        translator.name == "codex"
+                        and label == "CODEX_REASONING_EFFORT"
+                        and str(value or "").strip() in {"", "none"}
+                        and not ConfigManager.get_env_by_translatername(
+                            translator, "CODEX_MODEL", None
+                        )
+                        and not ConfigManager.get_env_by_translatername(
+                            translator, "CODEX_PROFILE", None
+                        )
+                    ):
+                        value = "low"
+                    visible = not is_chatgpt and label not in {
+                        "CODEX_FAST_MODE",
+                        "CODEX_MAX_CONCURRENCY",
+                    }
                     if hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
@@ -1023,15 +1453,16 @@ with gr.Blocks(
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
                     (
-                        gr.update(value="1", interactive=False)
+                        gr.update(value="1", interactive=False, visible=False)
                         if is_chatgpt
                         else (
-                            gr.update(value="4", interactive=True)
+                            gr.update(value="4", interactive=True, visible=False)
                             if translator.name == "codex"
-                            else gr.update(interactive=True)
+                            else gr.update(interactive=True, visible=True)
                         )
                     ),
                     gr.update(visible=is_chatgpt),
+                    gr.update(visible=translator.name == "codex"),
                     (
                         gr.update(value=False, interactive=False)
                         if is_chatgpt
@@ -1073,6 +1504,27 @@ with gr.Blocks(
             recaptcha_box = gr.HTML('<div id="recaptcha-box"></div>')
             translate_btn = gr.Button("Translate", variant="primary")
             cancellation_btn = gr.Button("Cancel", variant="secondary")
+            with gr.Accordion("关于与更新", open=False):
+                gr.Markdown(
+                    f"**Codex Edition {APP_VERSION}** · [GitHub 仓库]({REPOSITORY_URL}) · [发行记录]({REPOSITORY_URL}/releases)"
+                )
+                update_status = gr.Textbox(
+                    label="更新状态",
+                    value="点击检查 GitHub 最新版本。",
+                    interactive=False,
+                )
+                with gr.Row():
+                    update_check_btn = gr.Button("检查更新")
+                    update_install_btn = gr.Button(
+                        "下载并安装更新", interactive=False, visible=desktop_mode
+                    )
+                gr.Markdown(
+                    "安装更新前请完成或取消翻译。下载并校验成功后关闭软件，由安装程序完成更新；保留账号与设置。"
+                )
+                update_check_btn.click(
+                    check_app_updates, outputs=[update_status, update_install_btn]
+                )
+                update_install_btn.click(install_app_update, outputs=update_status)
             tech_details_tog = gr.Markdown(
                 tech_details_string,
                 elem_classes=["secondary-text"],
@@ -1086,11 +1538,34 @@ with gr.Blocks(
                     prompt,
                     threads,
                     chatgpt_panel,
+                    codex_panel,
                     use_babeldoc,
                     chatgpt_status,
                     chatgpt_model,
                     chatgpt_effort,
                 ],
+            )
+            codex_login_outputs = [codex_status, codex_login_id, codex_login_timer]
+            codex_login_btn.click(
+                begin_codex_account_login,
+                [envs[0], codex_login_mode, codex_login_id],
+                codex_login_outputs,
+                queue=False,
+            )
+            codex_refresh_btn.click(
+                refresh_codex_account, envs[0], codex_status, queue=False
+            )
+            codex_cancel_btn.click(
+                cancel_codex_account_login,
+                codex_login_id,
+                codex_login_outputs,
+                queue=False,
+            )
+            codex_login_timer.tick(
+                poll_codex_account_login,
+                codex_login_id,
+                codex_login_outputs,
+                queue=False,
             )
             chatgpt_outputs = [chatgpt_status, chatgpt_model, chatgpt_effort]
             chatgpt_login_btn.click(
@@ -1136,7 +1611,18 @@ with gr.Blocks(
             )
 
         with gr.Column(scale=2, elem_id="preview-panel" if desktop_mode else None):
-            gr.Markdown("## Preview")
+            gr.Markdown("## 翻译预览")
+            translation_status = gr.Markdown(
+                "上传 PDF 后可查看原文；翻译期间会逐页显示已完成的结果。"
+            )
+            live_preview = gr.Gallery(
+                label="已翻译页面（按原文页码）",
+                visible=False,
+                columns=1,
+                object_fit="contain",
+                height=1100 if desktop_mode else 1600,
+                allow_preview=True,
+            )
             preview = PDF(
                 label="Document Preview",
                 visible=True,
@@ -1145,9 +1631,13 @@ with gr.Blocks(
 
     # Event handlers
     file_input.upload(
-        lambda x: x,
+        lambda x: (
+            gr.update(value=x, visible=True),
+            gr.update(value=[], visible=False),
+            "已载入原文。点击翻译后会逐页显示已完成的结果。",
+        ),
         inputs=file_input,
-        outputs=preview,
+        outputs=[preview, live_preview, translation_status],
         js=(
             f"""
             (a,b)=>{{
@@ -1168,7 +1658,7 @@ with gr.Blocks(
     state = gr.State({"session_id": None})
 
     translate_btn.click(
-        translate_file,
+        translate_file_stream,
         inputs=[
             file_type,
             file_input,
@@ -1188,6 +1678,9 @@ with gr.Blocks(
             state,
             chatgpt_model,
             chatgpt_effort,
+            codex_fast,
+            codex_speed,
+            codex_parallel,
             *envs,
         ],
         outputs=[
@@ -1197,8 +1690,36 @@ with gr.Blocks(
             output_file_mono,
             output_file_dual,
             output_title,
+            live_preview,
+            translation_status,
+            state,
         ],
+        concurrency_limit=1,
+        show_progress="minimal",
     ).then(lambda: None, js="()=>{grecaptcha.reset()}" if flag_demo else "")
+
+    demo.load(
+        on_select_service,
+        service,
+        [
+            *envs,
+            prompt,
+            threads,
+            chatgpt_panel,
+            codex_panel,
+            use_babeldoc,
+            chatgpt_status,
+            chatgpt_model,
+            chatgpt_effort,
+        ],
+    ).then(
+        lambda: refresh_codex_account(
+            ConfigManager.get_env_by_translatername(
+                CodexTranslator, "CODEX_BIN", "codex"
+            )
+        ),
+        outputs=codex_status,
+    )
 
     cancellation_btn.click(
         stop_translate_file,

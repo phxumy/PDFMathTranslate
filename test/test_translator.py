@@ -443,7 +443,7 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertIn("--ignore-user-config", cmd)
         self.assertIn("--ignore-rules", cmd)
         self.assertIn("--config", cmd)
-        self.assertIn('model_reasoning_effort="none"', cmd)
+        self.assertIn('model_reasoning_effort="low"', cmd)
         self.assertNotIn("--model", cmd)
         if os.name == "nt":
             self.assertEqual(
@@ -482,6 +482,30 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertIn("--model", cmd)
         self.assertIn("gpt-5.4-mini", cmd)
         self.assertEqual(run.call_args.kwargs["timeout"], 37)
+
+    def test_blank_reasoning_uses_low_while_explicit_none_is_preserved(self):
+        for effort, expected in (
+            (None, "low"),
+            ("", "low"),
+            ("  ", "low"),
+            ("none", "none"),
+        ):
+            with (
+                self.subTest(effort=effort),
+                mock.patch("pdf2zh.translator.subprocess.run") as run,
+            ):
+                run.side_effect = self._probe_side_effect()
+                translator = CodexTranslator(
+                    "en",
+                    "zh",
+                    "selected-model",
+                    envs={"CODEX_REASONING_EFFORT": effort},
+                )
+            self.assertEqual(translator.reasoning_effort, expected)
+            command = translator._build_command(
+                "test", "schema.json", "output.json", "fast"
+            )
+            self.assertIn(f'model_reasoning_effort="{expected}"', command)
 
     def test_init_fails_when_required_codex_flags_missing(self):
         def side_effect(cmd, **kwargs):
@@ -745,6 +769,57 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertEqual(4, translator.max_concurrency)
         translator.set_concurrency(0)
         self.assertEqual(1, translator.max_concurrency)
+
+    def test_codex_explicit_concurrency_overrides_general_threads_with_upper_bound(
+        self,
+    ):
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator(
+                "en", "zh", None, envs={"CODEX_MAX_CONCURRENCY": "8"}
+            )
+        self.assertEqual(8, translator.max_concurrency)
+        translator.set_concurrency(1)
+        self.assertEqual(8, translator.max_concurrency)
+        translator.envs["CODEX_MAX_CONCURRENCY"] = "100"
+        translator.set_concurrency(4)
+        self.assertEqual(16, translator.max_concurrency)
+        translator.envs["CODEX_MAX_CONCURRENCY"] = "bad"
+        translator.set_concurrency(4)
+        self.assertEqual(1, translator.max_concurrency)
+
+    def test_fast_mode_is_an_explicit_request_tier_independent_of_launch_path(self):
+        for enabled in (True, False):
+            with (
+                self.subTest(enabled=enabled),
+                mock.patch("pdf2zh.translator.subprocess.run") as run,
+            ):
+                run.side_effect = self._probe_side_effect()
+                translator = CodexTranslator(
+                    "en", "zh", None, envs={"CODEX_FAST_MODE": enabled}
+                )
+            for mode in ("fast", "compat"):
+                command = translator._build_command(
+                    "test", "schema.json", "result.json", mode
+                )
+                self.assertIn(f"features.fast_mode={str(enabled).lower()}", command)
+                self.assertIn(
+                    f'service_tier="{"fast" if enabled else "default"}"', command
+                )
+
+    def test_cancelled_page_never_submits_queued_batches(self):
+        with mock.patch("pdf2zh.translator.subprocess.run") as run:
+            run.side_effect = self._probe_side_effect()
+            translator = CodexTranslator("en", "zh", None)
+        translator.set_concurrency(4)
+        translator.cancellation_event = threading.Event()
+        translator.cancellation_event.set()
+        worker = mock.Mock()
+        from pdf2zh.translator import TranslationAbortedError
+
+        with self.assertRaises(TranslationAbortedError):
+            translator._map_batches(list(range(100)), worker)
+        worker.assert_not_called()
 
     def test_translate_batch_splits_and_retries_on_mismatched_length(self):
         with mock.patch("pdf2zh.translator.subprocess.run") as run:
@@ -1023,7 +1098,10 @@ class TestCodexTranslator(unittest.TestCase):
     def test_gui_service_map_includes_codex(self):
         gui_source = Path("pdf2zh/gui.py").read_text(encoding="utf-8")
         self.assertIn('"Codex": CodexTranslator', gui_source)
-        self.assertIn('gr.update(value="4", interactive=True)', gui_source)
+        self.assertIn(
+            'gr.update(value="4", interactive=True, visible=False)', gui_source
+        )
+        self.assertIn("codex_parallel = gr.Slider(", gui_source)
         self.assertNotIn("effective concurrency fixed to 1", gui_source)
 
 

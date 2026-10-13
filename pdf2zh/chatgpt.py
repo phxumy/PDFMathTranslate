@@ -328,7 +328,9 @@ class ChatGPTTranslator(ScientificTranslator):
             raise TranslationAbortedError(
                 "网页未确认所选 ChatGPT 模型，请刷新后重新选择。"
             )
-        if requested_effort and _effort_key(actual_effort) != _effort_key(requested_effort):
+        if requested_effort and _effort_key(actual_effort) != _effort_key(
+            requested_effort
+        ):
             raise TranslationAbortedError("网页未确认所选推理强度，请刷新后重新选择。")
         actual_effort = _effort_key(actual_effort)
         super().__init__(

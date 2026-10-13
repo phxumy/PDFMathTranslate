@@ -23,7 +23,7 @@ from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdfinterp import PDFResourceManager
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
-from pymupdf import Document, Font
+from pymupdf import Document, Font, Matrix
 
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
@@ -36,6 +36,7 @@ from pdf2zh.link_annotations import (
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import prepare_scan_background
 from pdf2zh.source_spelling import collect_source_spelling
+from pdf2zh.translation_progress import PagePreview, TranslationProgressTracker
 
 from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
@@ -320,7 +321,8 @@ def _collect_source_uri_links(document):
                 ),
             )
             for link in page.get_links()
-            if link.get("xref") and link.get("from")
+            if link.get("xref")
+            and link.get("from")
             and document.xref_get_key(link["xref"], "A/S") == ("name", "/URI")
             and document.xref_get_key(link["xref"], "A/URI")[0] == "string"
         ]
@@ -342,8 +344,10 @@ def _collect_closed_box_strokes(page):
         items = drawing["items"]
         width = drawing.get("width") or 0
         if (
-            drawing.get("type") != "s" or len(items) != 1
-            or items[0][0] != "l" or not 0 < width <= 1.5
+            drawing.get("type") != "s"
+            or len(items) != 1
+            or items[0][0] != "l"
+            or not 0 < width <= 1.5
             or drawing.get("dashes") != "[] 0"
         ):
             continue
@@ -352,13 +356,19 @@ def _collect_closed_box_strokes(page):
         # use the displayed page with a bottom-left origin.
         start = start * page.rotation_matrix
         end = end * page.rotation_matrix
-        points = sorted((
-            (float(start.x), float(page.rect.height - start.y)),
-            (float(end.x), float(page.rect.height - end.y)),
-        ))
+        points = sorted(
+            (
+                (float(start.x), float(page.rect.height - start.y)),
+                (float(end.x), float(page.rect.height - end.y)),
+            )
+        )
         (x0, y0), (x1, y1) = points
-        style = (width, drawing.get("color"), drawing.get("stroke_opacity"),
-                 drawing.get("lineCap"))
+        style = (
+            width,
+            drawing.get("color"),
+            drawing.get("stroke_opacity"),
+            drawing.get("lineCap"),
+        )
         if abs(y0 - y1) <= 0.005 and 2 <= x1 - x0 <= 14:
             horizontal.append((x0, y0, x1, y1, style))
         elif abs(x0 - x1) <= 0.005 and 2 <= abs(y1 - y0) <= 14:
@@ -367,28 +377,80 @@ def _collect_closed_box_strokes(page):
     protected = set()
     for index, top in enumerate(horizontal):
         x0, y0, x1, _, style = top
-        for bottom in horizontal[index + 1:]:
+        for bottom in horizontal[index + 1 :]:
             a, y1, b, _, other_style = bottom
             height = abs(y1 - y0)
             if (
-                style != other_style or abs(a - x0) > 0.01
-                or abs(b - x1) > 0.01 or not 2 <= height <= 14
+                style != other_style
+                or abs(a - x0) > 0.01
+                or abs(b - x1) > 0.01
+                or not 2 <= height <= 14
                 or not 0.4 <= (x1 - x0) / height <= 2.5
             ):
                 continue
             low, high = sorted((y0, y1))
             tolerance = style[0] / 2 + 0.02
+
             def has_side(x):
                 return any(
-                    vstyle == style and abs(vx - x) <= tolerance
+                    vstyle == style
+                    and abs(vx - x) <= tolerance
                     and abs(vlow - low) <= tolerance
                     and abs(vhigh - high) <= tolerance
                     for vx, vlow, _, vhigh, vstyle in vertical
                 )
+
             if has_side(x0) and has_side(x1):
                 protected.add(tuple(top[:4]))
                 protected.add(tuple(bottom[:4]))
     return tuple(sorted(protected))
+
+
+class _PagePreviewRenderer:
+    """Patch a private PDF copy and render one page without full-document saves.
+
+    The source used for layout detection must never see partially translated
+    shared XObjects. This private document retains the original xref numbering
+    and is created once; only new/changed streams are applied for each snapshot.
+    """
+
+    def __init__(self, document: Document, max_dimension: int):
+        self.max_dimension = max(256, min(int(max_dimension), 2400))
+        self.document = Document(stream=document.tobytes())
+        self.applied: dict[int, str] = {}
+
+    def render(self, page_number: int, page_xref: int, patches, resolve_markers):
+        for xref, operations in patches.items():
+            if self.applied.get(xref) == operations:
+                continue
+            while self.document.xref_length() <= xref:
+                new_xref = self.document.get_new_xref()
+                self.document.update_object(new_xref, "<<>>")
+            self.document.update_stream(xref, resolve_markers(operations).encode())
+            self.applied[xref] = operations
+        page = self.document[page_number - 1]
+        page.set_contents(page_xref)
+        suppress_reflowed_link_borders(page)
+        page = self.document.reload_page(page)
+        scale = self.max_dimension / max(page.rect.width, page.rect.height)
+        return page.get_pixmap(matrix=Matrix(scale, scale), alpha=False).tobytes("png")
+
+    def close(self):
+        self.document.close()
+
+
+def _check_translation_cancelled(cancellation_event):
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise CancelledError("task cancelled")
+
+
+def _selected_page_numbers(document: Document, pages):
+    selected = set(pages) if pages else None
+    return [
+        page_number
+        for page_number in range(document.page_count)
+        if selected is None or page_number in selected
+    ]
 
 
 def translate_patch(
@@ -412,6 +474,10 @@ def translate_patch(
     latin: Font = None,
     latin_name: str = LATIN_NAME,
     chatgpt_task_id: str = None,
+    progress_callback: object = None,
+    preview_callback: object = None,
+    preview_max_dimension: int = 1400,
+    _progress_tracker: TranslationProgressTracker = None,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
@@ -440,70 +506,111 @@ def translate_patch(
     device.source_spelling = collect_source_spelling(doc_zh)
     device.source_uri_links = _collect_source_uri_links(doc_zh)
     device.source_closed_box_strokes = {}
+    device.cancellation_event = cancellation_event
+    device.translator.cancellation_event = cancellation_event
 
     assert device is not None
     obj_patch = {}
     interpreter = PDFPageInterpreterEx(rsrcmgr, device, obj_patch)
-    if pages:
-        total_pages = len(pages)
-    else:
-        total_pages = doc_zh.page_count
+    selected_pages = set(_selected_page_numbers(doc_zh, pages))
+    total_pages = len(selected_pages)
+    tracker = _progress_tracker or TranslationProgressTracker(
+        total_pages, progress_callback
+    )
+    device.page_translation_callback = lambda number: tracker.emit(
+        "translating", number
+    )
+    preview_renderer = None
+    page_numbers_by_xref: dict[int, int] = {}
 
-    parser = PDFParser(inf)
-    doc = PDFDocument(parser)
-    with tqdm.tqdm(total=total_pages) as progress:
-        for pageno, page in enumerate(PDFPage.create_pages(doc)):
-            if cancellation_event and cancellation_event.is_set():
-                raise CancelledError("task cancelled")
-            if pages and (pageno not in pages):
-                continue
-            progress.update()
-            if callback:
-                callback(progress)
-            page.pageno = pageno
-            pix = doc_zh[page.pageno].get_pixmap()
-            image = np.frombuffer(pix.samples, np.uint8).reshape(
-                pix.height, pix.width, 3
-            )[:, :, ::-1]
-            scan_background = prepare_scan_background(doc_zh[page.pageno], image)
-            if scan_background is not None:
-                device.scan_backgrounds[page.pageno] = scan_background
-            page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
-            # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
-            box, page_region_types = _build_layout_mask(
-                page_layout,
-                pix.height,
-                pix.width,
-            )
-            if not hasattr(device, "layout_detections"):
-                device.layout_detections = {}
-            device.layout_detections[page.pageno] = _layout_detections(
-                page_layout, pix.height, pix.width
-            )
-            layout_region_types[page.pageno] = page_region_types
-            layout[page.pageno] = box
-            device.source_closed_box_strokes[page.pageno] = (
-                _collect_closed_box_strokes(doc_zh[page.pageno])
-            )
-            # 新建一个 xref 存放新指令流
-            page.page_xref = doc_zh.get_new_xref()  # hack 插入页面的新 xref
-            doc_zh.update_object(page.page_xref, "<<>>")
-            doc_zh.update_stream(page.page_xref, b"")
-            doc_zh[page.pageno].set_contents(page.page_xref)
-            interpreter.process_page(page)
+    try:
+        if preview_callback:
+            preview_renderer = _PagePreviewRenderer(doc_zh, preview_max_dimension)
+        parser = PDFParser(inf)
+        doc = PDFDocument(parser)
+        with tqdm.tqdm(total=total_pages) as progress:
 
-    flush_deferred = getattr(device, "flush_deferred_pages", None)
-    if callable(flush_deferred):
-        for page_xref, translated_ops in flush_deferred().items():
-            if page_xref not in obj_patch:
-                raise ValueError(
-                    f"deferred translation refers to unknown page xref {page_xref}"
+            def publish_completed_pages():
+                for page_xref in device.take_completed_page_xrefs():
+                    _check_translation_cancelled(cancellation_event)
+                    page_number = page_numbers_by_xref[page_xref]
+                    tracker.page_completed(page_number)
+                    progress.update()
+                    if callback:
+                        callback(progress)
+                    if preview_renderer is not None:
+                        png = preview_renderer.render(
+                            page_number,
+                            page_xref,
+                            obj_patch,
+                            device.resolve_uri_underline_markers,
+                        )
+                        _check_translation_cancelled(cancellation_event)
+                        preview_callback(
+                            PagePreview(
+                                page_number=page_number,
+                                completed_pages=tracker.completed_pages,
+                                total_pages=total_pages,
+                                png_bytes=png,
+                            )
+                        )
+
+            for pageno, page in enumerate(PDFPage.create_pages(doc)):
+                _check_translation_cancelled(cancellation_event)
+                if pageno not in selected_pages:
+                    continue
+                tracker.emit("analyzing", pageno + 1)
+                page.pageno = pageno
+                pix = doc_zh[page.pageno].get_pixmap()
+                image = np.frombuffer(pix.samples, np.uint8).reshape(
+                    pix.height, pix.width, 3
+                )[:, :, ::-1]
+                scan_background = prepare_scan_background(doc_zh[page.pageno], image)
+                if scan_background is not None:
+                    device.scan_backgrounds[page.pageno] = scan_background
+                page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
+                # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
+                box, page_region_types = _build_layout_mask(
+                    page_layout,
+                    pix.height,
+                    pix.width,
                 )
-            obj_patch[page_xref] += translated_ops
-    for xref, operations in obj_patch.items():
-        obj_patch[xref] = device.resolve_uri_underline_markers(operations)
-    device.close()
-    return obj_patch
+                if not hasattr(device, "layout_detections"):
+                    device.layout_detections = {}
+                device.layout_detections[page.pageno] = _layout_detections(
+                    page_layout, pix.height, pix.width
+                )
+                layout_region_types[page.pageno] = page_region_types
+                layout[page.pageno] = box
+                device.source_closed_box_strokes[page.pageno] = (
+                    _collect_closed_box_strokes(doc_zh[page.pageno])
+                )
+                # 新建一个 xref 存放新指令流
+                page.page_xref = doc_zh.get_new_xref()
+                doc_zh.update_object(page.page_xref, "<<>>")
+                doc_zh.update_stream(page.page_xref, b"")
+                doc_zh[page.pageno].set_contents(page.page_xref)
+                page_numbers_by_xref[page.page_xref] = pageno + 1
+                _check_translation_cancelled(cancellation_event)
+                tracker.emit("translating", pageno + 1)
+                interpreter.process_page(page)
+                publish_completed_pages()
+
+            _check_translation_cancelled(cancellation_event)
+            for page_xref, translated_ops in device.flush_deferred_pages().items():
+                if page_xref not in obj_patch:
+                    raise ValueError(
+                        f"deferred translation refers to unknown page xref {page_xref}"
+                    )
+                obj_patch[page_xref] += translated_ops
+            publish_completed_pages()
+        for xref, operations in obj_patch.items():
+            obj_patch[xref] = device.resolve_uri_underline_markers(operations)
+        return obj_patch
+    finally:
+        if preview_renderer is not None:
+            preview_renderer.close()
+        device.close()
 
 
 def translate_stream(
@@ -523,105 +630,126 @@ def translate_stream(
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
     chatgpt_task_id: str = None,
+    progress_callback: object = None,
+    preview_callback: object = None,
+    preview_max_dimension: int = 1400,
     **kwarg: Any,
 ):
-    if service.split(":", 1)[0] == "chatgpt-browser" and chatgpt_task_id is None:
-        # Compute before MuPDF rewrites bytes or injects fonts/object IDs.
-        chatgpt_task_id = _chatgpt_document_task_id(
-            stream,
-            pages=pages,
-            lang_in=lang_in,
-            lang_out=lang_out,
-            prompt=prompt,
-            vfont=vfont,
-            vchar=vchar,
-            model=model,
-            compatible=kwarg.get("compatible", False),
+    _check_translation_cancelled(cancellation_event)
+    doc_en = doc_zh = None
+    try:
+        doc_en = Document(stream=stream)
+        _progress_tracker = TranslationProgressTracker(
+            len(_selected_page_numbers(doc_en, pages)), progress_callback
         )
-    font_list = [("tiro", None, None)]
+        _progress_tracker.emit("preparing")
+        if service.split(":", 1)[0] == "chatgpt-browser" and chatgpt_task_id is None:
+            # Compute before MuPDF rewrites bytes or injects fonts/object IDs.
+            chatgpt_task_id = _chatgpt_document_task_id(
+                stream,
+                pages=pages,
+                lang_in=lang_in,
+                lang_out=lang_out,
+                prompt=prompt,
+                vfont=vfont,
+                vchar=vchar,
+                model=model,
+                compatible=kwarg.get("compatible", False),
+            )
+        font_list = [("tiro", None, None)]
 
-    font_path = prepare_pdf_text_font(download_remote_fonts(lang_out.lower()))
-    noto_name = NOTO_NAME
-    noto = Font(noto_name, font_path)
-    font_list.append((noto_name, font_path, None))
-    # CJK target fonts do not cover every author-name character (e.g. Ł/ł).
-    # Embed the bundled Roman font as Unicode rather than writing glyph zero.
-    latin_name = LATIN_NAME
-    latin = Font("tiro")
-    font_list.append((latin_name, None, latin.buffer))
+        font_path = prepare_pdf_text_font(download_remote_fonts(lang_out.lower()))
+        noto_name = NOTO_NAME
+        noto = Font(noto_name, font_path)
+        font_list.append((noto_name, font_path, None))
+        # CJK target fonts do not cover every author-name character (e.g. Ł/ł).
+        # Embed the bundled Roman font as Unicode rather than writing glyph zero.
+        latin_name = LATIN_NAME
+        latin = Font("tiro")
+        font_list.append((latin_name, None, latin.buffer))
 
-    doc_en = Document(stream=stream)
-    stream = io.BytesIO()
-    doc_en.save(stream)
-    doc_zh = Document(stream=stream)
-    page_count = doc_zh.page_count
-    # font_list = [("GoNotoKurrent-Regular.ttf", font_path), ("tiro", None)]
-    font_id = {}
-    for page in doc_zh:
-        for font in font_list:
-            font_id[font[0]] = page.insert_font(font[0], font[1], fontbuffer=font[2])
-    xreflen = doc_zh.xref_length()
-    for xref in range(1, xreflen):
-        for label in ["Resources/", ""]:  # 可能是基于 xobj 的 res
-            try:  # xref 读写可能出错
-                font_res = doc_zh.xref_get_key(xref, f"{label}Font")
-                target_key_prefix = f"{label}Font/"
-                if font_res[0] == "xref":
-                    resource_xref_id = re.search("(\\d+) 0 R", font_res[1]).group(1)
-                    xref = int(resource_xref_id)
-                    font_res = ("dict", doc_zh.xref_object(xref))
-                    target_key_prefix = ""
+        stream = io.BytesIO()
+        doc_en.save(stream)
+        doc_zh = Document(stream=stream)
+        page_count = doc_zh.page_count
+        # font_list = [("GoNotoKurrent-Regular.ttf", font_path), ("tiro", None)]
+        font_id = {}
+        for page in doc_zh:
+            for font in font_list:
+                font_id[font[0]] = page.insert_font(
+                    font[0], font[1], fontbuffer=font[2]
+                )
+        xreflen = doc_zh.xref_length()
+        for xref in range(1, xreflen):
+            for label in ["Resources/", ""]:  # 可能是基于 xobj 的 res
+                try:  # xref 读写可能出错
+                    font_res = doc_zh.xref_get_key(xref, f"{label}Font")
+                    target_key_prefix = f"{label}Font/"
+                    if font_res[0] == "xref":
+                        resource_xref_id = re.search("(\\d+) 0 R", font_res[1]).group(1)
+                        xref = int(resource_xref_id)
+                        font_res = ("dict", doc_zh.xref_object(xref))
+                        target_key_prefix = ""
 
-                if font_res[0] == "dict":
-                    for font in font_list:
-                        target_key = f"{target_key_prefix}{font[0]}"
-                        font_exist = doc_zh.xref_get_key(xref, target_key)
-                        if font_exist[0] == "null":
-                            doc_zh.xref_set_key(
-                                xref,
-                                target_key,
-                                f"{font_id[font[0]]} 0 R",
-                            )
-            except Exception:
-                pass
+                    if font_res[0] == "dict":
+                        for font in font_list:
+                            target_key = f"{target_key_prefix}{font[0]}"
+                            font_exist = doc_zh.xref_get_key(xref, target_key)
+                            if font_exist[0] == "null":
+                                doc_zh.xref_set_key(
+                                    xref,
+                                    target_key,
+                                    f"{font_id[font[0]]} 0 R",
+                                )
+                except Exception:
+                    pass
 
-    fp = io.BytesIO()
+        fp = io.BytesIO()
 
-    doc_zh.save(fp)
-    obj_patch: dict = translate_patch(fp, **locals())
+        doc_zh.save(fp)
+        obj_patch: dict = translate_patch(fp, **locals())
+        _check_translation_cancelled(cancellation_event)
+        _progress_tracker.emit("finalizing")
 
-    for obj_id, ops_new in obj_patch.items():
-        # ops_old=doc_en.xref_stream(obj_id)
-        # print(obj_id)
-        # print(ops_old)
-        # print(ops_new.encode())
-        doc_zh.update_stream(obj_id, ops_new.encode())
+        for obj_id, ops_new in obj_patch.items():
+            # ops_old=doc_en.xref_stream(obj_id)
+            # print(obj_id)
+            # print(ops_old)
+            # print(ops_new.encode())
+            doc_zh.update_stream(obj_id, ops_new.encode())
 
-    for page in doc_zh:
-        if any(xref in obj_patch for xref in page.get_contents()):
-            suppress_reflowed_link_borders(page)
+        for page in doc_zh:
+            if any(xref in obj_patch for xref in page.get_contents()):
+                suppress_reflowed_link_borders(page)
 
-    doc_en.insert_file(doc_zh)
-    restore_imported_named_links(doc_zh, doc_en, start_at=page_count)
-    restore_imported_uri_links(doc_zh, doc_en, start_at=page_count)
-    for id in range(page_count):
-        doc_en.move_page(page_count + id, id * 2 + 1)
-    if not skip_subset_fonts:
-        # Rebuild MuPDF's document/font state after replacing content streams
-        # and grafting pages. Subsetting those live edited objects can leave
-        # stale native font references and crash during tracing or final save.
-        # Snapshot both documents before either one's fonts are mutated.
-        serialized_zh, serialized_en = doc_zh.write(), doc_en.write()
-        doc_zh.close()
-        doc_en.close()
-        doc_zh = Document(stream=serialized_zh)
-        doc_en = Document(stream=serialized_en)
-        doc_zh.subset_fonts(fallback=True)
-        doc_en.subset_fonts(fallback=True)
-    return (
-        doc_zh.write(deflate=True, garbage=3, use_objstms=1),
-        doc_en.write(deflate=True, garbage=3, use_objstms=1),
-    )
+        doc_en.insert_file(doc_zh)
+        restore_imported_named_links(doc_zh, doc_en, start_at=page_count)
+        restore_imported_uri_links(doc_zh, doc_en, start_at=page_count)
+        for id in range(page_count):
+            doc_en.move_page(page_count + id, id * 2 + 1)
+        if not skip_subset_fonts:
+            # Rebuild MuPDF's document/font state after replacing content streams
+            # and grafting pages. Subsetting those live edited objects can leave
+            # stale native font references and crash during tracing or final save.
+            # Snapshot both documents before either one's fonts are mutated.
+            serialized_zh, serialized_en = doc_zh.write(), doc_en.write()
+            doc_zh.close()
+            doc_en.close()
+            doc_zh = Document(stream=serialized_zh)
+            doc_en = Document(stream=serialized_en)
+            doc_zh.subset_fonts(fallback=True)
+            doc_en.subset_fonts(fallback=True)
+        _check_translation_cancelled(cancellation_event)
+        results = (
+            doc_zh.write(deflate=True, garbage=3, use_objstms=1),
+            doc_en.write(deflate=True, garbage=3, use_objstms=1),
+        )
+        _progress_tracker.emit("complete")
+        return results
+    finally:
+        for document in (doc_zh, doc_en):
+            if document is not None and not document.is_closed:
+                document.close()
 
 
 def convert_to_pdfa(input_path, output_path):
@@ -691,6 +819,9 @@ def translate(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
+    progress_callback: object = None,
+    preview_callback: object = None,
+    preview_max_dimension: int = 1400,
     **kwarg: Any,
 ):
     if not files:

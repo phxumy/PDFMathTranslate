@@ -73,18 +73,29 @@ class GraphicsFidelityTests(unittest.TestCase):
                     doc.update_stream(xref, operations)
                 before = page.get_pixmap(matrix=fitz.Matrix(3, 3)).samples
                 preserve_locally(doc)
-                self.assertEqual(doc[0].get_pixmap(matrix=fitz.Matrix(3, 3)).samples, before)
+                self.assertEqual(
+                    doc[0].get_pixmap(matrix=fitz.Matrix(3, 3)).samples, before
+                )
 
     def test_named_icc_text_keeps_original_profile_and_escaped_resource_name(self):
         with fitz.open() as doc:
             page = doc.new_page(width=240, height=200)
-            page.insert_text((20, 40), "Profile color", fontsize=12, color=(0.13725, 0.094118, 0.082353))
+            page.insert_text(
+                (20, 40),
+                "Profile color",
+                fontsize=12,
+                color=(0.13725, 0.094118, 0.082353),
+            )
             profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
             xref = doc.get_new_xref()
             doc.update_object(xref, "<< /N 3 /Alternate /DeviceRGB >>")
             doc.update_stream(xref, profile)
             resources = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])
-            doc.xref_set_key(resources, "ColorSpace", f"<< /Original#20ICC#E8#89#B2 [/ICCBased {xref} 0 R] >>")
+            doc.xref_set_key(
+                resources,
+                "ColorSpace",
+                f"<< /Original#20ICC#E8#89#B2 [/ICCBased {xref} 0 R] >>",
+            )
             for content in page.get_contents():
                 operations = doc.xref_stream(content)
                 operations = re.sub(
@@ -98,7 +109,9 @@ class GraphicsFidelityTests(unittest.TestCase):
             operations = preserve_locally(doc)
             self.assertIn("/Original#20ICC#E8#89#B2 cs", operations)
             self.assertEqual(text_colors(doc[0]), before)
-            self.assertEqual(doc[0].get_pixmap(matrix=fitz.Matrix(2, 2)).samples, before_pixels)
+            self.assertEqual(
+                doc[0].get_pixmap(matrix=fitz.Matrix(2, 2)).samples, before_pixels
+            )
 
     def test_dash_arrays_and_phase_survive_real_pdf_roundtrip(self):
         with fitz.open() as doc:
@@ -130,7 +143,9 @@ class GraphicsFidelityTests(unittest.TestCase):
             page.insert_text((110, 33), "Black", color=(0,), fontsize=12)
             page.insert_text((20, 80), "RGB", color=(0.2, 0.4, 0.8), fontsize=12)
             page.insert_text((20, 110), "CMYK", color=(0, 1, 1, 0), fontsize=12)
-            page.insert_text((160, 150), "Rotated", color=(0.7,), fontsize=12, rotate=90)
+            page.insert_text(
+                (160, 150), "Rotated", color=(0.7,), fontsize=12, rotate=90
+            )
             before = text_colors(page)
             preserve_locally(doc)
             self.assertEqual(text_colors(doc[0]), before)

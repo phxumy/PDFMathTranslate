@@ -862,7 +862,9 @@ def _affiliation_parts(
     markers = []
     for start, end, raw in _affiliation_markers(text, formula_texts):
         following = text[end : end + 80]
-        institution = _AFFILIATION_RE.search(following) or _AFFILIATION_NOTE_RE.search(following)
+        institution = _AFFILIATION_RE.search(following) or _AFFILIATION_NOTE_RE.search(
+            following
+        )
         # A room/postal number can see the *next* institution inside the broad
         # marker lookahead. Its intervening comma or marker rules out a start.
         if institution and not re.search(r"[,;{}\d]", following[: institution.start()]):

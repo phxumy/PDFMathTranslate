@@ -693,8 +693,14 @@ class AuthorAffiliationTests(unittest.TestCase):
             "Quantum Materials, South China Normal University, Guangzhou 510006, China"
         )
         address = SourceSegment(
-            index=3, text=source, y0=605, y1=660, size=9.5,
-            page_width=612, page_height=792, region_kind="plain text",
+            index=3,
+            text=source,
+            y0=605,
+            y1=660,
+            size=9.5,
+            page_width=612,
+            page_height=792,
+            region_kind="plain text",
         )
         policy = DocumentTranslationPolicy()
         plan = policy.plan_segment(address, formula_texts=("2",))
@@ -716,7 +722,11 @@ class AuthorAffiliationTests(unittest.TestCase):
             SourceSegment(
                 index=3,
                 text="[1] A. Smith, University Research Methods, Science 20, 1 (2020).",
-                y0=605, y1=660, size=9.5, page_width=612, page_height=792,
+                y0=605,
+                y1=660,
+                size=9.5,
+                page_width=612,
+                page_height=792,
             )
         )
         self.assertNotIn(ROLE_AFFILIATION, [part.role for part in plan.parts])

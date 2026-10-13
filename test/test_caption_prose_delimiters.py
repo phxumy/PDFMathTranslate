@@ -2,13 +2,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from pdf2zh.converter import _release_caption_prose_delimiters, _release_prose_slash_connectives
+from pdf2zh.converter import (
+    _release_caption_prose_delimiters,
+    _release_prose_slash_connectives,
+)
 from test_formula_boundary_punctuation import FakeChar
 
 
 def release(source, value, *, kind="figure_caption", font="Times-Roman"):
-    chars = [FakeChar(c, x0=i * 5, x1=(i + 1) * 5, fontname=font,
-                      layout_class=11) for i, c in enumerate(value)]
+    chars = [
+        FakeChar(c, x0=i * 5, x1=(i + 1) * 5, fontname=font, layout_class=11)
+        for i, c in enumerate(value)
+    ]
     segments, formulas = [source], [chars]
     paragraph = SimpleNamespace(region_kind=kind, layout_class=11, size=9)
     _release_caption_prose_delimiters(segments, formulas, [0], [paragraph])
@@ -32,15 +37,53 @@ def test_caption_closing_parenthesis_leaves_variable_glyphs_unchanged():
     assert all(actual is expected for actual, expected in zip(formula, original))
 
 
-@pytest.mark.parametrize("source,value,kind,font", [
-    ("FIG. 2. (a) Value {v0} Pulse sequence.", ").(b)", "figure_caption", "Times-Roman"),
-    ("FIG. 2. (a) Value (arrow{v0} Pulse sequence.", ").(d)", "figure_caption", "Times-Roman"),
-    ("FIG. 2. (a) Value (arrow{v0} Pulse sequence.", ").(b)", "plain text", "Times-Roman"),
-    ("FIG. 2. (a) Value (arrow{v0} Pulse sequence.", ").(b)", "figure_caption", "CMSY10"),
-    ("FIG. 2. (a) Value (function {v0} and time.", "f(x)", "figure_caption", "Times-Roman"),
-    ("FIG. 2. (a) Value (function {v0} and time.", "(x)", "figure_caption", "Times-Roman"),
-    ("FIG. 2. (a) Value (function {v0} and time.", "x)", "figure_caption", "CMSY10"),
-])
+@pytest.mark.parametrize(
+    "source,value,kind,font",
+    [
+        (
+            "FIG. 2. (a) Value {v0} Pulse sequence.",
+            ").(b)",
+            "figure_caption",
+            "Times-Roman",
+        ),
+        (
+            "FIG. 2. (a) Value (arrow{v0} Pulse sequence.",
+            ").(d)",
+            "figure_caption",
+            "Times-Roman",
+        ),
+        (
+            "FIG. 2. (a) Value (arrow{v0} Pulse sequence.",
+            ").(b)",
+            "plain text",
+            "Times-Roman",
+        ),
+        (
+            "FIG. 2. (a) Value (arrow{v0} Pulse sequence.",
+            ").(b)",
+            "figure_caption",
+            "CMSY10",
+        ),
+        (
+            "FIG. 2. (a) Value (function {v0} and time.",
+            "f(x)",
+            "figure_caption",
+            "Times-Roman",
+        ),
+        (
+            "FIG. 2. (a) Value (function {v0} and time.",
+            "(x)",
+            "figure_caption",
+            "Times-Roman",
+        ),
+        (
+            "FIG. 2. (a) Value (function {v0} and time.",
+            "x)",
+            "figure_caption",
+            "CMSY10",
+        ),
+    ],
+)
 def test_mathematical_and_unproven_delimiters_are_preserved(source, value, kind, font):
     text, formula, original = release(source, value, kind=kind, font=font)
     assert text == source

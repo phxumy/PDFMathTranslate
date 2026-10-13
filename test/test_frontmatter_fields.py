@@ -9,10 +9,13 @@ from pdf2zh.translation_policy import (
     ROLE_TRANSLATE,
     SourceSegment,
 )
-from test_converter_translation_policy import FakeCodexTranslator, converter_with, paragraph
+from test_converter_translation_policy import (
+    FakeCodexTranslator,
+    converter_with,
+    paragraph,
+)
 from pdf2zh.translator import CodexTranslator
 from test_codex_formula_context import translator_stub
-
 
 ADDRESS = (
     "IBM T J Watson Research Center, Yorktown Heights, NY 10598, "
@@ -28,27 +31,49 @@ FIELDS = (
 
 def segment(text, *, lines=()):
     return SourceSegment(
-        index=2, text=text, x0=147, x1=487, y0=551, y1=577,
-        size=11.955, page_width=595, page_height=842, region_kind="plain text",
+        index=2,
+        text=text,
+        x0=147,
+        x1=487,
+        y0=551,
+        y1=577,
+        size=11.955,
+        page_width=595,
+        page_height=842,
+        region_kind="plain text",
         break_offsets=tuple(len(" ".join(lines[:i])) for i in range(1, len(lines))),
     )
 
 
-@pytest.mark.parametrize("address", [ADDRESS,
-    "Example Research Institute, Cambridge CB3 0HE, UK E-mail: author@example.org",
-    "National Laboratory, Pasadena, CA 91125, USA",
-])
-def test_postal_or_contact_address_is_not_preserved_as_capitalized_person_names(address):
+@pytest.mark.parametrize(
+    "address",
+    [
+        ADDRESS,
+        "Example Research Institute, Cambridge CB3 0HE, UK E-mail: author@example.org",
+        "National Laboratory, Pasadena, CA 91125, USA",
+    ],
+)
+def test_postal_or_contact_address_is_not_preserved_as_capitalized_person_names(
+    address,
+):
     plan = DocumentTranslationPolicy().plan_segment(segment(address))
-    assert [(part.role, part.text) for part in plan.parts] == [(ROLE_AFFILIATION, address)]
+    assert [(part.role, part.text) for part in plan.parts] == [
+        (ROLE_AFFILIATION, address)
+    ]
 
 
 def test_address_does_not_change_author_or_combined_byline_roles():
     authors = "John Smith{v0}, Jane Doe and Alice Jones"
-    plan = DocumentTranslationPolicy().plan_segment(segment(authors), formula_texts=["1"])
+    plan = DocumentTranslationPolicy().plan_segment(
+        segment(authors), formula_texts=["1"]
+    )
     assert [part.role for part in plan.parts] == [ROLE_PRESERVE]
-    combined = "A. Smith, B. Jones {v0}Department of Physics, Example University, NY 10598"
-    plan = DocumentTranslationPolicy().plan_segment(segment(combined), formula_texts=["1"])
+    combined = (
+        "A. Smith, B. Jones {v0}Department of Physics, Example University, NY 10598"
+    )
+    plan = DocumentTranslationPolicy().plan_segment(
+        segment(combined), formula_texts=["1"]
+    )
     assert [part.role for part in plan.parts] == [ROLE_PRESERVE, ROLE_AFFILIATION]
 
 
@@ -73,12 +98,17 @@ def test_publication_fields_keep_physical_line_boundaries_and_preserve_doi():
     assert "".join(part.text for part in plan.parts) == source
 
 
-@pytest.mark.parametrize("lines", [
-    ("Received: 2021-04-02", "Accepted: June 4, 2021"),
-    ("Revised 8 October 2018", "Published online 12 November 2018"),
-])
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ("Received: 2021-04-02", "Accepted: June 4, 2021"),
+        ("Revised 8 October 2018", "Published online 12 November 2018"),
+    ],
+)
 def test_other_publication_date_formats_use_source_line_breaks(lines):
-    plan = DocumentTranslationPolicy().plan_segment(segment(" ".join(lines), lines=lines))
+    plan = DocumentTranslationPolicy().plan_segment(
+        segment(" ".join(lines), lines=lines)
+    )
     assert len(plan.parts) == 2
     assert plan.parts[1].break_before
 
@@ -87,10 +117,17 @@ def test_metadata_like_prose_or_absent_source_break_does_not_force_newlines():
     source = " ".join(FIELDS)
     for candidate in (
         segment(source),
-        segment("Received signal from an experiment. Published results are accurate.",
-                lines=("Received signal from an experiment.", "Published results are accurate.")),
-        segment("Received 9 July 2013. We discuss a later experiment.",
-                lines=("Received 9 July 2013.", "We discuss a later experiment.")),
+        segment(
+            "Received signal from an experiment. Published results are accurate.",
+            lines=(
+                "Received signal from an experiment.",
+                "Published results are accurate.",
+            ),
+        ),
+        segment(
+            "Received 9 July 2013. We discuss a later experiment.",
+            lines=("Received 9 July 2013.", "We discuss a later experiment."),
+        ),
         replace(segment(source, lines=FIELDS), region_kind="figure_caption"),
     ):
         assert len(DocumentTranslationPolicy().plan_segment(candidate).parts) == 1
@@ -122,8 +159,11 @@ def test_standalone_numbered_institutions_translate_wholly_and_remain_separate()
         def translate_batch(self, texts):
             self.seen.extend(texts)
             return [
-                "1清华大学机构，北京100084，中国" if text.startswith("1Center")
-                else "{v2}华南师范大学机构，广州510006，中国"
+                (
+                    "1清华大学机构，北京100084，中国"
+                    if text.startswith("1Center")
+                    else "{v2}华南师范大学机构，广州510006，中国"
+                )
                 for text in texts
             ]
 
@@ -132,8 +172,11 @@ def test_standalone_numbered_institutions_translate_wholly_and_remain_separate()
     address_paragraph = paragraph()
     address_paragraph.y0, address_paragraph.y1, address_paragraph.size = 605, 660, 9.5
     output = converter._translate_planned_segments(
-        [source], [address_paragraph], formula_texts=["1", "1", "2"],
-        page_width=612, page_height=792,
+        [source],
+        [address_paragraph],
+        formula_texts=["1", "1", "2"],
+        page_width=612,
+        page_height=792,
     )
     boundary = source.index("{v2}")
     assert translator.seen == [source[:boundary], source[boundary:]]
@@ -141,7 +184,9 @@ def test_standalone_numbered_institutions_translate_wholly_and_remain_separate()
     assert "School of Physics and Telecommunication Engineering" in translator.seen[1]
     backend = CodexTranslator.__new__(CodexTranslator)
     assert all(backend._split_long_text(text) == [text] for text in translator.seen)
-    assert output == ["1清华大学机构，北京100084，中国\n{v2}华南师范大学机构，广州510006，中国"]
+    assert output == [
+        "1清华大学机构，北京100084，中国\n{v2}华南师范大学机构，广州510006，中国"
+    ]
     assert not translator.reference_entries
 
 
@@ -157,30 +202,53 @@ def test_numbered_affiliation_parts_bypass_the_old_whole_block_cache():
 
     def translate(texts, **kwargs):
         calls.extend(texts)
-        return ["1第一机构，美国" if text.startswith("1Department")
+        return [
+            (
+                "1第一机构，美国"
+                if text.startswith("1Department")
                 else "{v0}物理与电信工程学院，华南师范大学，中国广州510006"
-                for text in texts]
+            )
+            for text in texts
+        ]
 
     translator._run_batch_translation = translate
     converter = converter_with(translator)
     result = converter._translate_planned_segments(
-        [source], [paragraph()], formula_texts=["2"], page_width=612, page_height=792,
+        [source],
+        [paragraph()],
+        formula_texts=["2"],
+        page_width=612,
+        page_height=792,
     )
     boundary = source.index("{v0}")
     assert calls == [source[:boundary], source[boundary:]]
-    assert result == ["1第一机构，美国\n{v0}物理与电信工程学院，华南师范大学，中国广州510006"]
+    assert result == [
+        "1第一机构，美国\n{v0}物理与电信工程学院，华南师范大学，中国广州510006"
+    ]
     assert all(translator.cache.get(part) for part in calls)
     assert translator.cache.get(source) == "1旧机构{v0}物理学院和电信工程"
 
 
-@pytest.mark.parametrize("source,formulas", [
-    ("1School of Physics and Telecommunication Engineering, Example University, USA", []),
-    ("Department of Physics, Example University, NY 10598, USA", []),
-    ("1Department of Physics, Example University, Room {v0}, USA", ["12"]),
-])
-def test_single_institution_or_room_number_remains_one_translation_unit(source, formulas):
-    plan = DocumentTranslationPolicy().plan_segment(segment(source), formula_texts=formulas)
-    assert [(part.role, part.text) for part in plan.parts] == [(ROLE_AFFILIATION, source)]
+@pytest.mark.parametrize(
+    "source,formulas",
+    [
+        (
+            "1School of Physics and Telecommunication Engineering, Example University, USA",
+            [],
+        ),
+        ("Department of Physics, Example University, NY 10598, USA", []),
+        ("1Department of Physics, Example University, Room {v0}, USA", ["12"]),
+    ],
+)
+def test_single_institution_or_room_number_remains_one_translation_unit(
+    source, formulas
+):
+    plan = DocumentTranslationPolicy().plan_segment(
+        segment(source), formula_texts=formulas
+    )
+    assert [(part.role, part.text) for part in plan.parts] == [
+        (ROLE_AFFILIATION, source)
+    ]
 
 
 def test_room_number_near_the_next_institution_does_not_create_a_third_part():
@@ -188,7 +256,9 @@ def test_room_number_near_the_next_institution_does_not_create_a_third_part():
         "1Department of Physics, Example University, Room {v0}, USA "
         "{v1}Department of Chemistry, Other University, UK"
     )
-    plan = DocumentTranslationPolicy().plan_segment(segment(source), formula_texts=["12", "2"])
+    plan = DocumentTranslationPolicy().plan_segment(
+        segment(source), formula_texts=["12", "2"]
+    )
     boundary = source.index("{v1}")
     assert [part.text for part in plan.parts] == [source[:boundary], source[boundary:]]
     assert [part.break_before for part in plan.parts] == [False, True]
@@ -202,19 +272,32 @@ def test_converter_delivers_distinct_metadata_fields_and_preserves_email_literal
 
         def translate_batch(self, texts):
             self.seen.extend(texts)
-            return [text.replace("IBM T J Watson Research Center", "IBM研究中心")
-                    .replace("Received", "收稿日期").replace("Published", "发表日期")
-                    .replace("Online at", "在线地址") for text in texts]
+            return [
+                text.replace("IBM T J Watson Research Center", "IBM研究中心")
+                .replace("Received", "收稿日期")
+                .replace("Published", "发表日期")
+                .replace("Online at", "在线地址")
+                for text in texts
+            ]
 
     translator = Translator()
     converter = converter_with(translator)
     address_paragraph = paragraph()
-    address_paragraph.y0, address_paragraph.y1, address_paragraph.size = 551, 577, 11.955
+    address_paragraph.y0, address_paragraph.y1, address_paragraph.size = (
+        551,
+        577,
+        11.955,
+    )
     fields_paragraph = paragraph()
-    fields_paragraph.break_offsets = list(segment(" ".join(FIELDS), lines=FIELDS).break_offsets)
+    fields_paragraph.break_offsets = list(
+        segment(" ".join(FIELDS), lines=FIELDS).break_offsets
+    )
     output = converter._translate_planned_segments(
-        [ADDRESS, " ".join(FIELDS)], [address_paragraph, fields_paragraph],
-        formula_texts=[], page_width=595, page_height=842,
+        [ADDRESS, " ".join(FIELDS)],
+        [address_paragraph, fields_paragraph],
+        formula_texts=[],
+        page_width=595,
+        page_height=842,
     )
     assert "IBM研究中心" in output[0]
     assert "chowmj@us.ibm.com" in output[0]

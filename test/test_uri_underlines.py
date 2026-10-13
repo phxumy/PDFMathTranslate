@@ -32,14 +32,17 @@ def state(**values):
     return result
 
 
-@pytest.mark.parametrize("start,end,style", [
-    ((20, 100.6), (89, 100.6), state()),  # wrong endpoint
-    ((20, 103), (90, 103), state()),  # not an underline
-    ((20, 100.6), (90, 101), state()),  # sloped scientific line
-    ((20, 100.6), (90, 100.6), state(dash=([2, 2], 0))),
-    ((20, 100.6), (90, 100.6), state(linewidth=2)),
-    ((20, 100.6), (90, 100.6), state(scolor=(0, 0, 0))),
-])
+@pytest.mark.parametrize(
+    "start,end,style",
+    [
+        ((20, 100.6), (89, 100.6), state()),  # wrong endpoint
+        ((20, 103), (90, 103), state()),  # not an underline
+        ((20, 100.6), (90, 101), state()),  # sloped scientific line
+        ((20, 100.6), (90, 100.6), state(dash=([2, 2], 0))),
+        ((20, 100.6), (90, 100.6), state(linewidth=2)),
+        ((20, 100.6), (90, 100.6), state(scolor=(0, 0, 0))),
+    ],
+)
 def test_nonmatching_scientific_strokes_are_never_marked(start, end, style):
     assert converter_for_line().mark_uri_underline(start, end, style) == ""
 
@@ -56,24 +59,31 @@ def test_matching_marker_is_resolved_only_for_reflowed_prose_and_always_cleared(
     assert " l n " in removed
 
 
-@pytest.mark.parametrize("case,removed", [
-    ({}, True),
-    ({"unchanged": True}, False),
-    ({"brk": False}, False),
-    ({"layout_class": 0}, False),
-    ({"region_kind": "figure"}, False),
-    ({"region_kind": "table"}, False),
-])
+@pytest.mark.parametrize(
+    "case,removed",
+    [
+        ({}, True),
+        ({"unchanged": True}, False),
+        ({"brk": False}, False),
+        ({"layout_class": 0}, False),
+        ({"region_kind": "figure"}, False),
+        ({"region_kind": "table"}, False),
+    ],
+)
 def test_form_xobject_prose_reflow_protects_unchanged_and_graphics(case, removed):
     converter = converter_for_line()
     converter.cur_item = LTFigure("cover", (0, 0, 240, 200), (1, 0, 0, 1, 0, 0))
     converter.cur_item.pageid = 0
     marker = converter.mark_uri_underline((20, 100.6), (90, 100.6), state())
     assert marker
-    values = dict(brk=True, layout_class=4, region_kind="plain text", x0=19, y0=99, x1=91, y1=108)
+    values = dict(
+        brk=True, layout_class=4, region_kind="plain text", x0=19, y0=99, x1=91, y1=108
+    )
     unchanged = case.get("unchanged", False)
     values.update({key: value for key, value in case.items() if key != "unchanged"})
-    converter._record_reflowed_uri_prose(0, ["source"], ["source" if unchanged else "译文"], [SimpleNamespace(**values)])
+    converter._record_reflowed_uri_prose(
+        0, ["source"], ["source" if unchanged else "译文"], [SimpleNamespace(**values)]
+    )
     operations = "20 100.6 m 90 100.6 l " + marker + "\n S"
     result = converter.resolve_uri_underline_markers(operations)
     assert "PDF2ZH" not in result
@@ -83,10 +93,24 @@ def test_form_xobject_prose_reflow_protects_unchanged_and_graphics(case, removed
 def test_raw_relative_uri_is_supported_without_treating_launch_as_uri():
     with fitz.open() as doc:
         page = doc.new_page(width=240, height=200)
-        page.insert_link({"kind": fitz.LINK_URI, "from": fitz.Rect(20, 93, 90, 100), "uri": "/relative"})
-        page.insert_link({"kind": fitz.LINK_LAUNCH, "from": fitz.Rect(20, 120, 90, 127), "file": "program.exe"})
+        page.insert_link(
+            {
+                "kind": fitz.LINK_URI,
+                "from": fitz.Rect(20, 93, 90, 100),
+                "uri": "/relative",
+            }
+        )
+        page.insert_link(
+            {
+                "kind": fitz.LINK_LAUNCH,
+                "from": fitz.Rect(20, 120, 90, 127),
+                "file": "program.exe",
+            }
+        )
         page = doc.reload_page(page)
-        assert _collect_source_uri_links(doc) == {0: [("/relative", (20, 100, 90, 107))]}
+        assert _collect_source_uri_links(doc) == {
+            0: [("/relative", (20, 100, 90, 107))]
+        }
 
 
 @pytest.mark.parametrize("reflowed", [False, True])
@@ -94,7 +118,9 @@ def test_real_stroke_termination_and_following_scientific_line_survive(reflowed)
     with fitz.open() as doc:
         page = doc.new_page(width=240, height=200)
         page.draw_line((20, 99.4), (90, 99.4), color=(0, 0.4, 0.7), width=0.75)
-        page.draw_line((20, 130), (90, 130), color=(1, 0, 0), width=0.75, dashes="[2 2] 0")
+        page.draw_line(
+            (20, 130), (90, 130), color=(1, 0, 0), width=0.75, dashes="[2 2] 0"
+        )
         before = page.get_drawings()
         manager = PDFResourceManager()
         converter = TranslateConverter.__new__(TranslateConverter)

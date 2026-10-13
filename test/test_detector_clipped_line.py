@@ -3,7 +3,6 @@ import pytest
 from test_code_blocks import page_with_lines
 from test_detector_boundary_text import recover
 
-
 TEXT = "Let p. Recall that a function f is said to be sharp in the p norm if"
 
 
@@ -13,10 +12,14 @@ def narrow_box(text=TEXT):
     left = text.index("Recall") + 2
     right = text.index("norm") + 1
     converter.layout[0][:] = 1
-    converter.layout[0][:, int(chars[left].x0):int(chars[right].x0)] = 21
+    converter.layout[0][:, int(chars[left].x0) : int(chars[right].x0)] = 21
     converter.layout_region_types = {0: {21: "plain text"}}
     for i, c in enumerate(chars):
-        if text[i] in "pf" and (i == 0 or text[i - 1] == " ") and text[i + 1:i + 2] in {" ", "."}:
+        if (
+            text[i] in "pf"
+            and (i == 0 or text[i - 1] == " ")
+            and text[i + 1 : i + 2] in {" ", "."}
+        ):
             c.fontname = "MathFont"
     return converter, page, chars, left, right
 
@@ -35,9 +38,18 @@ def test_both_clipped_edges_restore_one_line_even_after_math_or_punctuation():
     assert all(c in protected for c in chars if c.fontname == "MathFont")
 
 
-@pytest.mark.parametrize("change", [
-    "gap", "different_line", "protected", "title", "code", "scan", "rotation",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "gap",
+        "different_line",
+        "protected",
+        "title",
+        "code",
+        "scan",
+        "rotation",
+    ],
+)
 def test_clipped_edges_do_not_merge_across_non_prose_boundaries(change):
     converter, page, chars, left, right = narrow_box()
     middle = TEXT.index("function")
@@ -52,7 +64,9 @@ def test_clipped_edges_do_not_merge_across_non_prose_boundaries(change):
             c.y1 -= 16
             c._pdf2zh_source_text_state = None
     elif change in {"protected", "title"}:
-        converter.layout[0][:, int(chars[middle].x0):int(chars[middle + 1].x1)] = 0 if change == "protected" else 30
+        converter.layout[0][:, int(chars[middle].x0) : int(chars[middle + 1].x1)] = (
+            0 if change == "protected" else 30
+        )
         converter.layout_region_types[0][30] = "title"
     elif change == "code":
         protected.add(id(chars[middle]))

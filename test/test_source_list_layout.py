@@ -6,7 +6,11 @@ import pytest
 from pdfminer.layout import LTPage
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 
-from pdf2zh.converter import PDFConverterEx, TranslateConverter, _formula_horizontal_geometry
+from pdf2zh.converter import (
+    PDFConverterEx,
+    TranslateConverter,
+    _formula_horizontal_geometry,
+)
 
 
 class Font:
@@ -28,11 +32,17 @@ def converter(algorithm=False):
     PDFConverterEx.__init__(value, PDFResourceManager())
     value.cur_item = LTPage(0, (0, 0, 600, 800))
     value.layout = {0: np.full((800, 600), 0 if algorithm else 2)}
-    value.layout_region_types = {0: {2: "isolate_formula" if algorithm else "plain text"}}
+    value.layout_region_types = {
+        0: {2: "isolate_formula" if algorithm else "plain text"}
+    }
     if algorithm:
-        value.layout_detections = {0: [
-            SimpleNamespace(class_name="isolate_formula", value=2, bounds=(10, 500, 550, 750))
-        ]}
+        value.layout_detections = {
+            0: [
+                SimpleNamespace(
+                    class_name="isolate_formula", value=2, bounds=(10, 500, 550, 750)
+                )
+            ]
+        }
     value.vfont = value.vchar = ""
     value.translator = SimpleNamespace(name="google", lang_out="zh")
     value.noto_name, value.noto = "noto", None
@@ -50,8 +60,14 @@ def append(value, text, x, y, font="CMR10", mapping=None, size=10):
             x += size * 0.35
             continue
         value.render_char(
-            (1, 0, 0, 1, x, y), resource, size, 1, 0,
-            ord(char), None, PDFGraphicState(),
+            (1, 0, 0, 1, x, y),
+            resource,
+            size,
+            1,
+            0,
+            ord(char),
+            None,
+            PDFGraphicState(),
         )
         x += size * 0.5
     return x
@@ -91,15 +107,19 @@ def test_inline_bullet_and_asterisk_remain_in_mathematical_expression():
 
 def test_nested_algorithm_steps_keep_their_source_indents():
     value = converter(algorithm=True)
-    rows = [(40, 50, 700, "\\bullet ", "For k steps"),
-            (65, 75, 688, "--", "Set the next iterate."),
-            (85, 95, 676, "\\ast ", "Let the auxiliary variable vanish."),
-            (40, 50, 664, "\\bullet ", "Output the result.")]
+    rows = [
+        (40, 50, 700, "\\bullet ", "For k steps"),
+        (65, 75, 688, "--", "Set the next iterate."),
+        (85, 95, 676, "\\ast ", "Let the auxiliary variable vanish."),
+        (40, 50, 664, "\\bullet ", "Output the result."),
+    ]
     for mx, x, y, marker, text in rows:
         append(value, "@", mx, y, "CMSY10", {ord("@"): marker})
         append(value, text, x, y)
     draft = value.receive_layout(value.cur_item, preview_only=True)
-    actual = [(s, p.x, p.y) for s, p in zip(draft.sstk, draft.pstk) if not s.startswith("{v")]
+    actual = [
+        (s, p.x, p.y) for s, p in zip(draft.sstk, draft.pstk) if not s.startswith("{v")
+    ]
     assert actual == [(text, x, y) for _, x, y, _, text in rows]
 
 
@@ -117,7 +137,8 @@ def test_displayed_algorithm_equation_stays_at_source_baseline_with_fraction():
     append(value, "x", 170, 660, "CMMI10")
     draft = value.receive_layout(value.cur_item, preview_only=True)
     display_runs = [
-        (run, draft.pstk[draft.varp[i]]) for i, run in enumerate(draft.var)
+        (run, draft.pstk[draft.varp[i]])
+        for i, run in enumerate(draft.var)
         if any(ch.get_text() == "h" for ch in run)
     ]
     assert len(display_runs) == 1
@@ -126,7 +147,9 @@ def test_displayed_algorithm_equation_stays_at_source_baseline_with_fraction():
     assert paragraph.layout_class == 0
     assert all(ch._pdf2zh_layout_class == 0 for ch in run)
     assert paragraph.x == 130 and paragraph.y == 660
-    assert not any("2" in re.sub(r"\{v\d+\}", "", s) for s in draft.sstk if "where" in s)
+    assert not any(
+        "2" in re.sub(r"\{v\d+\}", "", s) for s in draft.sstk if "where" in s
+    )
 
 
 def test_inline_fraction_does_not_become_a_displayed_algorithm_equation():
@@ -159,7 +182,9 @@ def test_display_followed_by_a_leftward_list_marker_keeps_first_glyph_anchor():
     # The renderer places each glyph relative to this first-glyph anchor.
     assert paragraph.x == 130
     for char in display:
-        assert paragraph.x + char.x0 - _formula_horizontal_geometry(display)[0] == char.x0
+        assert (
+            paragraph.x + char.x0 - _formula_horizontal_geometry(display)[0] == char.x0
+        )
     output = next(p for s, p in zip(draft.sstk, draft.pstk) if "Output" in s)
     assert (output.x, output.y) == (50, 648)
 

@@ -1,7 +1,9 @@
 import socket
 import sys
 import unittest
-from unittest.mock import patch
+from threading import Event
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from pdf2zh.desktop import (
     DesktopOptions,
@@ -91,6 +93,22 @@ class DesktopPortTests(unittest.TestCase):
 
 
 class DesktopRuntimeTests(unittest.TestCase):
+    def test_shutdown_cancels_existing_workers_before_closing_the_server(self):
+        events = [Event(), Event()]
+        cancel_browser = Mock()
+        gui = SimpleNamespace(
+            cancellation_event_map={"first": events[0], "second": events[1]},
+            cancel_chatgpt_wait=cancel_browser,
+        )
+        demo = FakeDemo()
+        runtime = DesktopRuntime(DesktopOptions())
+        runtime._demo = demo
+        with patch.dict(sys.modules, {"pdf2zh.gui": gui}):
+            runtime.stop()
+        self.assertTrue(all(event.is_set() for event in events))
+        cancel_browser.assert_called_once()
+        self.assertEqual(demo.close_count, 1)
+
     def test_runtime_uses_loopback_and_stops_gradio_once(self):
         demo = FakeDemo()
         window = FakeWindow()

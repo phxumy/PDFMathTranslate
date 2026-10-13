@@ -14,14 +14,17 @@ import os
 from pathlib import Path
 import socket
 import sys
-from threading import Event, Lock
+from threading import Event, Lock, Timer
 from typing import Any, Callable
+
+from pdf2zh.app_update import update_manager
+from pdf2zh.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DESKTOP_PORT = 7860
 DESKTOP_PORT_SEARCH_LIMIT = 50
-WINDOW_TITLE = "PDFMathTranslate · Codex Studio"
+WINDOW_TITLE = f"PDFMathTranslate · Codex Studio · {APP_VERSION}"
 
 
 SPLASH_HTML = """<!doctype html>
@@ -276,6 +279,16 @@ class DesktopRuntime:
 
     def stop(self, *_: Any) -> None:
         self._closed.set()
+        # Do not import the GUI during shutdown: loading it can initialize a
+        # model or start new work. Signal existing workers before closing the
+        # server so active Codex subprocesses can terminate their process trees.
+        gui = sys.modules.get("pdf2zh.gui")
+        events = getattr(gui, "cancellation_event_map", {})
+        for event in list(events.values()):
+            event.set()
+        cancel_browser_wait = getattr(gui, "cancel_chatgpt_wait", None)
+        if callable(cancel_browser_wait):
+            cancel_browser_wait()
         with self._close_lock:
             demo, self._demo = self._demo, None
         if demo is not None:
@@ -330,6 +343,19 @@ def setup_desktop(
         zoomable=True,
     )
     window.events.closed += runtime.stop
+
+    def close_for_update():
+        # Return the click response before stopping its Gradio server. The
+        # installer waits for this process before touching installed files.
+        def close_window():
+            runtime.stop()
+            window.destroy()
+
+        timer = Timer(0.8, close_window)
+        timer.daemon = True
+        timer.start()
+
+    update_manager.set_desktop_close(close_for_update)
     storage_path = Path.home() / ".config" / "PDFMathTranslate" / "desktop-webview"
     icon_path = _desktop_icon_path()
     try:
@@ -343,6 +369,7 @@ def setup_desktop(
             icon=str(icon_path) if icon_path else None,
         )
     finally:
+        update_manager.set_desktop_close(None)
         runtime.stop()
     return 0
 

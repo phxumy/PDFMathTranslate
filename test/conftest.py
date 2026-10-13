@@ -1,6 +1,27 @@
 import sys
 import types
 import importlib
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolated_application_configuration(tmp_path_factory):
+    """Unit tests must neither inherit nor modify desktop account preferences."""
+    from pdf2zh.config import ConfigManager
+
+    previous = ConfigManager._instance
+    config = object.__new__(ConfigManager)
+    config._initialized = True
+    config._config_path = Path(tmp_path_factory.mktemp("app-config")) / "config.json"
+    config._config_data = {}
+    config._config_path.write_text("{}", encoding="utf-8")
+    ConfigManager._instance = config
+    try:
+        yield
+    finally:
+        ConfigManager._instance = previous
 
 
 def _ensure_module(name: str) -> types.ModuleType:

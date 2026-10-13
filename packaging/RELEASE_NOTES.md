@@ -1,45 +1,25 @@
-## v1.9.11-codex.4 — PDF layout and text-preservation fixes
+## v1.9.11-codex.5 — 账号登录、并行翻译、实时预览与 EXE 更新
 
-这是非官方 PDFMathTranslate Codex 增强版的 Windows x64 修复更新。
+本版开始提供 Windows x64 EXE 安装程序：下载 `PDFMathTranslate-Codex-Setup-win64.exe` 并安装，无需手动解压运行。
 
-### 本次更新
+- 在软件内查看 Codex 登录状态、发起官方账号登录，沿用现有登录凭据。
+- 默认与空白推理强度改为 `low`，自动模型配置兼容旧版保存的 `none`，避免当前模型拒绝旧默认值。
+- 增加可选 Codex Fast 档位和并行加速选择，并依据真实完成的翻译工作滚动估算剩余时间。Fast 取决于账号与模型支持，可能消耗更多额度；2 倍并行不承诺任何文档都能严格快 2 倍，实际仍受模型、网络及账号限速影响。
+- 标准翻译时逐步预览已完成页面；完整任务完成后提供最终译文文件。BabelDOC 实验流程仍在结束后显示完整 PDF。
+- 在软件内检查本仓库的新版本，点击后下载安装包，核验 SHA-256 与大小，再关闭窗口完成升级并重启。翻译过程中禁止安装更新。
+- 安装器提供开始菜单、可选桌面快捷方式与卸载入口，覆盖升级保留用户设置、账号和译文工作区。
+- 包含前期 PDF 排版、文字保留与 ChatGPT 浏览器桥接修复，以及桥接所需的 Node.js 和锁定依赖。
 
-- 修复白底扫描图加隐藏 OCR 文字层的 PDF 在中译英时叠字的问题，保留图片、页眉页脚及引用片段；原有英文摘要和关键词不重复翻译。
-- 修复目录和图目录条目合并、引导点与页码错位，保留公式和上下标。
-- 保护多行代码块的变量、注释、缩进和换行，周围说明文字继续翻译。
-- 修复跨行斜体小节标题被误识别为公式，以及化学式后的方位词被误保护。
-- 改善 Codex 对斜体书名、跨行书名和作者-年份格式学位论文题名的识别，保留作者、期刊和出版社信息。
-- 保持 ORCID 作者名单逐行排列，修复图标与链接文字叠压。
-- 增加内置 Unicode 字体后备，修复 `Ł/ł` 等作者姓名字符缺失。
-- Codex 默认线程数恢复为 4，仍可手动调整。
+### 安装与升级
 
-扫描件处理依赖原有 OCR 识别质量；本次不会自动校正全部识别错字。升级程序不会自动改写之前生成的译文，旧文件需要用新版重新翻译。彩色背景、旋转和无 OCR 文字层等扫描件不适用本次白底扫描清除逻辑。
+1. 下载并运行 `PDFMathTranslate-Codex-Setup-win64.exe`。
+2. 打开软件，在 Codex 账号区域登录或查看已有登录状态。
+3. 上传 PDF 并开始翻译。
 
-仍待后续处理：部分旧译文中的正文漏译需要重新生成；旧链接边框错位和断行姓名连字符尚未在本次全面修复。部分非 Codex 服务仍会保留斜体定理说明。
+旧 ZIP 用户可直接安装此版本。安装器不会删除旧解压目录中的文件；已有配置和账号继续沿用。新桌面版的译文工作区位于 `%USERPROFILE%\.config\PDFMathTranslate\workspace`，升级和卸载均不会清除该目录。
 
-### 升级提示
+安装包包含 Python、Codex CLI 0.145.0、Node.js 24.19.0、锁定依赖及离线版面/OCR/字体资源；不包含账号、API Key、个人 PDF 或登录凭据。使用云服务仍需联网并消耗对应账号额度。此安装包未做代码签名，Windows 可能显示未知发布者；同页 `SHA256SUMS.txt` 提供完整性校验。
 
-完整解压到新目录后运行。若沿用的 `CODEX_BIN` 指向已经不存在的旧目录，将其改为 `codex`，由程序自动查找包内 CLI。
+The Windows x64 EXE installer bundles the desktop runtime, official Codex CLI, Node.js browser bridge, and offline layout/font assets. This release adds in-app Codex account controls, adjustable concurrency, rolling ETA, incremental page preview, and explicit SHA-256-verified application updates. Upgrades preserve user settings and documents. This is an unofficial community edition.
 
-This Windows x64 update fixes OCR scan overlays, contents rows and page-number alignment, code-listing preservation, and wrapped italic subsection headings. Existing translated PDFs are not rewritten automatically; regenerate them with this version. OCR recognition errors remain a separate limitation.
-
-### Download and start
-
-1. Download `PDFMathTranslate-Codex-win64-with-assets.zip` and extract the whole ZIP.
-2. Double-click `Login-Codex.cmd` once if you want to use the Codex translation service, then complete the official browser sign-in.
-3. Double-click `PDFMathTranslate-Codex.exe`.
-
-The package needs no Python installation and includes:
-
-- the native Windows desktop shell and original command-line/WebUI launcher;
-- the official Codex CLI 0.145.0 binary (no account, credentials, or included quota);
-- BabelDOC offline layout/OCR/font assets;
-- the exact locked Python runtime dependencies and required license notices.
-
-Translation still requires internet access when using Codex or another cloud service and consumes that service's own account/API allowance. The archive is built from the exact public tag on a clean GitHub-hosted runner and excludes user PDFs, translation caches, API keys, and Codex login data.
-
-This executable is not code-signed, so Windows may display an “Unknown publisher” warning. `SHA256SUMS.txt` is provided for integrity verification.
-
-中文快速说明：完整解压 ZIP；使用 Codex 前双击 `Login-Codex.cmd` 登录；随后双击 `PDFMathTranslate-Codex.exe`。压缩包内含 Codex CLI 程序，但不含账号、套餐额度、API Key 或任何人的登录凭据。
-
-Repository and source: https://github.com/phxumy/PDFMathTranslate
+Source and repository: https://github.com/phxumy/PDFMathTranslate

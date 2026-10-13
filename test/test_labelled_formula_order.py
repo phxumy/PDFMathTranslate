@@ -3,37 +3,42 @@ import pytest
 from pdf2zh.translator import CodexTranslator
 from test_codex_formula_context import translator_stub
 
-
 SOURCE = "Thus, if {v64} is {v65}Lipschitz w.r.t. the {v66} norm, the output {v67} has suboptimality bounded by"
 
 
-@pytest.mark.parametrize("target", [
-    "因此，如果{v64}关于{v66}范数是{v65}Lipschitz 连续的，则输出{v67}的次优性上界为",
-    "因此，若{v64}是关于{v66}范数的{v65}-Lipschitz 函数，则输出{v67}的次优性上界为",
-    "若{v64}关于{v66}範數是{v65}Lipschitz 連續的，則輸出{v67}的次優性上界為",
-    "若{v64}相对于{v66}范数而言是{v65}-Lipschitz 连续的，则输出{v67}的次优性上界为",
-    "若{v64}是{v65}Lipschitz连续的（关于{v66}范数），输出{v67}的次优性上界为",
-    "若{v64}是{v65}利普希茨连续的（关于范数{v66}），输出{v67}的次优性上界为",
-    "因此，如果{v64}关于{v66}范数满足{v65}Lipschitz 条件，则输出{v67}的次优性上界为",
-])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "因此，如果{v64}关于{v66}范数是{v65}Lipschitz 连续的，则输出{v67}的次优性上界为",
+        "因此，若{v64}是关于{v66}范数的{v65}-Lipschitz 函数，则输出{v67}的次优性上界为",
+        "若{v64}关于{v66}範數是{v65}Lipschitz 連續的，則輸出{v67}的次優性上界為",
+        "若{v64}相对于{v66}范数而言是{v65}-Lipschitz 连续的，则输出{v67}的次优性上界为",
+        "若{v64}是{v65}Lipschitz连续的（关于{v66}范数），输出{v67}的次优性上界为",
+        "若{v64}是{v65}利普希茨连续的（关于范数{v66}），输出{v67}的次优性上界为",
+        "因此，如果{v64}关于{v66}范数满足{v65}Lipschitz 条件，则输出{v67}的次优性上界为",
+    ],
+)
 def test_norm_qualifier_order_preserves_each_labelled_mathematical_object(target):
     assert CodexTranslator._validate_formula_translation(SOURCE, target)
     assert translator_stub()._accepted_translation(SOURCE, target) == target
 
 
-@pytest.mark.parametrize("target", [
-    "若{v64}是{v66}Lipschitz连续的，关于{v65}范数，则输出{v67}有界",
-    "若{v66}关于{v64}范数是{v65}Lipschitz连续的，则输出{v67}有界",
-    "若{v64}关于{v66}范数，则输出{v67}是{v65}Lipschitz连续的",
-    "若{v64}关于{v66}范数。另一函数是{v65}Lipschitz的，输出{v67}有界",
-    "若{v64}关于{v66}范数是{v65}Lipschitz的，输出{v67}、{v66}有界",
-    "若{v64}关于{v66}范数是Lipschitz的，输出{v67}有界",
-    "若{v64}关于{v66}范数小于{v65}Lipschitz，输出{v67}有界",
-    "若{v64}关于{v66}范数，与此同时另一个函数是{v65}Lipschitz的，输出{v67}有界",
-    "若{v64}关于{v66}范数：是{v65}Lipschitz的，输出{v67}有界",
-    "因此，如果{v64}在{v65}该范数下满足 Lipschitz 连续性{v66}，输出{v67}的次优性有界于",
-    "若{v64}关于{v65}范数是{v66}Lipschitz连续的，则输出{v67}有界",
-])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "若{v64}是{v66}Lipschitz连续的，关于{v65}范数，则输出{v67}有界",
+        "若{v66}关于{v64}范数是{v65}Lipschitz连续的，则输出{v67}有界",
+        "若{v64}关于{v66}范数，则输出{v67}是{v65}Lipschitz连续的",
+        "若{v64}关于{v66}范数。另一函数是{v65}Lipschitz的，输出{v67}有界",
+        "若{v64}关于{v66}范数是{v65}Lipschitz的，输出{v67}、{v66}有界",
+        "若{v64}关于{v66}范数是Lipschitz的，输出{v67}有界",
+        "若{v64}关于{v66}范数小于{v65}Lipschitz，输出{v67}有界",
+        "若{v64}关于{v66}范数，与此同时另一个函数是{v65}Lipschitz的，输出{v67}有界",
+        "若{v64}关于{v66}范数：是{v65}Lipschitz的，输出{v67}有界",
+        "因此，如果{v64}在{v65}该范数下满足 Lipschitz 连续性{v66}，输出{v67}的次优性有界于",
+        "若{v64}关于{v65}范数是{v66}Lipschitz连续的，则输出{v67}有界",
+    ],
+)
 def test_unlabelled_changed_or_nonlocal_formula_order_is_rejected(target):
     assert not CodexTranslator._validate_formula_translation(SOURCE, target)
 

@@ -60,7 +60,14 @@ def render_single_protected_char(
     a, b, c, d, e, f = matrix
     for index, char in enumerate(text):
         converter.render_char(
-            (a, b, c, d, e + index * a * fontsize * 0.5, f + index * b * fontsize * 0.5),
+            (
+                a,
+                b,
+                c,
+                d,
+                e + index * a * fontsize * 0.5,
+                f + index * b * fontsize * 0.5,
+            ),
             font,
             fontsize,
             1.0,
@@ -84,7 +91,9 @@ def render_single_protected_char(
 
 
 class RotatedTextTests(unittest.TestCase):
-    def test_mirrored_and_stretched_diagram_symbols_keep_the_source_matrix(self) -> None:
+    def test_mirrored_and_stretched_diagram_symbols_keep_the_source_matrix(
+        self,
+    ) -> None:
         for matrix in (
             (-7.0, 0.0, 0.0, 13.0, 70.0, 90.0),
             (7.0, 0.0, 0.0, 13.0, 70.0, 90.0),
@@ -106,7 +115,9 @@ class RotatedTextTests(unittest.TestCase):
         ops = render_single_protected_char(matrix, 3.0)
         self.assertIn("/F1 9.000000 Tf 1 0 0 1 50.000000 80.000000 Tm", ops)
         self.assertNotIn(" Tz ", ops)
-        self.assertFalse(_requires_source_text_transform(OriginalTextState(matrix, 3, 1, 0)))
+        self.assertFalse(
+            _requires_source_text_transform(OriginalTextState(matrix, 3, 1, 0))
+        )
 
     def test_positive_stretch_outside_figure_keeps_reflow_path(self) -> None:
         ops = render_single_protected_char(
@@ -117,11 +128,15 @@ class RotatedTextTests(unittest.TestCase):
     def test_preserved_transform_detection_includes_horizontal_scaling(self) -> None:
         state = OriginalTextState((1, 0, 0, 1, 50, 80), 9, 0.7, 0)
         self.assertTrue(_requires_source_text_transform(state))
-        self.assertFalse(_requires_source_text_transform(
-            OriginalTextState((9, 1e-10, 0, 9, 50, 80), 1, 1, 0)
-        ))
+        self.assertFalse(
+            _requires_source_text_transform(
+                OriginalTextState((9, 1e-10, 0, 9, 50, 80), 1, 1, 0)
+            )
+        )
 
-    def test_rotated_axis_keeps_each_matrix_even_outside_a_protected_detection(self) -> None:
+    def test_rotated_axis_keeps_each_matrix_even_outside_a_protected_detection(
+        self,
+    ) -> None:
         # Figure XObjects may be classified as unassigned (1), not protected (0).
         # Multiple glyph widths must not become independent horizontal font sizes.
         for matrix in (
@@ -130,12 +145,16 @@ class RotatedTextTests(unittest.TestCase):
         ):
             with self.subTest(matrix=matrix):
                 text = "Gate rate"
-                ops = render_single_protected_char(matrix, 1.0, layout_class=1, text=text)
+                ops = render_single_protected_char(
+                    matrix, 1.0, layout_class=1, text=text
+                )
                 self.assertEqual(ops.count("TJ 100 Tz 0 Ts"), len(text))
                 a, b, c, d, e, f = matrix
                 for index in range(len(text)):
                     expected = (a, b, c, d, e + index * a * 0.5, f + index * b * 0.5)
-                    self.assertIn(" ".join(f"{value:f}" for value in expected) + " Tm", ops)
+                    self.assertIn(
+                        " ".join(f"{value:f}" for value in expected) + " Tm", ops
+                    )
 
     def test_protected_rotated_text_keeps_source_font_state_and_matrix(self) -> None:
         ops = render_single_protected_char(

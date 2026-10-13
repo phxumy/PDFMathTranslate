@@ -15,8 +15,12 @@ env:
   PYSTAND_SHA256: "51898744692cba9fd6db2b1212629d5cf04bea15559c80493d6e7d8356d5122a"
   CODEX_VERSION: "0.145.0"
   CODEX_SHA256: "8d0d281346aedf63c4cc3922997df822fbb8881f7ffb2b57416f48e8c52a734e"
+  NODE_VERSION: "24.19.0"
+  NODE_SHA256: "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73"
+  INNO_VERSION: "6.7.3"
+  INNO_SHA256: "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
   RELEASE_DIRECTORY: "PDFMathTranslate-Codex"
-  RELEASE_ASSET: "PDFMathTranslate-Codex-win64-with-assets.zip"
+  RELEASE_ASSET: "PDFMathTranslate-Codex-Setup-win64.exe"
 
 jobs:
   build-test-release:
@@ -53,14 +57,18 @@ jobs:
               throw "Unexpected release tag: ${{ github.ref_name }}"
           }
           uv lock --check
+          if ($LASTEXITCODE -ne 0) { throw "Dependency lock validation failed." }
           uv sync --locked --python $env:PYTHON_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "Locked test environment setup failed." }
 
       - name: Run unit tests and formatting checks
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           uv run --locked pytest .
+          if ($LASTEXITCODE -ne 0) { throw "Python unit tests failed; release stopped." }
           uv run --locked black --check .
+          if ($LASTEXITCODE -ne 0) { throw "Python formatting checks failed; release stopped." }
 
       - name: Build the clean portable application
         shell: pwsh
@@ -102,16 +110,41 @@ jobs:
           Write-Host "Installing the exact dependencies recorded in uv.lock"
           $requirements = Join-Path $dependencyRoot "runtime-requirements.txt"
           uv export --locked --no-dev --extra desktop --no-emit-project --format requirements-txt --output-file $requirements
+          if ($LASTEXITCODE -ne 0) { throw "Exporting locked dependencies failed." }
           uv venv $runtimeVenv --python $env:PYTHON_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "Creating the runtime environment failed." }
           uv pip install --python $runtimePython --require-hashes -r $requirements
+          if ($LASTEXITCODE -ne 0) { throw "Installing locked runtime dependencies failed." }
           uv build --wheel --out-dir (Join-Path $dependencyRoot "dist")
+          if ($LASTEXITCODE -ne 0) { throw "Building the application wheel failed." }
           $wheels = @(Get-ChildItem (Join-Path $dependencyRoot "dist") -Filter "*.whl")
           if ($wheels.Count -ne 1) {
               throw "Expected exactly one project wheel, found $($wheels.Count)."
           }
           $wheel = $wheels[0]
           uv pip install --python $runtimePython --no-deps $wheel.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Installing the application wheel failed." }
           Copy-Item (Join-Path $runtimeVenv "Lib\site-packages") $releaseRoot -Recurse
+
+          Write-Host "Bundling verified Node.js and locked ChatGPT browser dependencies"
+          $nodeArchive = Join-Path $dependencyRoot "node.zip"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$env:NODE_VERSION/node-v$env:NODE_VERSION-win-x64.zip" -OutFile $nodeArchive
+          Assert-Sha256 $nodeArchive $env:NODE_SHA256
+          Expand-Archive -Path $nodeArchive -DestinationPath $dependencyRoot -Force
+          $nodeRoot = Join-Path $dependencyRoot "node-v$env:NODE_VERSION-win-x64"
+          New-Item -Path (Join-Path $releaseRoot "node") -ItemType Directory -Force | Out-Null
+          Copy-Item (Join-Path $nodeRoot "node.exe") (Join-Path $releaseRoot "node\node.exe")
+          Copy-Item (Join-Path $nodeRoot "LICENSE") (Join-Path $releaseRoot "licenses\Node-LICENSE.txt")
+          $env:PATH = "$nodeRoot;$env:PATH"
+          $bridgeRoot = Join-Path $releaseRoot "site-packages\pdf2zh\browser_bridge"
+          & (Join-Path $nodeRoot "npm.cmd") ci --omit=dev --prefix $bridgeRoot
+          if ($LASTEXITCODE -ne 0) { throw "Installing locked ChatGPT browser dependencies failed." }
+          Push-Location $bridgeRoot
+          try {
+              & (Join-Path $nodeRoot "npm.cmd") test
+              if ($LASTEXITCODE -ne 0) { throw "Packaged ChatGPT browser bridge tests failed." }
+          }
+          finally { Pop-Location }
 
           Copy-Item "script\_pystand_static.int" $releaseRoot
           Copy-Item "LICENSE" $releaseRoot
@@ -176,6 +209,7 @@ jobs:
               "Python embedded runtime: $env:PYTHON_VERSION",
               "PyStand: $env:PYSTAND_VERSION",
               "Bundled official Codex CLI: $env:CODEX_VERSION",
+              "Bundled Node.js: $env:NODE_VERSION",
               "Dependencies: uv.lock from the source tag",
               "Build host: GitHub-hosted windows-latest"
           ) | Set-Content -Path (Join-Path $releaseRoot "BUILD-INFO.txt") -Encoding utf8
@@ -207,6 +241,7 @@ jobs:
               "runtime",
               "site-packages",
               "codex-cli",
+              "node",
               "Login-Codex.cmd",
               "README-Windows.txt",
               "README-使用说明.txt",
@@ -256,6 +291,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "pdf2zh.exe --version failed with exit code $LASTEXITCODE."
           }
+          $appVersion = Get-Content (Join-Path $releaseRoot "site-packages\pdf2zh\version.py") -Raw
+          if (-not $appVersion.Contains('APP_VERSION = "${{ github.ref_name }}"')) {
+              throw "The desktop application version does not match this tag."
+          }
           $helpOutput = & (Join-Path $releaseRoot "pdf2zh.exe") --help
           if ($LASTEXITCODE -ne 0 -or -not ($helpOutput | Select-String -SimpleMatch "--desktop")) {
               throw "The packaged command-line launcher does not expose --desktop."
@@ -275,31 +314,36 @@ jobs:
               }
           }
 
-      - name: Create ZIP and checksum
+      - name: Build EXE installer and checksum
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $stagingRoot = Join-Path $env:GITHUB_WORKSPACE "release-staging"
+          $releaseRoot = Join-Path $env:GITHUB_WORKSPACE "release-staging\$env:RELEASE_DIRECTORY"
           $distRoot = Join-Path $env:GITHUB_WORKSPACE "release-dist"
-          New-Item -Path $distRoot -ItemType Directory -Force | Out-Null
-          $zipPath = Join-Path $distRoot $env:RELEASE_ASSET
+          $compilerSetup = Join-Path $env:GITHUB_WORKSPACE "release-dependencies\innosetup.exe"
+          $compilerVersionTag = "is-" + $env:INNO_VERSION.Replace('.', '_')
+          Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/releases/download/$compilerVersionTag/innosetup-$env:INNO_VERSION.exe" -OutFile $compilerSetup
+          if ((Get-FileHash $compilerSetup -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:INNO_SHA256) {
+              throw "Inno Setup compiler SHA-256 mismatch."
+          }
+          $compilerRoot = Join-Path $env:GITHUB_WORKSPACE "release-dependencies\inno-setup"
+          $installCompiler = Start-Process -FilePath $compilerSetup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', ('/DIR="' + $compilerRoot + '"')) -Wait -PassThru -WindowStyle Hidden
+          if ($installCompiler.ExitCode -ne 0) { throw "Inno Setup installation failed." }
+          & .\script\build-windows-installer.ps1 -ReleaseRoot $releaseRoot -ReleaseTag "${{ github.ref_name }}" -OutputRoot $distRoot -Compiler (Join-Path $compilerRoot "ISCC.exe")
 
-          Push-Location $stagingRoot
-          try {
-              & 7z a -tzip -mx=9 $zipPath $env:RELEASE_DIRECTORY
-              if ($LASTEXITCODE -ne 0) {
-                  throw "7-Zip failed with exit code $LASTEXITCODE."
-              }
+      - name: Smoke test the installer in an isolated directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $env:GITHUB_WORKSPACE "release-dist\$env:RELEASE_ASSET"
+          $testRoot = Join-Path $env:RUNNER_TEMP "pdfmathtranslate-installer-test"
+          $result = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', '/TESTMODE=1', ('/DIR="' + $testRoot + '"')) -Wait -PassThru -WindowStyle Hidden
+          if ($result.ExitCode -ne 0) { throw "Installer smoke test failed: $($result.ExitCode)" }
+          $help = & (Join-Path $testRoot "pdf2zh.exe") --help
+          if ($LASTEXITCODE -ne 0 -or -not ($help | Select-String -SimpleMatch '--desktop')) {
+              throw "Installed launcher smoke test failed."
           }
-          finally {
-              Pop-Location
-          }
-
-          if ((Get-Item $zipPath).Length -ge 2GB) {
-              throw "The release archive exceeds GitHub's 2 GiB per-file limit."
-          }
-          $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $env:RELEASE_ASSET" | Set-Content (Join-Path $distRoot "SHA256SUMS.txt") -Encoding ascii
+          if (-not (Test-Path (Join-Path $testRoot "unins000.exe"))) { throw "Uninstaller missing." }
 
       - name: Publish the GitHub Release
         shell: pwsh

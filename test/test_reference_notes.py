@@ -37,12 +37,22 @@ def columns():
     ]
 
 
-@pytest.mark.parametrize("break_offsets", [(), (len(PRIOR), len(PRIOR) + 5 + len(NOTE))])
+@pytest.mark.parametrize(
+    "break_offsets", [(), (len(PRIOR), len(PRIOR) + 5 + len(NOTE))]
+)
 def test_supplemental_note_uses_prose_translation_and_preserves_number(break_offsets):
     text = PRIOR + "[65] " + NOTE + " tomography. " + NEXT
     source = SourceSegment(
-        index=0, text=text, x0=52, x1=297, y0=282, y1=743, size=9.5,
-        page_width=612, page_height=792, region_kind="plain text",
+        index=0,
+        text=text,
+        x0=52,
+        x1=297,
+        y0=282,
+        y1=743,
+        size=9.5,
+        page_width=612,
+        page_height=792,
+        region_kind="plain text",
         break_offsets=break_offsets,
     )
     plan = DocumentTranslationPolicy().plan_segment(source)

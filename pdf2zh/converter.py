@@ -3,6 +3,7 @@ import logging
 import math
 import re
 import unicodedata
+from asyncio import CancelledError
 from builtins import id as object_id
 from dataclasses import dataclass
 from enum import Enum
@@ -662,13 +663,23 @@ def _release_tex_accented_prose_words(
     an overprinted accent/base pair, and at least two following letters. Math
     accents, isolated variables, code and preserved areas stay as source glyphs.
     """
-    accents = {"`": "\u0300", "'": "\u0301", '"': "\u0308", "^": "\u0302", "~": "\u0303", "=": "\u0304"}
+    accents = {
+        "`": "\u0300",
+        "'": "\u0301",
+        '"': "\u0308",
+        "^": "\u0302",
+        "~": "\u0303",
+        "=": "\u0304",
+    }
     for formula_id, chars in enumerate(formulas):
         if not chars or chars[0].get_text() not in {"\\" + key for key in accents}:
             continue
         paragraph_id = formula_paragraphs[formula_id]
         paragraph = paragraphs[paragraph_id]
-        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+        if (
+            paragraph.layout_class <= 1
+            or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS
+        ):
             continue
         marker = f"{{v{formula_id}}}"
         source = segments[paragraph_id]
@@ -691,31 +702,42 @@ def _release_tex_accented_prose_words(
             continue
         if len(chars) == 1 and dotless is not None:
             accent = chars[0]
-            candidates = [char for char in paragraph_text_chars[paragraph_id] if (
-                char.get_text() == r"{\i}"
-                and abs(char.x0 - accent.x0) <= 0.25 * em
-                and abs(_char_baseline(char) - _char_baseline(accent)) <= 0.15 * em
-            )]
+            candidates = [
+                char
+                for char in paragraph_text_chars[paragraph_id]
+                if (
+                    char.get_text() == r"{\i}"
+                    and abs(char.x0 - accent.x0) <= 0.25 * em
+                    and abs(_char_baseline(char) - _char_baseline(accent)) <= 0.15 * em
+                )
+            ]
             if len(candidates) != 1:
                 continue
             expanded = [accent, candidates[0]]
             for value in dotless.group(1):
                 previous = expanded[-1]
-                candidates = [char for char in paragraph_text_chars[paragraph_id] if (
-                    char.get_text() == value
-                    and -0.12 * em <= char.x0 - previous.x1 <= 0.16 * em
-                    and abs(_char_baseline(char) - _char_baseline(previous)) <= 0.15 * em
-                )]
+                candidates = [
+                    char
+                    for char in paragraph_text_chars[paragraph_id]
+                    if (
+                        char.get_text() == value
+                        and -0.12 * em <= char.x0 - previous.x1 <= 0.16 * em
+                        and abs(_char_baseline(char) - _char_baseline(previous))
+                        <= 0.15 * em
+                    )
+                ]
                 if len(candidates) != 1:
                     break
                 expanded.append(candidates[0])
             if len(expanded) != len(dotless.group(1)) + 2:
                 continue
             chars = expanded
-            right = right[dotless.end():]
+            right = right[dotless.end() :]
         if len(chars) < 3:
             continue
-        tail = "".join("i" if char.get_text() == r"{\i}" else char.get_text() for char in chars[1:])
+        tail = "".join(
+            "i" if char.get_text() == r"{\i}" else char.get_text() for char in chars[1:]
+        )
         if re.fullmatch(r"[a-z]{2,}", tail) is None:
             continue
         accent, base = chars[:2]
@@ -731,19 +753,26 @@ def _release_tex_accented_prose_words(
             continue
         if abs(accent.x0 - base.x0) > 0.25 * em or base.x0 >= accent.x1 - 0.2 * em:
             continue
-        if any(not -0.12 * em <= b.x0 - a.x1 <= 0.16 * em for a, b in zip(chars[1:], chars[2:])):
+        if any(
+            not -0.12 * em <= b.x0 - a.x1 <= 0.16 * em
+            for a, b in zip(chars[1:], chars[2:])
+        ):
             continue
         previous = base
         matched = []
         for value in reversed(prefix.group(1)):
-            candidates = [char for char in paragraph_text_chars[paragraph_id] if (
-                char.get_text() == value
-                and char.fontname == base.fontname
-                and not _is_non_horizontal_text_matrix(char.matrix)
-                and 0.9 * em <= char.size <= 1.1 * em
-                and abs(_char_baseline(char) - _char_baseline(base)) <= 0.15 * em
-                and -0.12 * em <= previous.x0 - char.x1 <= 0.16 * em
-            )]
+            candidates = [
+                char
+                for char in paragraph_text_chars[paragraph_id]
+                if (
+                    char.get_text() == value
+                    and char.fontname == base.fontname
+                    and not _is_non_horizontal_text_matrix(char.matrix)
+                    and 0.9 * em <= char.size <= 1.1 * em
+                    and abs(_char_baseline(char) - _char_baseline(base)) <= 0.15 * em
+                    and -0.12 * em <= previous.x0 - char.x1 <= 0.16 * em
+                )
+            ]
             if len(candidates) != 1:
                 break
             previous = candidates[0]
@@ -755,17 +784,23 @@ def _release_tex_accented_prose_words(
             continue
         segments[paragraph_id] = left + decoded + tail[1:] + right
         known = {id(char) for char in paragraph_text_chars[paragraph_id]}
-        paragraph_text_chars[paragraph_id].extend(char for char in chars if id(char) not in known)
+        paragraph_text_chars[paragraph_id].extend(
+            char for char in chars if id(char) not in known
+        )
 
 
-def _release_reference_prose_fragments(segments, formulas, formula_paragraphs, paragraphs, text_chars):
+def _release_reference_prose_fragments(
+    segments, formulas, formula_paragraphs, paragraphs, text_chars
+):
     """Expose ordinary italic title words accidentally treated as math macros.
 
     Require a certified numbered bibliography, unchanged text-font geometry,
     and a complete prose compound. Operators such as rank(A), code fonts and
     actual mathematical symbols remain opaque.
     """
-    regions = {i: split_numbered_reference_region(source) for i, source in enumerate(segments)}
+    regions = {
+        i: split_numbered_reference_region(source) for i, source in enumerate(segments)
+    }
     for index, chars in enumerate(formulas):
         if not chars:
             continue
@@ -774,8 +809,12 @@ def _release_reference_prose_fragments(segments, formulas, formula_paragraphs, p
         region = regions[paragraph_id]
         source = segments[paragraph_id]
         marker = f"{{v{index}}}"
-        if (region is None or paragraph.layout_class <= 1
-                or paragraph.region_kind != "plain text" or source.count(marker) != 1):
+        if (
+            region is None
+            or paragraph.layout_class <= 1
+            or paragraph.region_kind != "plain text"
+            or source.count(marker) != 1
+        ):
             continue
         position = source.index(marker)
         if not region.start <= position < region.end:
@@ -800,41 +839,71 @@ def _release_reference_prose_fragments(segments, formulas, formula_paragraphs, p
             or re.match(r"(?:-|\s+)one\b", right)
         ):
             replacement = word
-        elif word == "up" and re.search(r"\bspeeding\s+$", left, re.I) and re.match(r"\s+first[- ]", right):
+        elif (
+            word == "up"
+            and re.search(r"\bspeeding\s+$", left, re.I)
+            and re.match(r"\s+first[- ]", right)
+        ):
             replacement = word
-        elif word == "mod-" and re.search(r"\bsemi-algebraic\s+$", left, re.I) and re.match(r"els\b", right):
+        elif (
+            word == "mod-"
+            and re.search(r"\bsemi-algebraic\s+$", left, re.I)
+            and re.match(r"els\b", right)
+        ):
             replacement, consumed = "models", 3
         else:
-            accent = re.fullmatch(r'([A-Z])\\([\"\'`])([a-z])', word)
+            accent = re.fullmatch(r"([A-Z])\\([\"\'`])([a-z])", word)
             suffix = re.match(r"([a-z]{3,})(?![A-Za-z])", right)
             if accent and suffix and len(chars) == 3:
-                combining = {'"': '\u0308', "'": '\u0301', '`': '\u0300'}[accent[2]]
+                combining = {'"': "\u0308", "'": "\u0301", "`": "\u0300"}[accent[2]]
                 if abs(chars[1].x0 - chars[2].x0) <= 0.25 * em:
-                    replacement = accent[1] + unicodedata.normalize("NFC", accent[3] + combining) + suffix[1]
+                    replacement = (
+                        accent[1]
+                        + unicodedata.normalize("NFC", accent[3] + combining)
+                        + suffix[1]
+                    )
                     consumed = len(suffix[1])
         if replacement is None:
             continue
         # All ordinary letters in the island must touch, allowing italic
         # overhang and the accent overprint checked separately above.
-        baseline_chars = [char for char in chars if not char.get_text().startswith("\\")]
-        if any(not -0.25 * em <= b.x0 - a.x1 <= 0.20 * em for a, b in zip(baseline_chars, baseline_chars[1:])):
+        baseline_chars = [
+            char for char in chars if not char.get_text().startswith("\\")
+        ]
+        if any(
+            not -0.25 * em <= b.x0 - a.x1 <= 0.20 * em
+            for a, b in zip(baseline_chars, baseline_chars[1:])
+        ):
             continue
         if consumed:
             previous = chars[-1]
             suffix_chars = []
             for offset, value in enumerate(right[:consumed]):
-                following = [char for char in text_chars[paragraph_id] if (
-                    char.get_text() == value and char.fontname == previous.fontname
-                    and 0.9 * em <= char.size <= 1.1 * em
-                    and not _is_non_horizontal_text_matrix(char.matrix)
-                    and (
-                        (abs(_char_baseline(char) - _char_baseline(previous)) <= 0.15 * em
-                         and -0.2 * em <= char.x0 - previous.x1 <= 0.2 * em)
-                        or (word == "mod-" and offset == 0
-                            and 0.8 * em <= _char_baseline(previous) - _char_baseline(char) <= 1.8 * em
-                            and paragraph.x0 <= char.x0 < paragraph.x0 + 5 * em)
+                following = [
+                    char
+                    for char in text_chars[paragraph_id]
+                    if (
+                        char.get_text() == value
+                        and char.fontname == previous.fontname
+                        and 0.9 * em <= char.size <= 1.1 * em
+                        and not _is_non_horizontal_text_matrix(char.matrix)
+                        and (
+                            (
+                                abs(_char_baseline(char) - _char_baseline(previous))
+                                <= 0.15 * em
+                                and -0.2 * em <= char.x0 - previous.x1 <= 0.2 * em
+                            )
+                            or (
+                                word == "mod-"
+                                and offset == 0
+                                and 0.8 * em
+                                <= _char_baseline(previous) - _char_baseline(char)
+                                <= 1.8 * em
+                                and paragraph.x0 <= char.x0 < paragraph.x0 + 5 * em
+                            )
+                        )
                     )
-                )]
+                ]
                 if len(following) != 1:
                     break
                 previous = following[0]
@@ -846,20 +915,28 @@ def _release_reference_prose_fragments(segments, formulas, formula_paragraphs, p
         text_chars[paragraph_id].extend(char for char in chars if id(char) not in known)
 
 
-def _release_formula_case_explanations(segments, formulas, formula_paragraphs, paragraphs, text_chars):
+def _release_formula_case_explanations(
+    segments, formulas, formula_paragraphs, paragraphs, text_chars
+):
     """Return an ordinary-font '(in the ... case)' suffix to translated prose."""
     for index, chars in enumerate(formulas):
         if len(chars) < 4 or "".join(ch.get_text() for ch in chars[-3:]) != "(in":
             continue
         paragraph_id = formula_paragraphs[index]
         paragraph = paragraphs[paragraph_id]
-        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+        if (
+            paragraph.layout_class <= 1
+            or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS
+        ):
             continue
         source, marker = segments[paragraph_id], f"{{v{index}}}"
         if source.count(marker) != 1:
             continue
-        following = source[source.index(marker) + len(marker):]
-        phrase = re.match(r"\s+the\s+(?:[A-Za-z-]+\s+){0,4}(?:case|setting|regime|limit)(?:\)|\{v(?P<closer>\d+)\})", following)
+        following = source[source.index(marker) + len(marker) :]
+        phrase = re.match(
+            r"\s+the\s+(?:[A-Za-z-]+\s+){0,4}(?:case|setting|regime|limit)(?:\)|\{v(?P<closer>\d+)\})",
+            following,
+        )
         if phrase is None:
             continue
         prefix, suffix = chars[:-3], chars[-3:]
@@ -878,23 +955,34 @@ def _release_formula_case_explanations(segments, formulas, formula_paragraphs, p
         ):
             continue
         base = [ch for ch in prefix if 0.9 * em <= ch.size <= 1.1 * em]
-        if not base or not any(abs(_char_baseline(ch) - _char_baseline(suffix[0])) < 0.15 * em for ch in base):
+        if not base or not any(
+            abs(_char_baseline(ch) - _char_baseline(suffix[0])) < 0.15 * em
+            for ch in base
+        ):
             continue
         gap = suffix[0].x0 - max(ch.x1 for ch in prefix)
         if not 0.12 * em < gap <= 0.7 * em:
             continue
-        if any(not -0.1 * em <= b.x0 - a.x1 <= 0.2 * em for a, b in zip(suffix, suffix[1:])):
+        if any(
+            not -0.1 * em <= b.x0 - a.x1 <= 0.2 * em for a, b in zip(suffix, suffix[1:])
+        ):
             continue
-        closer_id = int(phrase['closer']) if phrase['closer'] is not None else None
+        closer_id = int(phrase["closer"]) if phrase["closer"] is not None else None
         if closer_id is not None:
-            if closer_id >= len(formulas) or formula_paragraphs[closer_id] != paragraph_id:
+            if (
+                closer_id >= len(formulas)
+                or formula_paragraphs[closer_id] != paragraph_id
+            ):
                 continue
             closer = formulas[closer_id]
-            if (len(closer) != 1 or closer[0].get_text() != ")"
-                    or closer[0].fontname != suffix[0].fontname
-                    or abs(closer[0].size - em) > 0.1 * em
-                    or _is_non_horizontal_text_matrix(closer[0].matrix)
-                    or source.count(f"{{v{closer_id}}}") != 1):
+            if (
+                len(closer) != 1
+                or closer[0].get_text() != ")"
+                or closer[0].fontname != suffix[0].fontname
+                or abs(closer[0].size - em) > 0.1 * em
+                or _is_non_horizontal_text_matrix(closer[0].matrix)
+                or source.count(f"{{v{closer_id}}}") != 1
+            ):
                 continue
             source = source.replace(f"{{v{closer_id}}}", ")", 1)
             text_chars[paragraph_id].extend(closer)
@@ -916,21 +1004,42 @@ def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, link
             continue
         x0, y0, x1, y1 = bounds
         for index, paragraph in enumerate(paragraphs):
-            if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            if (
+                paragraph.layout_class <= 1
+                or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS
+            ):
                 continue
-            if not (paragraph.x0 <= x0 + 2 and paragraph.x1 >= x1 - 2 and paragraph.y0 <= y0 + 2 and paragraph.y1 >= y1 - 2):
+            if not (
+                paragraph.x0 <= x0 + 2
+                and paragraph.x1 >= x1 - 2
+                and paragraph.y0 <= y0 + 2
+                and paragraph.y1 >= y1 - 2
+            ):
                 continue
-            chars = [char for char in text_chars[index] if (
-                x0 <= (char.x0 + char.x1) / 2 <= x1
-                and y0 <= (char.y0 + char.y1) / 2 <= y1
-                and not char.get_text().isspace()
-            )]
-            if not chars or "".join(char.get_text() for char in chars) != uri.replace("_", ""):
+            chars = [
+                char
+                for char in text_chars[index]
+                if (
+                    x0 <= (char.x0 + char.x1) / 2 <= x1
+                    and y0 <= (char.y0 + char.y1) / 2 <= y1
+                    and not char.get_text().isspace()
+                )
+            ]
+            if not chars or "".join(char.get_text() for char in chars) != uri.replace(
+                "_", ""
+            ):
                 continue
             em = float(paragraph.size)
-            if any(len(char.get_text()) != 1 or _is_non_horizontal_text_matrix(char.matrix) for char in chars):
+            if any(
+                len(char.get_text()) != 1 or _is_non_horizontal_text_matrix(char.matrix)
+                for char in chars
+            ):
                 continue
-            if max(_char_baseline(char) for char in chars) - min(_char_baseline(char) for char in chars) > 0.15 * em:
+            if (
+                max(_char_baseline(char) for char in chars)
+                - min(_char_baseline(char) for char in chars)
+                > 0.15 * em
+            ):
                 continue
             used_lines = []
             offset = 0
@@ -940,15 +1049,23 @@ def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, link
                     continue
                 if not 0 < offset < len(chars):
                     break
-                before, after = chars[offset - 1:offset + 1]
-                candidates = [line for line in lines if (
-                    len(line.pts) == 2
-                    and abs(line.pts[0][1] - line.pts[1][1]) < 0.05 * em
-                    and 0.1 * em <= abs(line.pts[1][0] - line.pts[0][0]) <= 0.75 * em
-                    and abs(min(line.pts[0][0], line.pts[1][0]) - before.x1) <= 0.15 * em
-                    and abs(max(line.pts[0][0], line.pts[1][0]) - after.x0) <= 0.15 * em
-                    and abs(line.pts[0][1] - _char_baseline(before)) <= 0.25 * em
-                )]
+                before, after = chars[offset - 1 : offset + 1]
+                candidates = [
+                    line
+                    for line in lines
+                    if (
+                        len(line.pts) == 2
+                        and abs(line.pts[0][1] - line.pts[1][1]) < 0.05 * em
+                        and 0.1 * em
+                        <= abs(line.pts[1][0] - line.pts[0][0])
+                        <= 0.75 * em
+                        and abs(min(line.pts[0][0], line.pts[1][0]) - before.x1)
+                        <= 0.15 * em
+                        and abs(max(line.pts[0][0], line.pts[1][0]) - after.x0)
+                        <= 0.15 * em
+                        and abs(line.pts[0][1] - _char_baseline(before)) <= 0.25 * em
+                    )
+                ]
                 if len(candidates) != 1 or candidates[0] in used_lines:
                     break
                 used_lines.append(candidates[0])
@@ -963,7 +1080,9 @@ def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, link
             if len(matches) != 1:
                 continue
             match = matches[0]
-            segments[index] = segments[index][:match.start()] + uri + segments[index][match.end():]
+            segments[index] = (
+                segments[index][: match.start()] + uri + segments[index][match.end() :]
+            )
             for line in used_lines:
                 lines.remove(line)
 
@@ -983,17 +1102,28 @@ def _restore_wrapped_source_uris(segments, paragraphs, text_chars, links):
         if len(rectangles) < 2:
             continue
         for index, paragraph in enumerate(paragraphs):
-            if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            if (
+                paragraph.layout_class <= 1
+                or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS
+            ):
                 continue
             em = float(paragraph.size)
             rows = []
             for x0, y0, x1, y1 in rectangles:
-                chars = sorted((char for char in text_chars[index] if (
-                    x0 <= (char.x0 + char.x1) / 2 <= x1
-                    and y0 <= (char.y0 + char.y1) / 2 <= y1
-                )), key=lambda char: char.x0)
+                chars = sorted(
+                    (
+                        char
+                        for char in text_chars[index]
+                        if (
+                            x0 <= (char.x0 + char.x1) / 2 <= x1
+                            and y0 <= (char.y0 + char.y1) / 2 <= y1
+                        )
+                    ),
+                    key=lambda char: char.x0,
+                )
                 if not chars or any(
-                    len(char.get_text()) != 1 or char.get_text().isspace()
+                    len(char.get_text()) != 1
+                    or char.get_text().isspace()
                     or getattr(char, "_pdf2zh_layout_class", None) == 0
                     or _is_non_horizontal_text_matrix(char.matrix)
                     or not 0.9 * em <= char.size <= 1.1 * em
@@ -1002,8 +1132,14 @@ def _restore_wrapped_source_uris(segments, paragraphs, text_chars, links):
                     break
                 baseline = _char_baseline(chars[0])
                 if (
-                    any(abs(_char_baseline(char) - baseline) > 0.15 * em for char in chars)
-                    or any(not -0.15 * em <= b.x0 - a.x1 <= 0.2 * em for a, b in zip(chars, chars[1:]))
+                    any(
+                        abs(_char_baseline(char) - baseline) > 0.15 * em
+                        for char in chars
+                    )
+                    or any(
+                        not -0.15 * em <= b.x0 - a.x1 <= 0.2 * em
+                        for a, b in zip(chars, chars[1:])
+                    )
                     or abs(chars[0].x0 - x0) > 0.3 * em
                     or abs(chars[-1].x1 - x1) > 0.3 * em
                 ):
@@ -1013,25 +1149,35 @@ def _restore_wrapped_source_uris(segments, paragraphs, text_chars, links):
                 continue
             rows.sort(reverse=True)
             if (
-                any(not 0.7 * em <= a[0] - b[0] <= 2 * em for a, b in zip(rows, rows[1:]))
+                any(
+                    not 0.7 * em <= a[0] - b[0] <= 2 * em
+                    for a, b in zip(rows, rows[1:])
+                )
                 or "".join(row[1] for row in rows) != uri
             ):
                 continue
             pattern = re.compile(
-                r"(?<![A-Za-z0-9_/])" + r"\s+".join(re.escape(row[1]) for row in rows)
+                r"(?<![A-Za-z0-9_/])"
+                + r"\s+".join(re.escape(row[1]) for row in rows)
                 + r"(?![A-Za-z0-9_/%?#=&+\-]|\.[A-Za-z0-9])"
             )
             matches = list(pattern.finditer(segments[index]))
             if len(matches) != 1:
                 continue
             match = matches[0]
-            removed = [match.start() + offset for offset, value in enumerate(match[0]) if value.isspace()]
+            removed = [
+                match.start() + offset
+                for offset, value in enumerate(match[0])
+                if value.isspace()
+            ]
             if hasattr(paragraph, "break_offsets"):
                 paragraph.break_offsets = [
                     offset - sum(position < offset for position in removed)
                     for offset in paragraph.break_offsets
                 ]
-            segments[index] = segments[index][:match.start()] + uri + segments[index][match.end():]
+            segments[index] = (
+                segments[index][: match.start()] + uri + segments[index][match.end() :]
+            )
 
 
 def _release_standalone_prose_periods(
@@ -1049,7 +1195,10 @@ def _release_standalone_prose_periods(
             continue
         paragraph_id = formula_paragraphs[index]
         paragraph = paragraphs[paragraph_id]
-        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+        if (
+            paragraph.layout_class <= 1
+            or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS
+        ):
             continue
         char = chars[0]
         em = float(paragraph.size)
@@ -1069,32 +1218,47 @@ def _release_standalone_prose_periods(
         left, right = source.split(marker)
         if right.strip() and re.match(r"\s+[A-Z][a-z]{1,}\b", right) is None:
             continue
-        if re.search(r"\b(?:e\.g|i\.e|w\.r\.t|w\.h\.p|i\.i\.d|cf|viz|vs|Dr|Prof|Mr|Mrs)$", left, re.I):
+        if re.search(
+            r"\b(?:e\.g|i\.e|w\.r\.t|w\.h\.p|i\.i\.d|cf|viz|vs|Dr|Prof|Mr|Mrs)$",
+            left,
+            re.I,
+        ):
             continue
         prose = re.sub(r"\{v\d+\}", " ", source)
         if len(re.findall(r"\b[A-Za-z]{3,}\b", prose)) < 3:
             continue
-        neighbors = [previous for previous in paragraph_text_chars[paragraph_id] if (
-            previous.get_text() and previous.get_text()[-1] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789)]"
-            and getattr(previous, "_pdf2zh_layout_class", None) != 0
-            and _is_non_math_text_font(previous.fontname)
-            and not re.search(r"(?:Mono|Code|^CMTT|^CMITT)", _font_name(previous.fontname), re.I)
-            and 0.9 * em <= previous.size <= 1.1 * em
-            and not _is_non_horizontal_text_matrix(previous.matrix)
-            and abs(_char_baseline(previous) - _char_baseline(char)) <= 0.15 * em
-            and -0.20 * em <= char.x0 - previous.x1 <= 0.35 * em
-        )]
+        neighbors = [
+            previous
+            for previous in paragraph_text_chars[paragraph_id]
+            if (
+                previous.get_text()
+                and previous.get_text()[-1]
+                in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789)]"
+                and getattr(previous, "_pdf2zh_layout_class", None) != 0
+                and _is_non_math_text_font(previous.fontname)
+                and not re.search(
+                    r"(?:Mono|Code|^CMTT|^CMITT)", _font_name(previous.fontname), re.I
+                )
+                and 0.9 * em <= previous.size <= 1.1 * em
+                and not _is_non_horizontal_text_matrix(previous.matrix)
+                and abs(_char_baseline(previous) - _char_baseline(char)) <= 0.15 * em
+                and -0.20 * em <= char.x0 - previous.x1 <= 0.35 * em
+            )
+        ]
         neighbors.sort(key=lambda previous: abs(char.x0 - previous.x1))
         if not neighbors or (
             len(neighbors) > 1
-            and abs(abs(char.x0 - neighbors[0].x1) - abs(char.x0 - neighbors[1].x1)) < 0.05 * em
+            and abs(abs(char.x0 - neighbors[0].x1) - abs(char.x0 - neighbors[1].x1))
+            < 0.05 * em
         ):
             continue
         segments[paragraph_id] = left + "." + right
         paragraph_text_chars[paragraph_id].append(char)
 
 
-def _release_caption_prose_delimiters(segments, formulas, formula_paragraphs, paragraphs):
+def _release_caption_prose_delimiters(
+    segments, formulas, formula_paragraphs, paragraphs
+):
     """Expose caption punctuation hidden after a subscripted variable.
 
     Only full-size, horizontal text-font delimiters that close an opening mark
@@ -1136,7 +1300,8 @@ def _release_caption_prose_delimiters(segments, formulas, formula_paragraphs, pa
             and re.match(r"\s*[A-Z][a-z]{2,}\b", right)
             and all(prose_glyph(char) for char in chars)
             and max(_char_baseline(char) for char in chars)
-            - min(_char_baseline(char) for char in chars) < 0.2 * paragraph.size
+            - min(_char_baseline(char) for char in chars)
+            < 0.2 * paragraph.size
         ):
             segments[paragraph_id] = left + f"). ({panel.group(1)})" + right
         elif (
@@ -1151,12 +1316,17 @@ def _release_caption_prose_delimiters(segments, formulas, formula_paragraphs, pa
             segments[paragraph_id] = left + marker + ")" + right
 
 
-def _release_prose_slash_connectives(segments, formulas, formula_paragraphs, paragraphs):
+def _release_prose_slash_connectives(
+    segments, formulas, formula_paragraphs, paragraphs
+):
     """Release the ordinary /or suffix of and/or from a spurious formula run."""
     for index, chars in enumerate(formulas):
         paragraph_id = formula_paragraphs[index]
         paragraph = paragraphs[paragraph_id]
-        if paragraph.layout_class <= 1 or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+        if (
+            paragraph.layout_class <= 1
+            or paragraph.region_kind not in _INLINE_SCRIPT_REGION_KINDS
+        ):
             continue
         if len(chars) != 3 or "".join(char.get_text() for char in chars) != "/or":
             continue
@@ -1176,16 +1346,25 @@ def _release_prose_slash_connectives(segments, formulas, formula_paragraphs, par
             for char in chars[1:]
         ):
             continue
-        if max(_char_baseline(char) for char in chars) - min(_char_baseline(char) for char in chars) > 0.15 * paragraph.size:
+        if (
+            max(_char_baseline(char) for char in chars)
+            - min(_char_baseline(char) for char in chars)
+            > 0.15 * paragraph.size
+        ):
             continue
-        if any(not -0.12 * paragraph.size <= b.x0 - a.x1 <= 0.20 * paragraph.size for a, b in zip(chars, chars[1:])):
+        if any(
+            not -0.12 * paragraph.size <= b.x0 - a.x1 <= 0.20 * paragraph.size
+            for a, b in zip(chars, chars[1:])
+        ):
             continue
         marker = f"{{v{index}}}"
         source = segments[paragraph_id]
         if source.count(marker) != 1:
             continue
         left, right = source.split(marker)
-        if re.search(r"\band\s*$", left, re.I) and re.match(r"\s+[A-Za-z]{2,}\b", right):
+        if re.search(r"\band\s*$", left, re.I) and re.match(
+            r"\s+[A-Za-z]{2,}\b", right
+        ):
             segments[paragraph_id] = left.rstrip() + "/or" + right
 
 
@@ -1489,7 +1668,8 @@ def _recover_detector_boundary_text(
 
         def connected(a: int, b: int) -> bool:
             return (
-                on_line(a) and on_line(b)
+                on_line(a)
+                and on_line(b)
                 and -0.25 * em <= float(chars[b].x0) - float(chars[a].x1) <= 0.8 * em
             )
 
@@ -1498,7 +1678,8 @@ def _recover_detector_boundary_text(
         # Several full prose words between the two cut words distinguish a
         # sentence from an isolated Roman label or names beside an equation.
         interior = [
-            ch for ch in chars[left_end:right_start]
+            ch
+            for ch in chars[left_end:right_start]
             if not is_formula(ch.fontname, ch.get_text())
         ]
         if len(re.findall(r"[A-Za-z]{3,}", _reconstruct_italic_run(interior))) < 3:
@@ -1509,7 +1690,8 @@ def _recover_detector_boundary_text(
             end += 1
         recovered.update(
             (object_id(chars[pos]), target_class)
-            for pos in range(start, end) if classes[pos] == 1
+            for pos in range(start, end)
+            if classes[pos] == 1
         )
     return recovered
 
@@ -2703,11 +2885,17 @@ def _mark_prose_words(chars: list[LTChar]) -> None:
     # the entire dotted unit (including its final period) out of math islands.
     prose_abbreviations = {"w.r.t.", "w.h.p.", "i.i.d.", "i.e.", "e.g."}
     for index in range(len(chars)):
-        abbreviation = next((
-            chars[index : index + length] for length in (4, 6)
-            if "".join(ch.get_text() for ch in chars[index : index + length]).lower()
-            in prose_abbreviations
-        ), None)
+        abbreviation = next(
+            (
+                chars[index : index + length]
+                for length in (4, 6)
+                if "".join(
+                    ch.get_text() for ch in chars[index : index + length]
+                ).lower()
+                in prose_abbreviations
+            ),
+            None,
+        )
         if abbreviation is None:
             continue
         em = max(ch.size for ch in abbreviation)
@@ -2715,7 +2903,8 @@ def _mark_prose_words(chars: list[LTChar]) -> None:
             all(_is_non_math_text_font(ch.fontname) for ch in abbreviation)
             and min(ch.size for ch in abbreviation) >= 0.9 * em
             and max(_char_baseline(ch) for ch in abbreviation)
-            - min(_char_baseline(ch) for ch in abbreviation) < 0.2 * em
+            - min(_char_baseline(ch) for ch in abbreviation)
+            < 0.2 * em
             and all(
                 -0.12 * em <= right.x0 - left.x1 <= 0.5 * em
                 for left, right in zip(abbreviation, abbreviation[1:])
@@ -2803,7 +2992,8 @@ def _formula_annotation_islands(chars: list[LTChar]) -> list[list[LTChar]]:
     for char in sorted(chars, key=lambda ch: (-_char_baseline(ch), ch.x0)):
         line = next(
             (
-                line for line in reversed(lines[-5:])
+                line
+                for line in reversed(lines[-5:])
                 if abs(_char_baseline(line[0]) - _char_baseline(char))
                 <= 0.18 * min(float(line[0].size), float(char.size))
             ),
@@ -2860,7 +3050,9 @@ def _formula_annotation_islands(chars: list[LTChar]) -> list[list[LTChar]]:
                     gap = run[0].x0 - char.x1 if on_left else char.x0 - run[-1].x1
                     if not 0 <= gap <= 2.5 * em:
                         continue
-                    same_row = abs(_char_baseline(char) - _char_baseline(run[0])) <= 0.2 * em
+                    same_row = (
+                        abs(_char_baseline(char) - _char_baseline(run[0])) <= 0.2 * em
+                    )
                     tall_delimiter = (
                         re.match(r"\\(?:bigg?|Bigg?)[lr]?[()[\]]", char.get_text())
                         and abs(char.y0 - run[0].y0) <= 2 * em
@@ -2871,31 +3063,35 @@ def _formula_annotation_islands(chars: list[LTChar]) -> list[list[LTChar]]:
                     return False
                 nearest = min(candidates, key=lambda item: item[0])[1]
                 math_script = (
-                    nearest.get_text().isdigit() and nearest.size < 0.9 * em
+                    nearest.get_text().isdigit()
+                    and nearest.size < 0.9 * em
                     and any(
                         _MATH_FONT_RE.search(_font_name(ch.fontname))
                         and -0.1 * em <= nearest.x0 - ch.x1 <= 0.3 * em
-                        and abs(_char_baseline(ch) - _char_baseline(nearest)) < 0.65 * em
+                        and abs(_char_baseline(ch) - _char_baseline(nearest))
+                        < 0.65 * em
                         for ch in chars
                     )
                 )
                 return bool(
                     math_script
-                    or
-                    _MATH_FONT_RE.search(_font_name(nearest.fontname))
+                    or _MATH_FONT_RE.search(_font_name(nearest.fontname))
                     or re.match(r"\\[A-Za-z]+", nearest.get_text())
                 )
 
             if (
                 text.casefold() in {"and", "or"}
-                and math_neighbor(True) and math_neighbor(False)
+                and math_neighbor(True)
+                and math_neighbor(False)
             ):
                 islands.append(run)
             elif (
                 text.casefold() == "where"
-                and left and right
+                and left
+                and right
                 and before.rstrip().endswith(",")
-                and relation.search(before) and relation.search(after)
+                and relation.search(before)
+                and relation.search(after)
                 and run[0].x0 - left[-1].x1 >= 0.2 * em
                 and right[0].x0 - run[-1].x1 >= 0.2 * em
                 and any(_MATH_FONT_RE.search(_font_name(ch.fontname)) for ch in left)
@@ -2948,8 +3144,7 @@ def _is_scripted_table_symbol(chars: list[LTChar]) -> bool:
     for char in script:
         if (
             not -0.25 * em <= char.x0 - previous.x1 <= 0.30 * em
-            or abs((float(char.y0) + float(char.y1)) / 2 - script_center)
-            > 0.12 * em
+            or abs((float(char.y0) + float(char.y1)) / 2 - script_center) > 0.12 * em
         ):
             return False
         previous = char
@@ -2988,8 +3183,7 @@ def _wrapped_table_label_pairs(lines: list[list[LTChar]]) -> dict[int, int]:
             or re.search(r"[A-Za-z]$", before) is None
             or re.match(r"[a-z]{2,}\b", after) is None
             or any(
-                re.match(r"^[+\-−]?\d", _reconstruct_italic_run(cell).strip())
-                is None
+                re.match(r"^[+\-−]?\d", _reconstruct_italic_run(cell).strip()) is None
                 or re.search(r"[A-Za-z]{2,}", _reconstruct_italic_run(cell))
                 for cell in current[1:]
             )
@@ -3022,7 +3216,8 @@ def _source_list_markers(chars: list[LTChar], excluded: set[int]) -> set[int]:
     text on the same line and must remain part of its formula instead.
     """
     horizontal = [
-        ch for ch in chars
+        ch
+        for ch in chars
         if object_id(ch) not in excluded
         and not _is_non_horizontal_text_matrix(ch.matrix)
         and ch.get_text().strip()
@@ -3035,9 +3230,9 @@ def _source_list_markers(chars: list[LTChar], excluded: set[int]) -> set[int]:
         em = float(char.size)
         baseline = _char_baseline(char)
         row = [
-            ch for ch in horizontal
-            if ch is not char
-            and abs(_char_baseline(ch) - baseline) <= 0.25 * em
+            ch
+            for ch in horizontal
+            if ch is not char and abs(_char_baseline(ch) - baseline) <= 0.25 * em
         ]
         # Other columns can occupy the same baseline; inspect the local gap.
         if any(0 <= char.x0 - ch.x1 < 3 * em for ch in row):
@@ -3049,7 +3244,8 @@ def _source_list_markers(chars: list[LTChar], excluded: set[int]) -> set[int]:
         # being mistaken for a list.  The item may begin with an inline formula.
         if not any(
             getattr(ch, "_pdf2zh_prose_word", False)
-            for ch in following if ch.x0 - char.x1 < 14 * em
+            for ch in following
+            if ch.x0 - char.x1 < 14 * em
         ):
             continue
         markers.add(object_id(char))
@@ -3091,8 +3287,7 @@ def _algorithm_display_math_chars(
             top = (min(above) + baseline) / 2
             bottom = (max(below) + baseline) / 2 if below else -float("inf")
             preserved.update(
-                object_id(ch) for ch in group
-                if bottom < _char_baseline(ch) < top
+                object_id(ch) for ch in group if bottom < _char_baseline(ch) < top
             )
     return preserved
 
@@ -3115,7 +3310,8 @@ def _recover_preserved_region_prose(
         return {}
     height, width = layout.shape
     regions = [
-        d for d in detections
+        d
+        for d in detections
         if d.class_name in {"table", "abandon", "isolate_formula", "figure"}
     ]
     relevant = []
@@ -3154,11 +3350,13 @@ def _recover_preserved_region_prose(
                 em = max(ch.size for ch in island)
                 baseline = _char_baseline(island[0])
                 braces = [
-                    ch for ch in region_chars
+                    ch
+                    for ch in region_chars
                     if ("\\underbrace" in ch.get_text() or ch.get_text() == "⏟")
                     and _MATH_FONT_RE.search(_font_name(ch.fontname))
                     and 0 < baseline - _char_baseline(ch) < 1.2 * em
-                    and ch.x1 > island[0].x0 and ch.x0 < island[-1].x1
+                    and ch.x1 > island[0].x0
+                    and ch.x0 < island[-1].x1
                 ]
                 if not braces or not any(
                     re.search(r"[=<>≤≥]|\\(?:leq|geq|equiv)\b", ch.get_text())
@@ -3169,9 +3367,11 @@ def _recover_preserved_region_prose(
                 # TeX's extensible braces include glyph pieces mapped to a
                 # space. Include only matching-font pieces on the brace row.
                 braces += [
-                    ch for ch in region_chars
+                    ch
+                    for ch in region_chars
                     if not ch.get_text().strip()
-                    and ch.x1 > island[0].x0 and ch.x0 < island[-1].x1
+                    and ch.x1 > island[0].x0
+                    and ch.x0 < island[-1].x1
                     and any(
                         ch.fontname == brace.fontname
                         and abs(_char_baseline(ch) - _char_baseline(brace)) < 0.05 * em
@@ -3205,8 +3405,7 @@ def _recover_preserved_region_prose(
                 re.search(r"^\s*recover\s+.+?\s+from\s+.+?\s+where\s+", prose, re.I)
                 and re.search(r"\brecover\b.*\bfrom\b.*\bwhere\b", task_words, re.I)
                 and any(
-                    _MATH_FONT_RE.search(_font_name(ch.fontname))
-                    for ch in region_chars
+                    _MATH_FONT_RE.search(_font_name(ch.fontname)) for ch in region_chars
                 )
             )
             if algorithm or recovery_task:
@@ -3403,8 +3602,12 @@ def _bridge_recovered_footnote_math(chars, recovered, region_types, excluded):
     Join only a touching min/max-domain-objective with membership evidence.
     """
     operators = set()
-    horizontal = [char for char in chars if object_id(char) not in excluded
-                  and not _is_non_horizontal_text_matrix(char.matrix)]
+    horizontal = [
+        char
+        for char in chars
+        if object_id(char) not in excluded
+        and not _is_non_horizontal_text_matrix(char.matrix)
+    ]
     for first in horizontal:
         cls = recovered.get(object_id(first))
         if first.get_text() != "m" or region_types.get(cls) != "footnote":
@@ -3412,33 +3615,50 @@ def _bridge_recovered_footnote_math(chars, recovered, region_types, excluded):
         em = float(first.size)
         run = [first]
         for choices in ("ia", "nx"):
-            found = [char for char in horizontal if char.get_text() in choices
-                     and char.fontname == first.fontname
-                     and abs(char.size - em) <= 0.05 * em
-                     and abs(_char_baseline(char) - _char_baseline(first)) <= 0.1 * em
-                     and -0.1 * em <= char.x0 - run[-1].x1 <= 0.1 * em]
+            found = [
+                char
+                for char in horizontal
+                if char.get_text() in choices
+                and char.fontname == first.fontname
+                and abs(char.size - em) <= 0.05 * em
+                and abs(_char_baseline(char) - _char_baseline(first)) <= 0.1 * em
+                and -0.1 * em <= char.x0 - run[-1].x1 <= 0.1 * em
+            ]
             if len(found) != 1:
                 break
             run.append(found[0])
         if "".join(char.get_text() for char in run) not in {"min", "max"}:
             continue
-        domain = sorted([char for char in horizontal if (
-            run[-1].x1 - 0.1 * em <= char.x0 <= run[-1].x1 + 2.2 * em
-            and 0.5 * em <= char.size <= 0.85 * em
-            and abs(_char_baseline(char) - _char_baseline(first)) <= 0.8 * em
-            and _MATH_FONT_RE.search(_font_name(char.fontname))
-        )], key=lambda char: char.x0)
-        if not domain or not any(char.get_text().strip() in {"\\in", "∈"} for char in domain):
+        domain = sorted(
+            [
+                char
+                for char in horizontal
+                if (
+                    run[-1].x1 - 0.1 * em <= char.x0 <= run[-1].x1 + 2.2 * em
+                    and 0.5 * em <= char.size <= 0.85 * em
+                    and abs(_char_baseline(char) - _char_baseline(first)) <= 0.8 * em
+                    and _MATH_FONT_RE.search(_font_name(char.fontname))
+                )
+            ],
+            key=lambda char: char.x0,
+        )
+        if not domain or not any(
+            char.get_text().strip() in {"\\in", "∈"} for char in domain
+        ):
             continue
         if domain[0].x0 - run[-1].x1 > 0.2 * em:
             continue
-        objective = [char for char in horizontal if (
-            -0.1 * em <= char.x0 - domain[-1].x1 <= 0.7 * em
-            and 0.9 * em <= char.size <= 1.1 * em
-            and abs(_char_baseline(char) - _char_baseline(first)) <= 0.15 * em
-            and _MATH_FONT_RE.search(_font_name(char.fontname))
-            and region_types.get(recovered.get(object_id(char))) == "footnote"
-        )]
+        objective = [
+            char
+            for char in horizontal
+            if (
+                -0.1 * em <= char.x0 - domain[-1].x1 <= 0.7 * em
+                and 0.9 * em <= char.size <= 1.1 * em
+                and abs(_char_baseline(char) - _char_baseline(first)) <= 0.15 * em
+                and _MATH_FONT_RE.search(_font_name(char.fontname))
+                and region_types.get(recovered.get(object_id(char))) == "footnote"
+            )
+        ]
         if len(objective) != 1:
             continue
         other_class = recovered[object_id(objective[0])]
@@ -3892,7 +4112,9 @@ def _collect_translatable_italic_runs(
     return candidates
 
 
-def _restore_italic_affiliation_layout(segments, formulas, paragraphs, candidates, page_height):
+def _restore_italic_affiliation_layout(
+    segments, formulas, paragraphs, candidates, page_height
+):
     """Recover body size and separate rows for numbered italic institutions.
 
     These blocks otherwise contain only small superscript digits in prose;
@@ -3903,7 +4125,8 @@ def _restore_italic_affiliation_layout(segments, formulas, paragraphs, candidate
             continue
         matches = list(re.finditer(r"(\d{1,2})\s*\{v(\d+)\}\s*", source))
         if (
-            len(matches) < 2 or matches[0].start() != 0
+            len(matches) < 2
+            or matches[0].start() != 0
             or "".join(match.group() for match in matches) != source
             or [int(match[1]) for match in matches] != list(range(1, len(matches) + 1))
         ):
@@ -3921,7 +4144,10 @@ def _restore_italic_affiliation_layout(segments, formulas, paragraphs, candidate
             continue
         size = float(np.median([char.size for run in runs for char in run]))
         baselines = [_char_baseline(run[0]) for run in runs]
-        if any(not 0.8 * size <= a - b <= 2.2 * size for a, b in zip(baselines, baselines[1:])):
+        if any(
+            not 0.8 * size <= a - b <= 2.2 * size
+            for a, b in zip(baselines, baselines[1:])
+        ):
             continue
         paragraph.size = size
         paragraph.y = runs[0][0].y0
@@ -4626,8 +4852,11 @@ def _source_fill_color_op(char: LTChar) -> str:
         # PDF names escape delimiters and arbitrary bytes using #XX, not string
         # quoting.  The page or figure retains this source resource dictionary.
         encoded_name = "".join(
-            chr(value) if 33 <= value <= 126 and chr(value) not in "()<>[]{}/%#"
-            else f"#{value:02X}"
+            (
+                chr(value)
+                if 33 <= value <= 126 and chr(value) not in "()<>[]{}/%#"
+                else f"#{value:02X}"
+            )
             for value in resource_name.encode("utf-8")
         )
         prefix = f"/{encoded_name} cs "
@@ -4639,7 +4868,11 @@ def _source_fill_color_op(char: LTChar) -> str:
     if len(components) != count:
         return ""
     try:
-        return prefix + " ".join(f"{float(value):f}" for value in components) + f" {operator} "
+        return (
+            prefix
+            + " ".join(f"{float(value):f}" for value in components)
+            + f" {operator} "
+        )
     except (TypeError, ValueError):
         return ""
 
@@ -4693,7 +4926,8 @@ class PDFConverterEx(PDFConverter):
         if (
             not 0 < width <= 1.0
             or (graphicstate.dash and graphicstate.dash[0])
-            or not isinstance(color, (tuple, list)) or len(color) != 3
+            or not isinstance(color, (tuple, list))
+            or len(color) != 3
             or max(color) - min(color) < 0.05
             or abs(start[1] - end[1]) > 0.02
         ):
@@ -4706,7 +4940,8 @@ class PDFConverterEx(PDFConverter):
             if (
                 3 <= y1 - y0 <= 16
                 and x1 - x0 >= 5
-                and abs(left - x0) <= 0.1 and abs(right - x1) <= 0.1
+                and abs(left - x0) <= 0.1
+                and abs(right - x1) <= 0.1
                 and 0 <= y - y0 <= 1.0
             ):
                 records = getattr(self, "_uri_underline_records", None)
@@ -4723,14 +4958,17 @@ class PDFConverterEx(PDFConverter):
             changed = self._reflowed_uri_prose = []
         for source, target, paragraph in zip(sources, targets, paragraphs):
             if (
-                source != target and paragraph.brk
+                source != target
+                and paragraph.brk
                 and paragraph.layout_class != 0
                 and paragraph.region_kind == "plain text"
             ):
-                changed.append((
-                    int(page_id),
-                    (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
-                ))
+                changed.append(
+                    (
+                        int(page_id),
+                        (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
+                    )
+                )
 
     def resolve_uri_underline_markers(self, operations: str) -> str:
         """Remove stale decorations only after their ordinary prose changed."""
@@ -4743,8 +4981,7 @@ class PDFConverterEx(PDFConverter):
             for changed_page, bounds in changed:
                 a, b, c, d = bounds
                 if changed_page == page_id and (
-                    a - 0.1 <= x0 <= x1 <= c + 0.1
-                    and b - 1 <= y0 <= y1 <= d + 1
+                    a - 0.1 <= x0 <= x1 <= c + 0.1 and b - 1 <= y0 <= y1 <= d + 1
                 ):
                     return "n"
             return "S"
@@ -4829,10 +5066,14 @@ class PDFConverterEx(PDFConverter):
             self._source_render_mode = previous
 
 
-def _collect_formula_annotation_contexts(paragraphs, formulas) -> dict[int, dict[str, str]]:
+def _collect_formula_annotation_contexts(
+    paragraphs, formulas
+) -> dict[int, dict[str, str]]:
     """Read nearby protected glyphs without merging them into a label's layout."""
     protected = [
-        ch for formula in formulas for ch in formula
+        ch
+        for formula in formulas
+        for ch in formula
         if getattr(ch, "_pdf2zh_layout_class", None) == 0
     ]
     contexts = {}
@@ -4841,7 +5082,8 @@ def _collect_formula_annotation_contexts(paragraphs, formulas) -> dict[int, dict
             continue
         em = max(paragraph.size, 1.0)
         row = [
-            ch for ch in protected
+            ch
+            for ch in protected
             if (
                 abs(_char_baseline(ch) - paragraph.y) <= 0.65 * em
                 or (
@@ -4854,11 +5096,17 @@ def _collect_formula_annotation_contexts(paragraphs, formulas) -> dict[int, dict
 
         def side(left):
             candidates = sorted(
-                [ch for ch in row if (
-                    ch.x1 <= paragraph.x0 + 0.05 if left
-                    else ch.x0 >= paragraph.x1 - 0.05
-                )],
-                key=lambda ch: (ch.x0, -ch.y0), reverse=left,
+                [
+                    ch
+                    for ch in row
+                    if (
+                        ch.x1 <= paragraph.x0 + 0.05
+                        if left
+                        else ch.x0 >= paragraph.x1 - 0.05
+                    )
+                ],
+                key=lambda ch: (ch.x0, -ch.y0),
+                reverse=left,
             )
             edge = paragraph.x0 if left else paragraph.x1
             selected = []
@@ -4870,15 +5118,20 @@ def _collect_formula_annotation_contexts(paragraphs, formulas) -> dict[int, dict
                 edge = min(edge, ch.x0) if left else max(edge, ch.x1)
                 if ch.get_text().strip() in ({"(", "["} if left else {")", "]"}):
                     break
-            return "".join(ch.get_text() for ch in sorted(selected, key=lambda ch: ch.x0)).strip()
+            return "".join(
+                ch.get_text() for ch in sorted(selected, key=lambda ch: ch.x0)
+            ).strip()
 
         left, right = side(True), side(False)
         meaningful = lambda text: bool(re.search(r"[\w\\≤≥∼=]", text))
         position = (
-            "between-math" if meaningful(left) and meaningful(right)
-            else "before-math" if meaningful(right)
-            else "after-math" if meaningful(left)
-            else "label"
+            "between-math"
+            if meaningful(left) and meaningful(right)
+            else (
+                "before-math"
+                if meaningful(right)
+                else "after-math" if meaningful(left) else "label"
+            )
         )
         contexts[index] = {"position": position, "left_math": left, "right_math": right}
     return contexts
@@ -5028,7 +5281,31 @@ class TranslateConverter(PDFConverterEx):
         self.translation_policy = DocumentTranslationPolicy()
         self.layout_region_types: dict[int, dict[int, str]] = {}
         self._pending_page: PageLayoutDraft | None = None
+        self._completed_page_xrefs: list[int] = []
         self._flow_token_counter = 0
+
+    def _check_cancelled(self) -> None:
+        event = getattr(self, "cancellation_event", None)
+        if event is not None and event.is_set():
+            raise CancelledError("task cancelled")
+
+    def _page_translation_started(self, page_number: int) -> None:
+        self._check_cancelled()
+        callback = getattr(self, "page_translation_callback", None)
+        if callback is not None:
+            callback(page_number)
+
+    def _page_translation_completed(self, page_xref: int) -> None:
+        self._check_cancelled()
+        if not hasattr(self, "_completed_page_xrefs"):
+            self._completed_page_xrefs = []
+        self._completed_page_xrefs.append(page_xref)
+
+    def take_completed_page_xrefs(self) -> tuple[int, ...]:
+        """Drain after the interpreter has attached the returned page operators."""
+        completed = tuple(getattr(self, "_completed_page_xrefs", ()))
+        self._completed_page_xrefs = []
+        return completed
 
     @staticmethod
     def _is_passthrough_text(s: str) -> bool:
@@ -5150,6 +5427,7 @@ class TranslateConverter(PDFConverterEx):
             wait=wait_fixed(1), retry=retry_if_exception(_retryable_translation_error)
         )
         def worker(s: str):
+            self._check_cancelled()
             if self._is_passthrough_text(s):
                 return s
             try:
@@ -5167,6 +5445,7 @@ class TranslateConverter(PDFConverterEx):
             retry=retry_if_exception(_retryable_translation_error),
         )
         def batch_worker(texts: list[str]):
+            self._check_cancelled()
             try:
                 translated = self.translator.translate_batch(texts)
                 return self._validate_batch_result(
@@ -5190,6 +5469,7 @@ class TranslateConverter(PDFConverterEx):
             texts: list[str],
             contexts: list[dict[str, str]],
         ):
+            self._check_cancelled()
             contextual_translator = getattr(
                 self.translator,
                 "translate_batch_with_formula_contexts",
@@ -5299,6 +5579,7 @@ class TranslateConverter(PDFConverterEx):
         def reference_worker(
             texts: list[str], contexts: list[str]
         ) -> list[str]:
+            self._check_cancelled()
             try:
                 translated = reference_translator(
                     texts, cache_contexts=contexts
@@ -5327,6 +5608,7 @@ class TranslateConverter(PDFConverterEx):
     ) -> list[str | None]:
         if not texts:
             return []
+        self._check_cancelled()
         if formula_contexts is None:
             formula_contexts = [{} for _ in texts]
         if len(formula_contexts) != len(texts):
@@ -5372,7 +5654,7 @@ class TranslateConverter(PDFConverterEx):
                     strict=True,
                 )
             ]
-        except (TranslationAbortedError, CodexPermanentError):
+        except (CancelledError, TranslationAbortedError, CodexPermanentError):
             raise
         except BaseException as exc:
             if log.isEnabledFor(logging.DEBUG):
@@ -5509,6 +5791,7 @@ class TranslateConverter(PDFConverterEx):
                     raise ValueError(f"Unsupported translation role: {part.role}")
 
         if annotation_texts:
+            self._check_cancelled()
             annotation_results = self._validate_batch_result(
                 annotation_translator(annotation_texts, annotation_contexts),
                 len(annotation_texts),
@@ -5642,6 +5925,7 @@ class TranslateConverter(PDFConverterEx):
         group: ContinuationGroup,
         draft_lookup: dict[SegmentRef, PageLayoutDraft],
     ) -> list[FragmentOverride] | None:
+        self._check_cancelled()
         translate = getattr(
             self.translator,
             "translate_continuation_fragments",
@@ -5674,7 +5958,7 @@ class TranslateConverter(PDFConverterEx):
                 formula_contexts,
                 join_kind=f"{group.edge.kind}:{group.edge.join_mode}",
             )
-        except (TranslationAbortedError, CodexPermanentError):
+        except (CancelledError, TranslationAbortedError, CodexPermanentError):
             raise
         except BaseException as exc:
             if log.isEnabledFor(logging.DEBUG):
@@ -5702,6 +5986,7 @@ class TranslateConverter(PDFConverterEx):
         group: ReferenceContinuationGroup,
         draft_lookup: dict[SegmentRef, PageLayoutDraft],
     ) -> list[FragmentOverride] | None:
+        self._check_cancelled()
         translate = getattr(
             self.translator,
             "translate_reference_continuation_fragments",
@@ -5733,7 +6018,7 @@ class TranslateConverter(PDFConverterEx):
                     contexts.append(context)
                 kwargs["formula_contexts"] = tuple(contexts)
             replacements = translate(left_entry, right_prefix, **kwargs)
-        except (TranslationAbortedError, CodexPermanentError):
+        except (CancelledError, TranslationAbortedError, CodexPermanentError):
             raise
         except BaseException as exc:
             if log.isEnabledFor(logging.DEBUG):
@@ -5912,18 +6197,25 @@ class TranslateConverter(PDFConverterEx):
         pending: PageLayoutDraft,
         following: PageLayoutDraft | None,
     ) -> str:
+        self._page_translation_started(pending.page_id + 1)
         self._prepare_continuation_overrides(pending, following)
         self.fontid = dict(pending.fontid)
         self.fontmap = dict(pending.fontmap)
-        return self.receive_layout(
+        operations = self.receive_layout(
             pending.ltpage,
             page_xref=pending.page_xref,
             overrides=pending.overrides,
         )
+        self._page_translation_completed(pending.page_xref)
+        return operations
 
     def end_page(self, page):
+        self._check_cancelled()
         if not self._reading_flow_enabled():
-            return self.receive_layout(self.cur_item)
+            self._page_translation_started(int(self.cur_item.pageid) + 1)
+            operations = self.receive_layout(self.cur_item)
+            self._page_translation_completed(int(getattr(page, "page_xref", -1)))
+            return operations
         current = self.receive_layout(
             self.cur_item,
             preview_only=True,
@@ -5939,6 +6231,7 @@ class TranslateConverter(PDFConverterEx):
         return completed
 
     def flush_deferred_pages(self) -> dict[int, str]:
+        self._check_cancelled()
         if self._pending_page is None:
             return {}
         pending = self._pending_page

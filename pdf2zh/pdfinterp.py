@@ -141,8 +141,10 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         self._pending_uri_underline_marker = ""
         preserve = getattr(self.device, "preserve_source_stroke", None)
         if (
-            callable(preserve) and len(self.curpath) == 2
-            and self.curpath[0][0] == "m" and self.curpath[1][0] == "l"
+            callable(preserve)
+            and len(self.curpath) == 2
+            and self.curpath[0][0] == "m"
+            and self.curpath[1][0] == "l"
             and preserve(
                 apply_matrix_pt(self.ctm, self.curpath[0][-2:]),
                 apply_matrix_pt(self.ctm, self.curpath[1][-2:]),
@@ -151,7 +153,12 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             self.curpath = []
             return
         marker = getattr(self.device, "mark_uri_underline", None)
-        if callable(marker) and len(self.curpath) == 2 and self.curpath[0][0] == "m" and self.curpath[1][0] == "l":
+        if (
+            callable(marker)
+            and len(self.curpath) == 2
+            and self.curpath[0][0] == "m"
+            and self.curpath[1][0] == "l"
+        ):
             self._pending_uri_underline_marker = marker(
                 apply_matrix_pt(self.ctm, self.curpath[0][-2:]),
                 apply_matrix_pt(self.ctm, self.curpath[1][-2:]),
@@ -391,7 +398,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                             targs = []
                         if not (name[0] == "T" or name in ["BI", "ID", "EMC"]):
                             p = " ".join(_serialize_pdf_operand(x) for x in targs)
-                            if name == "S" and getattr(self, "_pending_uri_underline_marker", ""):
+                            if name == "S" and getattr(
+                                self, "_pending_uri_underline_marker", ""
+                            ):
                                 ops += self._pending_uri_underline_marker + "\n"
                                 self._pending_uri_underline_marker = ""
                             ops += f"{p} {name} "

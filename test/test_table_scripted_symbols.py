@@ -3,17 +3,23 @@ from test_cm_prose_and_region_recovery import detection, recover, run
 
 def cell(base_font="TimesNewRoman-Italic", script_y=498.578, script_size=6.65, gap=0):
     base = run("Q", x=20, y=500, font=base_font, size=9.5)
-    script = run("high", x=base[-1].x1 + gap, y=script_y, font="Times-Roman", size=script_size)
+    script = run(
+        "high", x=base[-1].x1 + gap, y=script_y, font="Times-Roman", size=script_size
+    )
     return base + script
 
 
 def test_textual_math_subscript_stays_protected_without_changing_glyphs():
     for font in ("TimesNewRoman-Italic", "CMMI10"):
         chars = cell(base_font=font)
-        geometry = [(ch.get_text(), ch.x0, ch.y0, ch.x1, ch.y1, ch.size) for ch in chars]
+        geometry = [
+            (ch.get_text(), ch.x0, ch.y0, ch.x1, ch.y1, ch.size) for ch in chars
+        ]
         mapping, _ = recover(chars, [detection("table", (0, 450, 599, 550))])
         assert not mapping
-        assert [(ch.get_text(), ch.x0, ch.y0, ch.x1, ch.y1, ch.size) for ch in chars] == geometry
+        assert [
+            (ch.get_text(), ch.x0, ch.y0, ch.x1, ch.y1, ch.size) for ch in chars
+        ] == geometry
 
 
 def test_ordinary_high_header_and_nonscript_prose_still_translate():

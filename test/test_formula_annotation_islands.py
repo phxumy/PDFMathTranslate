@@ -54,14 +54,19 @@ def test_where_requires_a_separate_explanatory_clause_between_equations():
         left = run(left_text, x=20, y=500, font="CMMI10")
         word = run("where", x=left[-1].x1 + gap, y=500, font=font)
         right = run(right_text, x=word[-1].x1 + gap, y=500, font="CMMI10")
-        mapping, _ = recover(left + word + right, [detection("isolate_formula", (0, 450, 599, 550))])
+        mapping, _ = recover(
+            left + word + right, [detection("isolate_formula", (0, 450, 599, 550))]
+        )
         return mapping, word
 
     mapping, word = make()
     assert set(mapping) == {id(ch) for ch in word}
     for params in (
-        {"left_text": "x=y"}, {"left_text": "x,"},
-        {"right_text": "(x)"}, {"gap": 0}, {"font": "CMMI10"},
+        {"left_text": "x=y"},
+        {"left_text": "x,"},
+        {"right_text": "(x)"},
+        {"gap": 0},
+        {"font": "CMMI10"},
     ):
         mapping, _ = make(**params)
         assert not mapping
@@ -70,12 +75,16 @@ def test_where_requires_a_separate_explanatory_clause_between_equations():
 def test_small_requires_quantified_variable_and_stays_separate_from_math():
     quantifier = run("∀ε", x=20, y=500, font="CMMI10")
     small = run("small", x=quantifier[-1].x1 + 3, y=500)
-    mapping, _ = recover(quantifier + small, [detection("isolate_formula", (0, 450, 599, 550))])
+    mapping, _ = recover(
+        quantifier + small, [detection("isolate_formula", (0, 450, 599, 550))]
+    )
     assert set(mapping) == {id(ch) for ch in small}
     for prefix in ("ε", "small", "∀"):
         prior = run(prefix, x=20, y=500, font="CMMI10")
         word = run("small", x=prior[-1].x1 + 3, y=500)
-        mapping, _ = recover(prior + word, [detection("isolate_formula", (0, 450, 599, 550))])
+        mapping, _ = recover(
+            prior + word, [detection("isolate_formula", (0, 450, 599, 550))]
+        )
         assert not mapping
 
 
@@ -99,7 +108,9 @@ def test_math_conjunctions_keep_adjacent_expressions_fixed_in_equations_and_tabl
             left = run("ℓ", x=30, y=500, font="CMMI10")
             word = run(conjunction, x=left[-1].x1 + 3, y=500)
             right = run("ℓ", x=word[-1].x1 + 3, y=500, font="CMMI10")
-            mapping, kinds = recover(left + word + right, [detection(region, (0, 450, 599, 550))])
+            mapping, kinds = recover(
+                left + word + right, [detection(region, (0, 450, 599, 550))]
+            )
             assert set(mapping) == {id(ch) for ch in word}
             assert kinds[mapping[id(word[0])]] == "formula_annotation"
 
@@ -115,7 +126,9 @@ def test_math_conjunction_recovery_rejects_code_math_names_and_distant_columns()
         left = run("ℓ", x=30, y=500, font="CMMI10")
         word = run("or", x=left[-1].x1 + 3, y=500, font=label_font)
         right = run("x", x=word[-1].x1 + gap, y=right_y, font=right_font)
-        mapping, _ = recover(left + word + right, [detection("isolate_formula", (0, 450, 599, 550))])
+        mapping, _ = recover(
+            left + word + right, [detection("isolate_formula", (0, 450, 599, 550))]
+        )
         assert not mapping
 
 
@@ -125,7 +138,9 @@ def test_conjunction_between_large_matrices_accepts_raised_math_delimiter():
     word = run("and", x=55, y=500, size=10)
     delta = run("D", x=word[-1].x1 + 21, y=500, font="CMR10", size=10)[0]
     delta.get_text = lambda: r"\Delta "
-    mapping, _ = recover([bracket] + word + [delta], [detection("isolate_formula", (0, 450, 599, 550))])
+    mapping, _ = recover(
+        [bracket] + word + [delta], [detection("isolate_formula", (0, 450, 599, 550))]
+    )
     assert set(mapping) == {id(ch) for ch in word}
 
 
@@ -134,5 +149,7 @@ def test_table_conjunction_after_numeric_math_subscript_stays_independent():
     script = run("1", x=left[-1].x1, y=499, font="CMR6", size=6)
     word = run("or", x=script[-1].x1 + 0.5, y=500, size=8)
     right = run("ℓ", x=word[-1].x1 + 3, y=500, font="CMMI8", size=8)
-    mapping, _ = recover(left + script + word + right, [detection("table", (0, 450, 599, 550))])
+    mapping, _ = recover(
+        left + script + word + right, [detection("table", (0, 450, 599, 550))]
+    )
     assert set(mapping) == {id(ch) for ch in word}

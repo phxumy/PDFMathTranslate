@@ -7,7 +7,6 @@ import pytest
 from pdf2zh.translation_policy import ExactReplacement
 from pdf2zh.translator import CodexTranslator
 
-
 # Keep the original title, proposed translation, and bibliographic tail together:
 # accepting a title must leave every author/venue/page/link byte untouched.
 CASES = (
@@ -100,15 +99,28 @@ def test_rejected_math_candidates_have_safe_exact_title_boundaries(
     )
 
 
-@pytest.mark.parametrize("venue", [
-    "Constr. Approx.", "Found. Trends Mach. Learn.", "Found. Comput. Math.",
-    "Appl. Comput. Harmon. Anal.", "Inform. Inference", "Biometrika",
-    "J. Optim. Theory Appl.", "Optim. Lett.",
-])
-@pytest.mark.parametrize("leftover", [
-    "Quantum Methods. ", "Optimization Methods, ", "Recovery of signals. ",
-    "A Complete Framework: ",
-])
+@pytest.mark.parametrize(
+    "venue",
+    [
+        "Constr. Approx.",
+        "Found. Trends Mach. Learn.",
+        "Found. Comput. Math.",
+        "Appl. Comput. Harmon. Anal.",
+        "Inform. Inference",
+        "Biometrika",
+        "J. Optim. Theory Appl.",
+        "Optim. Lett.",
+    ],
+)
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        "Quantum Methods. ",
+        "Optimization Methods, ",
+        "Recovery of signals. ",
+        "A Complete Framework: ",
+    ],
+)
 def test_title_prose_before_math_venue_is_never_metadata(venue, leftover):
     tail = f"{leftover}{venue}, 28 (2008), pp. 253--263."
     assert not CodexTranslator._reference_metadata_tail_is_safe(tail)
@@ -118,18 +130,42 @@ def test_title_prose_before_math_venue_is_never_metadata(venue, leftover):
     )
 
 
-@pytest.mark.parametrize("source,target", [
-    ("An approach based on the Kurdyka- {v42}Lojasiewicz inequality", "基于Kurdyka- Lojasiewicz不等式的{v42}方法"),
-    ("An approach based on the Kurdyka- {v42}Lojasiewicz inequality", "基于Kurdyka- {v42}Lojasiewicz inequality的方法"),
-    ("Kurdyka-Lojasiewicz inequality for convergence and optimization", "用于 convergence and optimization 的Kurdyka-Lojasiewicz不等式"),
-    ("Strong-Convex inequality for optimization", "用于优化的Strong-Convex inequality"),
-    ("Solving equations via phaselift when data is noisy", "数据有噪声时通过phaselift solving equations"),
-    ("Square-root lasso for sparse recovery", "用于 sparse recovery 的平方根 lasso"),
-    ("Low-rank matrix recovery", "低-rank矩阵恢复"),
-    ("Composite optimization for robust rank-one bilinear sensing", "用于鲁棒 rank 单一双线性传感的复合优化"),
-    ("Matrix recovery via convex optimization", "通过凸 optimization 恢复矩阵"),
-    ("Sparse recovery via programming", "通过programming稀疏恢复"),
-])
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        (
+            "An approach based on the Kurdyka- {v42}Lojasiewicz inequality",
+            "基于Kurdyka- Lojasiewicz不等式的{v42}方法",
+        ),
+        (
+            "An approach based on the Kurdyka- {v42}Lojasiewicz inequality",
+            "基于Kurdyka- {v42}Lojasiewicz inequality的方法",
+        ),
+        (
+            "Kurdyka-Lojasiewicz inequality for convergence and optimization",
+            "用于 convergence and optimization 的Kurdyka-Lojasiewicz不等式",
+        ),
+        (
+            "Strong-Convex inequality for optimization",
+            "用于优化的Strong-Convex inequality",
+        ),
+        (
+            "Solving equations via phaselift when data is noisy",
+            "数据有噪声时通过phaselift solving equations",
+        ),
+        (
+            "Square-root lasso for sparse recovery",
+            "用于 sparse recovery 的平方根 lasso",
+        ),
+        ("Low-rank matrix recovery", "低-rank矩阵恢复"),
+        (
+            "Composite optimization for robust rank-one bilinear sensing",
+            "用于鲁棒 rank 单一双线性传感的复合优化",
+        ),
+        ("Matrix recovery via convex optimization", "通过凸 optimization 恢复矩阵"),
+        ("Sparse recovery via programming", "通过programming稀疏恢复"),
+    ],
+)
 def test_names_never_exempt_moved_accents_or_ordinary_english(source, target):
     assert CodexTranslator._reference_title_has_unsafe_residue(source, target)
 
@@ -161,30 +197,54 @@ def test_accent_stays_with_its_surname_when_wrap_whitespace_changes(space):
 
 
 LATER_CASES = (
-    ("H. Xu, X.-K. Song, D. Wang, and L. Ye", "Quantum sensing of control errors in three-level systems by coherent control techniques",
-     "利用相干控制技术对三能级系统中的控制误差进行量子传感",
-     "Sci. China: Phys., Mech. Astron. 66, 240314 (2023)."),
-    ("M. C. Ferris", "Weak Sharp Minima and Exact Penalty Functions",
-     "弱尖锐极小值与精确罚函数",
-     "Technical report, Univer-sity of Wisconsin-Madison Department of Computer Sciences, 1988, [[PDF2ZH_FLOW_35]]."),
-    ("A. S. Nemirovski and Y. E. Nesterov", "Optimal methods of smooth convex minimization",
-     "光滑凸最小化的最优方法",
-     "Zhurnal Vychislitel'noi Matematiki i Matematicheskoi Fiziki, 25 (1985), pp. 356--369, [[PDF2ZH_FLOW_39]]."),
-    ("Y. Nesterov and A. Nemirovski", "On first-order algorithms for {v5}/nuclear norm minimiza- tion",
-     "关于{v5}/核范数最小化的一阶算法",
-     "Acta Numer., 22 (2013), pp. 509--575, [[PDF2ZH_FLOW_40]]."),
-    ("S. Portnoy and R. Koenker", "The gaussian hare and the Laplacian tortoise: Computability of squared-error versus absolute-error estimators",
-     "高斯野兔与拉普拉斯乌龟：平方误差与绝对误差估计量的可计算性",
-     "Statist. Sci., 12 (1997), pp. 279--300, [[PDF2ZH_FLOW_43]]."),
-    ("V. Roulet, N. Boumal, and A. d'Aspremont", "Computational complexity versus statistical performance on sparse recovery problems",
-     "稀疏恢复问题的计算复杂度与统计性能",
-     "Inform. Inference, (2020)."),
-    ("R. Vershynin", "Introduction to the Non-asymptotic Analysis of Random Matrices",
-     "随机矩阵非渐近分析导论",
-     "Cambridge University Press, Cambridge, 2012, pp. 210--268."),
-    ("T. Yang and Q. Lin", "RSG: Beating subgradient method without smoothness and strong convexity",
-     "RSG：无需光滑性和强凸性即可超越次梯度法",
-     "J. Mach. Learn. Res., 19 (2018), pp. 236--268, [[PDF2ZH_FLOW_52]]."),
+    (
+        "H. Xu, X.-K. Song, D. Wang, and L. Ye",
+        "Quantum sensing of control errors in three-level systems by coherent control techniques",
+        "利用相干控制技术对三能级系统中的控制误差进行量子传感",
+        "Sci. China: Phys., Mech. Astron. 66, 240314 (2023).",
+    ),
+    (
+        "M. C. Ferris",
+        "Weak Sharp Minima and Exact Penalty Functions",
+        "弱尖锐极小值与精确罚函数",
+        "Technical report, Univer-sity of Wisconsin-Madison Department of Computer Sciences, 1988, [[PDF2ZH_FLOW_35]].",
+    ),
+    (
+        "A. S. Nemirovski and Y. E. Nesterov",
+        "Optimal methods of smooth convex minimization",
+        "光滑凸最小化的最优方法",
+        "Zhurnal Vychislitel'noi Matematiki i Matematicheskoi Fiziki, 25 (1985), pp. 356--369, [[PDF2ZH_FLOW_39]].",
+    ),
+    (
+        "Y. Nesterov and A. Nemirovski",
+        "On first-order algorithms for {v5}/nuclear norm minimiza- tion",
+        "关于{v5}/核范数最小化的一阶算法",
+        "Acta Numer., 22 (2013), pp. 509--575, [[PDF2ZH_FLOW_40]].",
+    ),
+    (
+        "S. Portnoy and R. Koenker",
+        "The gaussian hare and the Laplacian tortoise: Computability of squared-error versus absolute-error estimators",
+        "高斯野兔与拉普拉斯乌龟：平方误差与绝对误差估计量的可计算性",
+        "Statist. Sci., 12 (1997), pp. 279--300, [[PDF2ZH_FLOW_43]].",
+    ),
+    (
+        "V. Roulet, N. Boumal, and A. d'Aspremont",
+        "Computational complexity versus statistical performance on sparse recovery problems",
+        "稀疏恢复问题的计算复杂度与统计性能",
+        "Inform. Inference, (2020).",
+    ),
+    (
+        "R. Vershynin",
+        "Introduction to the Non-asymptotic Analysis of Random Matrices",
+        "随机矩阵非渐近分析导论",
+        "Cambridge University Press, Cambridge, 2012, pp. 210--268.",
+    ),
+    (
+        "T. Yang and Q. Lin",
+        "RSG: Beating subgradient method without smoothness and strong convexity",
+        "RSG：无需光滑性和强凸性即可超越次梯度法",
+        "J. Mach. Learn. Res., 19 (2018), pp. 236--268, [[PDF2ZH_FLOW_52]].",
+    ),
 )
 
 
@@ -196,14 +256,22 @@ def test_later_math_publication_formats_keep_all_metadata(authors, title, target
         entry, [ExactReplacement(title, target)]
     )
     assert accepted
-    assert result == entry.replace(title, translator._normalize_translation_output(target))
+    assert result == entry.replace(
+        title, translator._normalize_translation_output(target)
+    )
 
 
 COLLECTION_CASES = (
-    ("A. J. Hoffman", "On approximate solutions of systems of linear inequalities",
-     "in Selected Papers Of Alan J Hoffman: With Commentary, World Scientific, Singapore, 2003, pp. 174--176."),
-    ("K. Ball, E. A. Carlen, and E. H. Lieb", "Sharp uniform convexity and smoothness inequalities for trace norms",
-     "Inequalities: Selecta of Elliott H. Lieb, (2002), pp. 171--190."),
+    (
+        "A. J. Hoffman",
+        "On approximate solutions of systems of linear inequalities",
+        "in Selected Papers Of Alan J Hoffman: With Commentary, World Scientific, Singapore, 2003, pp. 174--176.",
+    ),
+    (
+        "K. Ball, E. A. Carlen, and E. H. Lieb",
+        "Sharp uniform convexity and smoothness inequalities for trace norms",
+        "Inequalities: Selecta of Elliott H. Lieb, (2002), pp. 171--190.",
+    ),
 )
 
 
@@ -223,33 +291,41 @@ def test_anthology_requests_only_the_cited_work_title(authors, title, tail):
     )
     replacements = translator._run_reference_title_batch([entry])[0]
     assert requested == [title]
-    result, accepted = translator._apply_reference_title_replacements(entry, replacements)
+    result, accepted = translator._apply_reference_title_replacements(
+        entry, replacements
+    )
     assert accepted
     assert result == entry.replace(title, "完整的作品题名")
 
 
-@pytest.mark.parametrize("tail", [
-    "Technical report on new optimization methods, 1988.",
-    "Technical report, University of Example, 1988, remaining title prose.",
-    "Inform. Inference, (2020) with new methods.",
-    "A Complete Framework: Inform. Inference, (2020).",
-    "New title prose, Sci. China: Phys., Mech. Astron. 66, 240314 (2023).",
-    "Cambridge University Press methods and applications, 2012.",
-    "Cambridge University Press, Cambridge, 2012, new results.",
-    "Selected Papers of efficient methods, (2002), pp. 171--190.",
-    "Inequalities: Selecta of Elliott H. Lieb, (2002), pp. 171--190. New methods.",
-])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "Technical report on new optimization methods, 1988.",
+        "Technical report, University of Example, 1988, remaining title prose.",
+        "Inform. Inference, (2020) with new methods.",
+        "A Complete Framework: Inform. Inference, (2020).",
+        "New title prose, Sci. China: Phys., Mech. Astron. 66, 240314 (2023).",
+        "Cambridge University Press methods and applications, 2012.",
+        "Cambridge University Press, Cambridge, 2012, new results.",
+        "Selected Papers of efficient methods, (2002), pp. 171--190.",
+        "Inequalities: Selecta of Elliott H. Lieb, (2002), pp. 171--190. New methods.",
+    ],
+)
 def test_new_metadata_formats_require_complete_catalogue_fields(tail):
     assert not CodexTranslator._reference_complete_metadata_tail_is_safe(tail)
     assert not CodexTranslator._reference_metadata_tail_is_safe(tail)
 
 
 @pytest.mark.parametrize("authors,title,tail", COLLECTION_CASES)
-def test_anthology_container_cannot_be_translated_as_an_additional_title(authors, title, tail):
+def test_anthology_container_cannot_be_translated_as_an_additional_title(
+    authors, title, tail
+):
     entry = f"[3] {authors}, {title}, {tail} "
     container = tail.removeprefix("in ").split(",")[0]
     result, accepted = translator_stub()._apply_reference_title_replacements(
-        entry, [ExactReplacement(title, "作品题名"), ExactReplacement(container, "容器题名")]
+        entry,
+        [ExactReplacement(title, "作品题名"), ExactReplacement(container, "容器题名")],
     )
     assert not accepted
     assert result == entry
@@ -275,7 +351,9 @@ def test_proceedings_volume_publisher_and_location_are_outside_exact_title():
     )
     replacements = translator._run_reference_title_batch([entry])[0]
     assert requested == [title]
-    result, accepted = translator._apply_reference_title_replacements(entry, replacements)
+    result, accepted = translator._apply_reference_title_replacements(
+        entry, replacements
+    )
     assert accepted
     assert result == entry.replace(title, "用于高效低秩矩阵恢复的因子组稀疏正则化")
     assert result.endswith(tail)
@@ -284,26 +362,34 @@ def test_proceedings_volume_publisher_and_location_are_outside_exact_title():
     # location text survived, but the model translated the proceedings name.
     consumed_metadata = f"{title}, {tail.rsplit(', 2019.', 1)[0]}"
     result, accepted = translator._apply_reference_title_replacements(
-        entry, [ExactReplacement(
-            consumed_metadata,
-            "用于高效低秩矩阵恢复的因子组稀疏正则化，载于《神经信息处理系统进展》"
-            "第32卷，Curran Associates，Red Hook，NY",
-        )]
+        entry,
+        [
+            ExactReplacement(
+                consumed_metadata,
+                "用于高效低秩矩阵恢复的因子组稀疏正则化，载于《神经信息处理系统进展》"
+                "第32卷，Curran Associates，Red Hook，NY",
+            )
+        ],
     )
     assert not accepted
     assert result == entry
 
 
-@pytest.mark.parametrize("tail", [
-    "in a scalable framework, 2019.",
-    "in Advances in theoretical methods 32, Curran Associates, Red Hook, NY, 2019.",
-    "in Advances in Neural Information Processing Systems 32, new algorithms, 2019.",
-    "in Advances in Neural Information Processing Systems 32, Curran Associates, Red Hook, NY, 2019, new applications.",
-])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "in a scalable framework, 2019.",
+        "in Advances in theoretical methods 32, Curran Associates, Red Hook, NY, 2019.",
+        "in Advances in Neural Information Processing Systems 32, new algorithms, 2019.",
+        "in Advances in Neural Information Processing Systems 32, Curran Associates, Red Hook, NY, 2019, new applications.",
+    ],
+)
 def test_title_prose_does_not_become_proceedings_metadata(tail):
     assert not CodexTranslator._reference_complete_metadata_tail_is_safe(tail)
     entry = f"[1] A. Smith, Learning methods {tail}"
-    assert CodexTranslator._structured_reference_title_spans(entry) != ("Learning methods",)
+    assert CodexTranslator._structured_reference_title_spans(entry) != (
+        "Learning methods",
+    )
 
 
 def test_proceedings_catalogue_never_truncates_in_a_title_phrase():

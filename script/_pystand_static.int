@@ -1,12 +1,20 @@
 import sys
-import pdf2zh.pdf2zh
 import os
-import babeldoc.assets.assets
 import pathlib
 import traceback
 
 launcher_path = pathlib.Path(os.environ.get("PYSTAND", sys.executable))
+bundle_root = pathlib.Path(__file__).resolve().parent
 is_desktop_launcher = launcher_path.stem.casefold() == "pdfmathtranslate-codex"
+if is_desktop_launcher:
+    # Keep generated documents outside the installed program directory. Both
+    # upgrades and uninstallation leave this workspace and account data intact.
+    workspace = pathlib.Path.home() / ".config" / "PDFMathTranslate" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    os.chdir(workspace)
+
+import pdf2zh.pdf2zh
+import babeldoc.assets.assets
 wait_for_input = False
 if len(sys.argv) == 1:
     if is_desktop_launcher:
@@ -15,12 +23,16 @@ if len(sys.argv) == 1:
         sys.argv.append("-i")
         wait_for_input = True
 
-files = os.listdir(os.path.dirname(__file__))
+files = (
+    []
+    if any(arg in ("--help", "-h", "--version") for arg in sys.argv[1:])
+    else os.listdir(bundle_root)
+)
 for file in files:
     if file.endswith(".zip") and file.startswith("offline_assets_"):
         print("find offline_assets_zip file: ", file, " try restore...")
         babeldoc.assets.assets.restore_offline_assets_package(
-            pathlib.Path(os.path.dirname(__file__))
+            bundle_root
         )
 
 try:

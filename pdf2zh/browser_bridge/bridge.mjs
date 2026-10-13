@@ -21,11 +21,23 @@ async function readJson(filename, fallback = null) {
   try { return JSON.parse(await fs.readFile(filename, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
+async function atomicRename(source, destination) {
+  for (let attempt = 0; ; attempt++) {
+    try { await fs.rename(source, destination); return; }
+    catch (error) {
+      // Windows readers and virus scanners can briefly prevent replacement.
+      // Keep the previous journal intact; removing it would falsely imply
+      // that a submitted request never existed and risk another submission.
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 6) throw error;
+      await pause(20 * 2 ** attempt);
+    }
+  }
+}
 async function writeJson(filename, value) {
   await fs.mkdir(path.dirname(filename), { recursive: true });
   const temp = `${filename}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
-  await fs.rename(temp, filename);
+  await atomicRename(temp, filename);
 }
 function localPath(value, field) {
   if (!value || !path.isAbsolute(value)) throw coded('INVALID_REQUEST', `${field} must be an absolute local path.`);
@@ -664,7 +676,7 @@ export function createBridge(overrides = {}) {
     const temp = `${journal.output_file}.${process.pid}.tmp`;
     await fs.mkdir(path.dirname(journal.output_file), { recursive: true });
     await fs.writeFile(temp, answer, { mode: 0o600 });
-    await fs.rename(temp, journal.output_file);
+    await atomicRename(temp, journal.output_file);
     journal.status = 'complete';
     await writeJson(path.join(request.request_dir, 'journal.json'), journal);
     return completed(request, journal, task);
@@ -910,9 +922,14 @@ export function createBridge(overrides = {}) {
     const ongoing = active.get(request.state_dir);
     if (ongoing) {
       if (ongoing === request.request_dir && pending.has(ongoing)) {
+        // The original caller can complete and clear these maps while the
+        // journal is read. Keep the exact work and owner we joined, then
+        // validate against that owner before returning its result.
+        const work = pending.get(ongoing);
+        const taskId = activeTasks.get(ongoing);
         const requestedTask = requestTaskId(request, await readJournal(request.request_dir));
-        if (activeTasks.get(ongoing) !== requestedTask) throw coded('TASK_OWNERSHIP_MISMATCH', '该批次正在另一个 PDF 任务中执行，不能复用其结果。');
-        return pending.get(ongoing);
+        if (taskId !== requestedTask) throw coded('TASK_OWNERSHIP_MISMATCH', '该批次正在另一个 PDF 任务中执行，不能复用其结果。');
+        return work;
       }
       throw coded('BROWSER_BUSY', '上一批仍在浏览器中运行或收取回答，请先继续原文件。');
     }

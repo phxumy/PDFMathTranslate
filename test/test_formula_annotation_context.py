@@ -9,7 +9,12 @@ from test_codex_formula_context import converter_with, paragraph, translator_stu
 
 
 def context(**kwargs):
-    return {"position": "before-math", "left_math": "(", "right_math": r"\|δ\|_1)", **kwargs}
+    return {
+        "position": "before-math",
+        "left_math": "(",
+        "right_math": r"\|δ\|_1)",
+        **kwargs,
+    }
 
 
 def test_annotation_cache_isolated_from_ordinary_and_neighboring_math():
@@ -22,21 +27,43 @@ def test_annotation_cache_isolated_from_ordinary_and_neighboring_math():
         return ["利用上界"]
 
     translator._run_annotation_batch = backend
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == ["利用上界"]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
+        "利用上界"
+    ]
     assert len(calls) == 1
     assert translator.cache.get("bound on") == "关于……的界"
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == ["利用上界"]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
+        "利用上界"
+    ]
     assert len(calls) == 1
     translator.translate_formula_annotations(["bound on"], [context(right_math="x)")])
     assert len(calls) == 2
-    assert translator._annotation_cache_key("bound on", context()) != translator._annotation_cache_key("bound on", context(position="after-math"))
+    assert translator._annotation_cache_key(
+        "bound on", context()
+    ) != translator._annotation_cache_key("bound on", context(position="after-math"))
 
 
-@pytest.mark.parametrize("invalid", [
-    "关于……的界", "关于...的界", "界限{v0}", "界限δ", r"界限\delta",
-    "界限 1", "界限 (x)", "这是界限。", "界限\n说明", "bound on", "",
-    "ℓ的界", "∥·∥的界", "ℝ的界", "界限（见上式）", "𝑥的界",
-])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "关于……的界",
+        "关于...的界",
+        "界限{v0}",
+        "界限δ",
+        r"界限\delta",
+        "界限 1",
+        "界限 (x)",
+        "这是界限。",
+        "界限\n说明",
+        "bound on",
+        "",
+        "ℓ的界",
+        "∥·∥的界",
+        "ℝ的界",
+        "界限（见上式）",
+        "𝑥的界",
+    ],
+)
 def test_invalid_annotation_is_retried_and_only_valid_result_cached(invalid):
     translator = translator_stub()
     calls = []
@@ -46,15 +73,22 @@ def test_invalid_annotation_is_retried_and_only_valid_result_cached(invalid):
         return ["利用上界" if kwargs.get("strict") else invalid]
 
     translator._run_annotation_batch = backend
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == ["利用上界"]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
+        "利用上界"
+    ]
     assert calls == [False, True]
-    assert translator.cache.get(translator._annotation_cache_key("bound on", context())) == "利用上界"
+    assert (
+        translator.cache.get(translator._annotation_cache_key("bound on", context()))
+        == "利用上界"
+    )
 
 
 def test_repeated_annotation_failure_warns_preserves_and_does_not_cache(caplog):
     translator = translator_stub()
     translator._run_annotation_batch = lambda *args, **kwargs: ["关于……的界"]
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == ["bound on"]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
+        "bound on"
+    ]
     assert translator.cache.values == {}
     assert "preserving source without caching" in caplog.text
 
@@ -63,17 +97,37 @@ def test_repeated_annotation_failure_warns_preserves_and_does_not_cache(caplog):
 def test_one_terminal_colon_is_valid_only_before_adjacent_math_and_in_its_cache(target):
     translator = translator_stub()
     calls = []
-    translator._run_annotation_batch = lambda texts, contexts, **kwargs: calls.append(texts) or [target]
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == [target]
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == [target]
+    translator._run_annotation_batch = lambda texts, contexts, **kwargs: calls.append(
+        texts
+    ) or [target]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
+        target
+    ]
+    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
+        target
+    ]
     assert len(calls) == 1
-    assert translator.cache.get(translator._annotation_cache_key("bound on", context())) == target
+    assert (
+        translator.cache.get(translator._annotation_cache_key("bound on", context()))
+        == target
+    )
     for invalid_context in (
-        context(position="after-math"), context(position="between-math"),
-        context(position="label"), context(right_math=""),
+        context(position="after-math"),
+        context(position="between-math"),
+        context(position="label"),
+        context(right_math=""),
     ):
-        assert translator._accepted_annotation("bound on", target, invalid_context) is None
-    for bad in ("上界：：", "上界:：", "上界：说明", "上界：……", "上界：（x）", "上界δ："):
+        assert (
+            translator._accepted_annotation("bound on", target, invalid_context) is None
+        )
+    for bad in (
+        "上界：：",
+        "上界:：",
+        "上界：说明",
+        "上界：……",
+        "上界：（x）",
+        "上界δ：",
+    ):
         assert translator._accepted_annotation("bound on", bad, context()) is None
 
 
@@ -83,7 +137,9 @@ def test_terminal_colon_in_wrong_context_cache_is_revalidated():
     key = translator._annotation_cache_key("bound on", suffix)
     translator.cache.set(key, "上界：")
     calls = []
-    translator._run_annotation_batch = lambda texts, contexts, **kwargs: calls.append(contexts) or ["的界"]
+    translator._run_annotation_batch = lambda texts, contexts, **kwargs: calls.append(
+        contexts
+    ) or ["的界"]
     assert translator.translate_formula_annotations(["bound on"], [suffix]) == ["的界"]
     assert calls == [[suffix]]
     assert translator.cache.get(key) == "的界"
@@ -102,20 +158,31 @@ def test_annotation_prompt_has_readonly_neighbor_roles_and_compact_output():
 def test_converter_routes_only_fixed_annotations_to_new_method():
     calls = []
     translator = SimpleNamespace(name="codex", lang_out="zh-cn")
-    translator.translate_batch = lambda texts: calls.append(("ordinary", texts)) or texts
-    translator.translate_formula_annotations = lambda texts, contexts: calls.append(("annotation", texts, contexts)) or ["利用上界"]
+    translator.translate_batch = (
+        lambda texts: calls.append(("ordinary", texts)) or texts
+    )
+    translator.translate_formula_annotations = lambda texts, contexts: calls.append(
+        ("annotation", texts, contexts)
+    ) or ["利用上界"]
     converter = converter_with(translator)
     annotation = paragraph()
     annotation.region_kind = "formula_annotation"
     annotation.formula_annotation_context = context()
     ordinary = paragraph()
-    outputs = converter._translate_planned_segments(["bound on", "An ordinary bound on x."], [annotation, ordinary], [], 600)
+    outputs = converter._translate_planned_segments(
+        ["bound on", "An ordinary bound on x."], [annotation, ordinary], [], 600
+    )
     assert outputs == ["利用上界", "An ordinary bound on x."]
-    assert calls == [("annotation", ["bound on"], [context()]), ("ordinary", ["An ordinary bound on x."])]
+    assert calls == [
+        ("annotation", ["bound on"], [context()]),
+        ("ordinary", ["An ordinary bound on x."]),
+    ]
 
 
 def test_context_uses_only_nearest_same_row_protected_math_and_keeps_geometry():
-    label = Paragraph(100, 50, 50, 85, 100, 110, 10, False, region_kind="formula_annotation")
+    label = Paragraph(
+        100, 50, 50, 85, 100, 110, 10, False, region_kind="formula_annotation"
+    )
     opening = run("(", x=45, y=100, size=10)
     expression = run("δ", x=88, y=100, font="CMMI10", size=10)
     closing = run(")", x=94, y=100, size=10)
@@ -127,5 +194,7 @@ def test_context_uses_only_nearest_same_row_protected_math_and_keeps_geometry():
         ch._pdf2zh_layout_class = 0
     geometry = [(c.x0, c.y0, c.x1, c.y1) for c in chars]
     result = _collect_formula_annotation_contexts([label, paragraph()], [chars])
-    assert result == {0: {"position": "before-math", "left_math": "(", "right_math": "δ)"}}
+    assert result == {
+        0: {"position": "before-math", "left_math": "(", "right_math": "δ)"}
+    }
     assert [(c.x0, c.y0, c.x1, c.y1) for c in chars] == geometry

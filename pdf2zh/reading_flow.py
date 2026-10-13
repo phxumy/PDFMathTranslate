@@ -233,7 +233,9 @@ def _reference_tail(
         return None
     span = FragmentSpan(segment.ref, marker.start, region.end)
     candidate = segment.text[span.start : span.end]
-    if _has_unsafe_reference_token(candidate, allow_formulas=allow_formulas) or _has_reference_terminal(candidate):
+    if _has_unsafe_reference_token(
+        candidate, allow_formulas=allow_formulas
+    ) or _has_reference_terminal(candidate):
         return None
     return _ReferenceTail(
         segment=segment,
@@ -685,11 +687,13 @@ def detect_reference_continuation(
         return None
 
     tails = [
-        candidate for segment in previous
+        candidate
+        for segment in previous
         if (candidate := _reference_tail(segment, allow_formulas=allow_formulas))
     ]
     heads = [
-        candidate for segment in following
+        candidate
+        for segment in following
         if (candidate := _reference_head(segment, allow_formulas=allow_formulas))
     ]
     tails.sort(

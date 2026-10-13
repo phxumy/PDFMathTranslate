@@ -12,25 +12,41 @@ from pdf2zh.converter import (
 
 def char(value, x, y=100, font="CMR10", size=10):
     return SimpleNamespace(
-        get_text=lambda: value, x0=x, x1=x + 5, y0=y - 2, y1=y + 8,
-        size=size, fontname=font, matrix=(1, 0, 0, 1, x, y),
+        get_text=lambda: value,
+        x0=x,
+        x1=x + 5,
+        y0=y - 2,
+        y1=y + 8,
+        size=size,
+        fontname=font,
+        matrix=(1, 0, 0, 1, x, y),
         _pdf2zh_layout_class=2,
     )
 
 
 def paragraph():
     return SimpleNamespace(
-        layout_class=2, region_kind="plain text", size=10,
-        x0=0, x1=500, y0=95, y1=110,
+        layout_class=2,
+        region_kind="plain text",
+        size=10,
+        x0=0,
+        x1=500,
+        y0=95,
+        y1=110,
     )
 
 
-@pytest.mark.parametrize("prefix,accent,tail,expected", [
-    ("H", '\\"', "older", "Hölder"),
-    ("Cand", "\\`", "es", "Candès"),
-    ("G", "\\\"", "odel", "Gödel"),
-])
-def test_accented_word_becomes_one_complete_source_token(prefix, accent, tail, expected):
+@pytest.mark.parametrize(
+    "prefix,accent,tail,expected",
+    [
+        ("H", '\\"', "older", "Hölder"),
+        ("Cand", "\\`", "es", "Candès"),
+        ("G", '\\"', "odel", "Gödel"),
+    ],
+)
+def test_accented_word_becomes_one_complete_source_token(
+    prefix, accent, tail, expected
+):
     prose = [char(v, i * 5) for i, v in enumerate(prefix)]
     x = len(prefix) * 5
     formula = [char(accent, x)] + [char(v, x + i * 5) for i, v in enumerate(tail)]
@@ -53,7 +69,10 @@ def test_overprinted_dotless_i_is_decoded_from_the_actual_source_glyph(valid):
     assert segments == (["M. Díaz, Numerical analysis."] if valid else [source])
 
 
-@pytest.mark.parametrize("change", [None, "short_variable", "math_font", "noncontiguous", "far_accent", "code"])
+@pytest.mark.parametrize(
+    "change",
+    [None, "short_variable", "math_font", "noncontiguous", "far_accent", "code"],
+)
 def test_lowercase_dotless_i_word_uses_long_text_word_and_source_geometry(change):
     # SHARPNESS p23 contains na + a diaeresis glyph + {\i}vely.
     prefix, suffix = "na", "vely"
@@ -61,9 +80,13 @@ def test_lowercase_dotless_i_word_uses_long_text_word_and_source_geometry(change
         prefix, suffix = "x", "yz"
     prose = [char(v, i * 5) for i, v in enumerate(prefix)]
     x = len(prefix) * 5
-    prose += [char(r"{\i}", x)] + [char(v, x + (i + 1) * 5) for i, v in enumerate(suffix)]
+    prose += [char(r"{\i}", x)] + [
+        char(v, x + (i + 1) * 5) for i, v in enumerate(suffix)
+    ]
     formula = [char('\\"', x - 0.7)]
-    source = "We apply the argument " + prefix + r"{v0}{\i}" + suffix + " to the objective."
+    source = (
+        "We apply the argument " + prefix + r"{v0}{\i}" + suffix + " to the objective."
+    )
     if change == "math_font":
         prose[len(prefix)].fontname = "CMMI10"
     elif change == "noncontiguous":
@@ -74,21 +97,42 @@ def test_lowercase_dotless_i_word_uses_long_text_word_and_source_geometry(change
         formula[0].fontname = "CMTT10"
     segments = [source]
     _release_tex_accented_prose_words(segments, [formula], [0], [paragraph()], [prose])
-    assert segments == (["We apply the argument naïvely to the objective."] if change is None else [source])
+    assert segments == (
+        ["We apply the argument naïvely to the objective."]
+        if change is None
+        else [source]
+    )
 
 
-@pytest.mark.parametrize("change", [
-    "math_font", "code_font", "protected", "small", "rotated", "not_overprinted",
-    "prefix_gap", "tail_gap", "no_prefix", "variable", "figure", "different_font",
-    "lowercase_variables",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "math_font",
+        "code_font",
+        "protected",
+        "small",
+        "rotated",
+        "not_overprinted",
+        "prefix_gap",
+        "tail_gap",
+        "no_prefix",
+        "variable",
+        "figure",
+        "different_font",
+        "lowercase_variables",
+    ],
+)
 def test_accent_recovery_keeps_mathematical_or_unproven_runs(change):
     prose = [char("H", 0)]
     formula = [char('\\"', 5)] + [char(v, 5 + i * 5) for i, v in enumerate("older")]
     p = paragraph()
     source = "The H{v0} dual is defined."
     if change in {"math_font", "code_font", "different_font"}:
-        formula[1].fontname = {"math_font": "CMMI10", "code_font": "CMTT10", "different_font": "CMR9"}[change]
+        formula[1].fontname = {
+            "math_font": "CMMI10",
+            "code_font": "CMTT10",
+            "different_font": "CMR9",
+        }[change]
     elif change == "protected":
         formula[0]._pdf2zh_layout_class = 0
     elif change == "small":
@@ -134,15 +178,28 @@ def test_vector_uri_underscores_require_source_link_and_are_removed_after_recove
     unrelated = SimpleNamespace(pts=[(0, 98), (400, 98)])
     lines.append(unrelated)
     segments = ["See " + uri.replace("_", " ") + " for implementation."]
-    _restore_drawn_uri_underscores(segments, [paragraph()], [chars], lines, [(uri, bounds)])
+    _restore_drawn_uri_underscores(
+        segments, [paragraph()], [chars], lines, [(uri, bounds)]
+    )
     assert segments == ["See " + uri + " for implementation."]
     assert lines == [unrelated]
 
 
-@pytest.mark.parametrize("change", [
-    "missing_line", "wrong_destination", "wrong_link_rect", "figure", "wrapped",
-    "ambiguous_line", "duplicate_text", "nonhorizontal", "different_glyph", "longer_uri",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_line",
+        "wrong_destination",
+        "wrong_link_rect",
+        "figure",
+        "wrapped",
+        "ambiguous_line",
+        "duplicate_text",
+        "nonhorizontal",
+        "different_glyph",
+        "longer_uri",
+    ],
+)
 def test_uri_recovery_does_not_guess_source_or_destination(change):
     uri, chars, lines, bounds = uri_case()
     p = paragraph()
@@ -176,7 +233,18 @@ def test_uri_recovery_does_not_guess_source_or_destination(change):
     assert lines == before
 
 
-@pytest.mark.parametrize("change", [None, "math_letter", "code_letter", "far_gap", "other_line", "protected", "no_and"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        None,
+        "math_letter",
+        "code_letter",
+        "far_gap",
+        "other_line",
+        "protected",
+        "no_and",
+    ],
+)
 def test_chow_math_font_slash_in_and_or_requires_touching_text_letters(change):
     # Measured glyph positions, fonts and size from Chow p4; its slash comes
     # from RMTMI while the two ordinary letters come from Times-Roman.
@@ -205,15 +273,23 @@ def test_chow_math_font_slash_in_and_or_requires_touching_text_letters(change):
     segments = [source]
     formulas = [chars]
     _release_prose_slash_connectives(segments, formulas, [0], [p])
-    assert segments == ([source.replace("and{v0}", "and/or")] if change is None else [source])
+    assert segments == (
+        [source.replace("and{v0}", "and/or")] if change is None else [source]
+    )
     assert formulas[0] == chars
 
 
-@pytest.mark.parametrize("left,right", [
-    ("The map follows subsection 4.1", " The number of observations is fixed."),
-    ("The threshold estimate is described in [17]", " See the implementation details."),
-    ("The rate is predicted by Theorem 6.6 and Proposition 6.9", ""),
-])
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("The map follows subsection 4.1", " The number of observations is fixed."),
+        (
+            "The threshold estimate is described in [17]",
+            " See the implementation details.",
+        ),
+        ("The rate is predicted by Theorem 6.6 and Proposition 6.9", ""),
+    ],
+)
 def test_math_caption_text_font_period_is_released_before_translation(left, right):
     period = char(".", 100, font="CMTI8", size=8)
     previous = char(left[-1], 95, font="CMR8", size=8)
@@ -231,10 +307,23 @@ def test_math_caption_text_font_period_is_released_before_translation(left, righ
     assert formulas == [[period]]
 
 
-@pytest.mark.parametrize("change", [
-    "decimal", "math_font", "math_neighbor", "code_font", "protected", "small",
-    "rotated", "different_line", "gap", "abbreviation", "math_fragment", "figure",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "decimal",
+        "math_font",
+        "math_neighbor",
+        "code_font",
+        "protected",
+        "small",
+        "rotated",
+        "different_line",
+        "gap",
+        "abbreviation",
+        "math_fragment",
+        "figure",
+    ],
+)
 def test_unproven_periods_and_decimal_points_stay_in_original_glyph_islands(change):
     period = char(".", 100, font="CMTI8", size=8)
     previous = char("1", 95, font="CMR8", size=8)

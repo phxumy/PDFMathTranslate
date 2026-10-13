@@ -5,11 +5,14 @@ from pdf2zh.translation_quality import has_detached_norm_relation
 from test_codex_formula_context import translator_stub
 
 
-@pytest.mark.parametrize("abbreviation", ["w.r.t.", "w. r. t.", "i.e.", "e.g.", "viz.", "cf."])
+@pytest.mark.parametrize(
+    "abbreviation", ["w.r.t.", "w. r. t.", "i.e.", "e.g.", "viz.", "cf."]
+)
 def test_dependent_abbreviation_does_not_split_its_clause(abbreviation):
     sentence = f"The property holds {abbreviation} the {{v0}} norm; "
     assert scientific_sentence_parts(sentence + "the result follows.") == [
-        sentence, "the result follows."
+        sentence,
+        "the result follows.",
     ]
 
 
@@ -21,7 +24,8 @@ def test_abbreviation_does_not_hide_actual_sentence_ends_or_change_source():
         "Next.",
     ]
     assert scientific_sentence_parts("Values etc. Next sentence.") == [
-        "Values etc. ", "Next sentence."
+        "Values etc. ",
+        "Next sentence.",
     ]
 
 
@@ -38,7 +42,9 @@ def test_size_boundary_does_not_split_inside_spaced_abbreviation():
 @pytest.mark.parametrize("relation", ["w.r.t.", "w. r. t.", "with respect to"])
 def test_detached_norm_fragment_is_rejected_without_prescribing_word_order(relation):
     source = f"The function {{v0}} is sharp around {{v1}} {relation} the {{v2}} norm; it converges."
-    assert has_detached_norm_relation(source, "函数{v0}在{v1}附近是尖锐的。{v2}范数；它收敛。")
+    assert has_detached_norm_relation(
+        source, "函数{v0}在{v1}附近是尖锐的。{v2}范数；它收敛。"
+    )
     for valid in (
         "函数{v0}在{v1}附近相对于{v2}范数具有尖锐性；它收敛。",
         "函数{v0}在{v1}附近是尖锐的，所用范数是{v2}范数；它收敛。",
@@ -70,7 +76,9 @@ def test_cached_broken_relation_is_retranslated_as_one_contextual_request():
 
     translator._run_formula_context_batch_request = translate
     assert translator._accepted_translation(source, bad) is None
-    assert translator.translate_batch_with_formula_contexts([source], [formulas]) == [good]
+    assert translator.translate_batch_with_formula_contexts([source], [formulas]) == [
+        good
+    ]
     assert len(calls) == 1
     assert calls[0][0] == [source]
     assert calls[0][1] == [context]

@@ -61,20 +61,28 @@ def test_initialization_never_probes_codex(translator, monkeypatch):
     assert other.cache.params["reasoning_effort"] == "actual-effort"
 
 
-def test_ui_language_change_preserves_pending_request_and_target_language(translator, monkeypatch):
+def test_ui_language_change_preserves_pending_request_and_target_language(
+    translator, monkeypatch
+):
     selection = {"ok": True, "model": "actual-web-model", "effort": "即時"}
     monkeypatch.setattr(cg, "refresh_chatgpt_options", lambda *a, **kw: selection)
-    old = cg.ChatGPTTranslator("en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即時"})
-    bridge = Mock(side_effect=[
-        {"ok": False, "not_submitted": False, "message": "interrupted"},
-        {"ok": True, "answer": '{"translations":["traduction"]}'},
-    ])
+    old = cg.ChatGPTTranslator(
+        "en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即時"}
+    )
+    bridge = Mock(
+        side_effect=[
+            {"ok": False, "not_submitted": False, "message": "interrupted"},
+            {"ok": True, "answer": '{"translations":["traduction"]}'},
+        ]
+    )
     monkeypatch.setattr(cg, "_invoke_bridge", bridge)
     with pytest.raises(TranslationAbortedError):
         execute(old)
     original = bridge.call_args.args[0]
     selection["effort"] = "即时"
-    new = cg.ChatGPTTranslator("en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即时"})
+    new = cg.ChatGPTTranslator(
+        "en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即时"}
+    )
     assert new.lang_out == "fr"
     assert new.task_id == old.task_id
     assert execute(new) == ["traduction"]
@@ -83,7 +91,9 @@ def test_ui_language_change_preserves_pending_request_and_target_language(transl
     assert resumed["request_dir"] == original["request_dir"]
     selection["effort"] = "高"
     with pytest.raises(TranslationAbortedError):
-        cg.ChatGPTTranslator("en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即时"})
+        cg.ChatGPTTranslator(
+            "en", "fr", task_id="locale-stable", envs={"CHATGPT_EFFORT": "即时"}
+        )
 
 
 def test_completed_answer_reused_without_resubmission(translator, monkeypatch):

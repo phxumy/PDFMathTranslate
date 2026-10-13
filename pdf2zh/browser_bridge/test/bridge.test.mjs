@@ -129,8 +129,53 @@ test('cancelled caller does not duplicate pending work and a different batch is 
   const same = bridge.run({ ...req, op: 'recover' });
   const other = await bridge.run(await request(directory, 'translate', '-other'));
   assert.equal(other.error_code, 'BROWSER_BUSY'); assert.equal(other.not_submitted, true);
-  release(); assert.equal((await first).answer, 'done'); assert.equal((await same).answer, 'done');
+  release();
+  const firstResult = await first; const sameResult = await same;
+  assert.equal(firstResult.answer, 'done', JSON.stringify(firstResult));
+  assert.equal(sameResult.answer, 'done', JSON.stringify(sameResult));
   assert.equal(f.calls.submit, 1);
+}));
+test('joining a pending batch retains its result if completion races the ownership journal read', async t => temporary(async directory => {
+  const f = fixture(); let release; let entered;
+  const capturing = new Promise(resolve => { entered = resolve; });
+  f.deps.waitAnswer = async () => { entered(); return new Promise(resolve => { release = () => resolve({ text: 'done' }); }); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); const first = bridge.run(req); await capturing;
+  const readFile = fs.readFile.bind(fs); let raced = false;
+  t.mock.method(fs, 'readFile', async (filename, ...args) => {
+    const data = await readFile(filename, ...args);
+    if (!raced && filename === path.join(req.request_dir, 'journal.json')) {
+      raced = true;
+      // Deterministically finish the first call while the joining caller is
+      // awaiting its ownership check. No wall-clock sleep or account is used.
+      release();
+      assert.equal((await first).answer, 'done');
+    }
+    return data;
+  });
+  const same = await bridge.run({ ...req, op: 'recover' });
+  assert.equal(raced, true);
+  assert.equal(same.answer, 'done');
+  assert.equal(f.calls.submit, 1);
+}));
+test('Windows temporary journal sharing locks retry atomic replacement without another submission', { skip: process.platform !== 'win32' }, async t => temporary(async directory => {
+  const f = fixture(); const bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  const req = await request(directory); const rename = fs.rename.bind(fs); let blocked = 0;
+  t.mock.method(fs, 'rename', async (source, destination) => {
+    if (destination === path.join(req.request_dir, 'journal.json') && blocked < 2 &&
+        JSON.parse(await fs.readFile(source, 'utf8')).status === 'complete') {
+      blocked++;
+      assert.equal(JSON.parse(await fs.readFile(destination, 'utf8')).dispatch_started, true, 'prior submission proof survives a locked replacement');
+      throw Object.assign(new Error('fixture sharing lock'), { code: 'EPERM' });
+    }
+    return rename(source, destination);
+  });
+  const result = await bridge.run(req);
+  assert.equal(blocked, 2);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(f.calls.submit, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8')).status, 'complete');
 }));
 test('failed capture resumes only the same verified user turn without resubmission', async () => temporary(async directory => {
   const f = fixture(); let attempts = 0;

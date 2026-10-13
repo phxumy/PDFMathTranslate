@@ -28,7 +28,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1
 无论使用内置还是系统安装的 Codex CLI，登录都属于当前 Windows 用户。不要把
 `~/.codex/auth.json` 复制给别人或上传到任何网站。
 
-发布包第一次使用无需打开 PowerShell；直接按下一节双击登录脚本即可。系统安装的
+发布包第一次使用无需打开 PowerShell；在软件内点击“登录 Codex”即可。系统安装的
 OpenAI 官方 CLI 也可以直接运行：
 
 ```powershell
@@ -38,24 +38,32 @@ codex
 ### 2. 下载和启动
 
 1. 打开[本项目最新 Release](https://github.com/phxumy/PDFMathTranslate/releases/latest)。
-2. 下载推荐文件 `PDFMathTranslate-Codex-win64-with-assets.zip`。该版本已经包含版面模型资源，首次启动不必再下载模型。
-3. 完整解压 ZIP 到普通文件夹；不要直接在压缩包预览窗口中双击程序。
-4. 如果使用 Codex，先双击 `Login-Codex.cmd`，在浏览器中完成官方登录。使用其他翻译服务可跳过。
-5. 双击 `PDFMathTranslate-Codex.exe`。
-6. 在 `Service` 中选择 `Codex`，上传 PDF，设置语言和页码后点击 `Translate`。
+2. 下载并运行 `PDFMathTranslate-Codex-Setup-win64.exe`。安装包包含离线版面资源，无需手动解压。
+3. 从开始菜单或桌面快捷方式启动 **PDFMathTranslate Codex Studio**。
+4. 选择 `Codex` 即可查看登录状态；点击“登录 Codex”，在官方浏览器页面完成验证，状态会自动刷新。浏览器回调不可用时可改用设备验证码登录。
+5. 上传 PDF，设置语言和页码后点击 `Translate`。模型、推理强度和 CLI 路径位于“模型与服务设置”。
+6. 以后在“关于与更新”点击“检查更新”和“下载并安装更新”。程序先下载并校验，成功后退出并安装，保留账号、配置和缓存。
 
 无需安装 Python。包内的 `pdf2zh.exe` 仍可用于原浏览器 WebUI 和命令行模式。
 
 也可以直接使用这个固定下载地址：
 
-<https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-win64-with-assets.zip>
+[下载 Windows EXE 安装程序](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-Setup-win64.exe)。旧 ZIP 用户首次升级到 .5 需下载安装程序；从 .5 开始支持应用内更新。
+
+### 翻译速度、实时预览和估时
+
+- **并行批次数**默认 4，可设 1–8；“双倍并行”将其乘以 2，最多 16。只有足够的待处理批次才能利用并发，遇到限流应降低。翻译质量校验与跨页衔接仍保留。
+- **Codex Fast 模式**单独启用，使用官方加速服务，可能增加额度消耗，需账号与模型支持；它不等于固定两倍速。见[官方速度说明](https://learn.chatgpt.com/docs/agent-configuration/speed)。
+- **标准翻译实时预览**按原文页码显示真正完成翻译和排版的页面；跨页段落可能需要读入下一页后才显示上一页。完成后自动切换完整 PDF。BabelDOC 实验流程目前在任务结束后显示 PDF。
+- **时间估算**跳过首个冷启动样本，收集至少三个后续完成页的实际间隔，再按最近最多八页估算范围。缓存、并行、重试会体现在实际耗时里；样本不足或等待异常变长时显示“估算中”。字体处理、PDF 合并和保存单独显示阶段。
+- 取消后已完成页仍可查看；用相同设置重试可利用已有翻译缓存。
 
 ### 3. 校验下载文件
 
-Release 同时发布 `SHA256SUMS.txt`。下载后可在 ZIP 所在目录运行：
+Release 同时发布 `SHA256SUMS.txt`。下载后可在安装程序所在目录运行：
 
 ```powershell
-Get-FileHash ".\PDFMathTranslate-Codex-win64-with-assets.zip" -Algorithm SHA256
+Get-FileHash ".\PDFMathTranslate-Codex-Setup-win64.exe" -Algorithm SHA256
 ```
 
 输出应与 `SHA256SUMS.txt` 一致。由于社区版目前没有付费代码签名，Windows
@@ -64,12 +72,12 @@ Microsoft Defender。
 
 ### 4. 常见启动问题
 
-- `codex executable not found`：确认完整解压，并检查应用旁边是否存在 `codex-cli\x86_64-pc-windows-msvc\bin\codex.exe`；若目录缺失，请重新下载完整 ZIP。
-- Codex 未登录：双击 `Login-Codex.cmd`；也可运行包内 `codex.exe login status` 检查状态。
+- `codex executable not found`：检查安装目录中是否存在 `codex-cli\x86_64-pc-windows-msvc\bin\codex.exe`；若目录缺失，请重新运行安装程序修复。
+- Codex 未登录：在软件内点击“登录 Codex”；“刷新登录状态”会读取官方 CLI 的登录结果。
 - 窗口无法建立：安装 WebView2 Runtime 后重试。
 - 提示缺少 VC++ 组件：安装微软官方 [Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)。
 - 7860 端口已占用：桌面版会自动寻找后续空闲端口；只有显式指定固定端口时才会严格使用该端口。
-- 翻译频繁限流或超时：先把 `number of threads` 设为 `1` 或 `2`。
+- 翻译频繁限流或超时：先关闭“双倍并行”，把“并行批次数”设为 `1` 或 `2`。
 
 ## 界面特点
 
