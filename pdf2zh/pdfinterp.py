@@ -139,6 +139,17 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                 return color == 0
 
         self._pending_uri_underline_marker = ""
+        preserve = getattr(self.device, "preserve_source_stroke", None)
+        if (
+            callable(preserve) and len(self.curpath) == 2
+            and self.curpath[0][0] == "m" and self.curpath[1][0] == "l"
+            and preserve(
+                apply_matrix_pt(self.ctm, self.curpath[0][-2:]),
+                apply_matrix_pt(self.ctm, self.curpath[1][-2:]),
+            )
+        ):
+            self.curpath = []
+            return
         marker = getattr(self.device, "mark_uri_underline", None)
         if callable(marker) and len(self.curpath) == 2 and self.curpath[0][0] == "m" and self.curpath[1][0] == "l":
             self._pending_uri_underline_marker = marker(

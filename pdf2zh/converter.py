@@ -83,6 +83,7 @@ from pdf2zh.translation_policy import (
     looks_like_reference_title_prefix,
     reference_entry_score,
     restore_affiliation_breaks,
+    split_numbered_reference_region,
 )
 from pdf2zh.reading_flow import (
     ContinuationGroup,
@@ -755,6 +756,94 @@ def _release_tex_accented_prose_words(
         segments[paragraph_id] = left + decoded + tail[1:] + right
         known = {id(char) for char in paragraph_text_chars[paragraph_id]}
         paragraph_text_chars[paragraph_id].extend(char for char in chars if id(char) not in known)
+
+
+def _release_reference_prose_fragments(segments, formulas, formula_paragraphs, paragraphs, text_chars):
+    """Expose ordinary italic title words accidentally treated as math macros.
+
+    Require a certified numbered bibliography, unchanged text-font geometry,
+    and a complete prose compound. Operators such as rank(A), code fonts and
+    actual mathematical symbols remain opaque.
+    """
+    regions = {i: split_numbered_reference_region(source) for i, source in enumerate(segments)}
+    for index, chars in enumerate(formulas):
+        if not chars:
+            continue
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        region = regions[paragraph_id]
+        source = segments[paragraph_id]
+        marker = f"{{v{index}}}"
+        if (region is None or paragraph.layout_class <= 1
+                or paragraph.region_kind != "plain text" or source.count(marker) != 1):
+            continue
+        position = source.index(marker)
+        if not region.start <= position < region.end:
+            continue
+        em = float(paragraph.size)
+        if any(
+            getattr(char, "_pdf2zh_layout_class", None) == 0
+            or not _is_prose_italic_font(char.fontname)
+            or char.fontname != chars[0].fontname
+            or not 0.9 * em <= char.size <= 1.1 * em
+            or _is_non_horizontal_text_matrix(char.matrix)
+            or abs(_char_baseline(char) - _char_baseline(chars[0])) > 0.15 * em
+            for char in chars
+        ):
+            continue
+        word = "".join(char.get_text() for char in chars)
+        left, right = source.split(marker)
+        replacement = None
+        consumed = 0
+        if word == "rank" and (
+            re.search(r"\b(?:low|minimum)-$", left, re.I)
+            or re.match(r"(?:-|\s+)one\b", right)
+        ):
+            replacement = word
+        elif word == "up" and re.search(r"\bspeeding\s+$", left, re.I) and re.match(r"\s+first[- ]", right):
+            replacement = word
+        elif word == "mod-" and re.search(r"\bsemi-algebraic\s+$", left, re.I) and re.match(r"els\b", right):
+            replacement, consumed = "models", 3
+        else:
+            accent = re.fullmatch(r'([A-Z])\\([\"\'`])([a-z])', word)
+            suffix = re.match(r"([a-z]{3,})(?![A-Za-z])", right)
+            if accent and suffix and len(chars) == 3:
+                combining = {'"': '\u0308', "'": '\u0301', '`': '\u0300'}[accent[2]]
+                if abs(chars[1].x0 - chars[2].x0) <= 0.25 * em:
+                    replacement = accent[1] + unicodedata.normalize("NFC", accent[3] + combining) + suffix[1]
+                    consumed = len(suffix[1])
+        if replacement is None:
+            continue
+        # All ordinary letters in the island must touch, allowing italic
+        # overhang and the accent overprint checked separately above.
+        baseline_chars = [char for char in chars if not char.get_text().startswith("\\")]
+        if any(not -0.25 * em <= b.x0 - a.x1 <= 0.20 * em for a, b in zip(baseline_chars, baseline_chars[1:])):
+            continue
+        if consumed:
+            previous = chars[-1]
+            suffix_chars = []
+            for offset, value in enumerate(right[:consumed]):
+                following = [char for char in text_chars[paragraph_id] if (
+                    char.get_text() == value and char.fontname == previous.fontname
+                    and 0.9 * em <= char.size <= 1.1 * em
+                    and not _is_non_horizontal_text_matrix(char.matrix)
+                    and (
+                        (abs(_char_baseline(char) - _char_baseline(previous)) <= 0.15 * em
+                         and -0.2 * em <= char.x0 - previous.x1 <= 0.2 * em)
+                        or (word == "mod-" and offset == 0
+                            and 0.8 * em <= _char_baseline(previous) - _char_baseline(char) <= 1.8 * em
+                            and paragraph.x0 <= char.x0 < paragraph.x0 + 5 * em)
+                    )
+                )]
+                if len(following) != 1:
+                    break
+                previous = following[0]
+                suffix_chars.append(previous)
+            if len(suffix_chars) != consumed:
+                continue
+        segments[paragraph_id] = left + replacement + right[consumed:]
+        known = {id(char) for char in text_chars[paragraph_id]}
+        text_chars[paragraph_id].extend(char for char in chars if id(char) not in known)
 
 
 def _restore_drawn_uri_underscores(segments, paragraphs, text_chars, lines, links):
@@ -2802,6 +2891,89 @@ def _wrapped_table_label_pairs(lines: list[list[LTChar]]) -> dict[int, int]:
     return pairs
 
 
+def _source_list_markers(chars: list[LTChar], excluded: set[int]) -> set[int]:
+    """Recognize physical list prefixes, including TeX-mapped glyphs.
+
+    A marker is separate from the reflowed text, so each item keeps its source
+    baseline and hanging indent.  An inline product/minus/asterisk has preceding
+    text on the same line and must remain part of its formula instead.
+    """
+    horizontal = [
+        ch for ch in chars
+        if object_id(ch) not in excluded
+        and not _is_non_horizontal_text_matrix(ch.matrix)
+        and ch.get_text().strip()
+    ]
+    prefixes = {"•", "\\bullet", "--", "–", "—", "*", "\\ast"}
+    markers: set[int] = set()
+    for char in horizontal:
+        if char.get_text().strip() not in prefixes:
+            continue
+        em = float(char.size)
+        baseline = _char_baseline(char)
+        row = [
+            ch for ch in horizontal
+            if ch is not char
+            and abs(_char_baseline(ch) - baseline) <= 0.25 * em
+        ]
+        # Other columns can occupy the same baseline; inspect the local gap.
+        if any(0 <= char.x0 - ch.x1 < 3 * em for ch in row):
+            continue
+        following = sorted((ch for ch in row if ch.x0 >= char.x1), key=lambda ch: ch.x0)
+        if not following or not 0 <= following[0].x0 - char.x1 <= 1.2 * em:
+            continue
+        # Word evidence prevents a standalone mathematical bullet/minus from
+        # being mistaken for a list.  The item may begin with an inline formula.
+        if not any(
+            getattr(ch, "_pdf2zh_prose_word", False)
+            for ch in following if ch.x0 - char.x1 < 14 * em
+        ):
+            continue
+        markers.add(object_id(char))
+    return markers
+
+
+def _algorithm_display_math_chars(
+    chars: list[LTChar], recovered: dict[int, int], region_types: dict[int, str]
+) -> set[int]:
+    """Keep a displayed equation below an algorithm instruction at its anchor.
+
+    Formula detection sometimes wraps an instruction and the following display
+    in one box.  Recovering its prose must not pull that display into the line.
+    Require a separated relation baseline, not merely a low subscript or a
+    fraction denominator, before identifying a display band.
+    """
+    grouped: dict[int, list[LTChar]] = {}
+    for char in chars:
+        cls = recovered.get(object_id(char))
+        if region_types.get(cls) == "algorithm":
+            grouped.setdefault(cls, []).append(char)
+    preserved: set[int] = set()
+    for group in grouped.values():
+        prose = [ch for ch in group if getattr(ch, "_pdf2zh_prose_word", False)]
+        if not prose:
+            continue
+        em = float(np.median([ch.size for ch in prose]))
+        baselines = sorted({_char_baseline(ch) for ch in prose})
+        for char in group:
+            if char.get_text().strip() not in {"=", ":=", "←", "\\leftarrow"}:
+                continue
+            baseline = _char_baseline(char)
+            if min(abs(baseline - y) for y in baselines) <= 0.85 * em:
+                continue
+            above = [y for y in baselines if y > baseline]
+            if not above:
+                continue
+            below = [y for y in baselines if y < baseline]
+            top = (min(above) + baseline) / 2
+            bottom = (max(below) + baseline) / 2 if below else -float("inf")
+            preserved.update(
+                object_id(ch) for ch in group
+                if bottom < _char_baseline(ch) < top
+            )
+    return preserved
+
+
 def _recover_preserved_region_prose(
     chars: list[LTChar],
     layout,
@@ -3098,6 +3270,62 @@ def _recover_preserved_region_prose(
                     previous_footnote = (cell, class_id)
                     footnote_history.append(previous_footnote)
     return recovered
+
+
+def _bridge_recovered_footnote_math(chars, recovered, region_types, excluded):
+    """Keep a footnote's operator, small domain and objective in one run.
+
+    An abandon box may stop before the domain subscript and resume at the
+    objective, breaking continuous footnote prose into independent classes.
+    Join only a touching min/max-domain-objective with membership evidence.
+    """
+    operators = set()
+    horizontal = [char for char in chars if object_id(char) not in excluded
+                  and not _is_non_horizontal_text_matrix(char.matrix)]
+    for first in horizontal:
+        cls = recovered.get(object_id(first))
+        if first.get_text() != "m" or region_types.get(cls) != "footnote":
+            continue
+        em = float(first.size)
+        run = [first]
+        for choices in ("ia", "nx"):
+            found = [char for char in horizontal if char.get_text() in choices
+                     and char.fontname == first.fontname
+                     and abs(char.size - em) <= 0.05 * em
+                     and abs(_char_baseline(char) - _char_baseline(first)) <= 0.1 * em
+                     and -0.1 * em <= char.x0 - run[-1].x1 <= 0.1 * em]
+            if len(found) != 1:
+                break
+            run.append(found[0])
+        if "".join(char.get_text() for char in run) not in {"min", "max"}:
+            continue
+        domain = sorted([char for char in horizontal if (
+            run[-1].x1 - 0.1 * em <= char.x0 <= run[-1].x1 + 2.2 * em
+            and 0.5 * em <= char.size <= 0.85 * em
+            and abs(_char_baseline(char) - _char_baseline(first)) <= 0.8 * em
+            and _MATH_FONT_RE.search(_font_name(char.fontname))
+        )], key=lambda char: char.x0)
+        if not domain or not any(char.get_text().strip() in {"\\in", "∈"} for char in domain):
+            continue
+        if domain[0].x0 - run[-1].x1 > 0.2 * em:
+            continue
+        objective = [char for char in horizontal if (
+            -0.1 * em <= char.x0 - domain[-1].x1 <= 0.7 * em
+            and 0.9 * em <= char.size <= 1.1 * em
+            and abs(_char_baseline(char) - _char_baseline(first)) <= 0.15 * em
+            and _MATH_FONT_RE.search(_font_name(char.fontname))
+            and region_types.get(recovered.get(object_id(char))) == "footnote"
+        )]
+        if len(objective) != 1:
+            continue
+        other_class = recovered[object_id(objective[0])]
+        for key in list(recovered):
+            if recovered[key] == other_class:
+                recovered[key] = cls
+        for char in domain:
+            recovered[object_id(char)] = cls
+        operators.update(object_id(char) for char in run)
+    return operators
 
 
 def _is_hidden_glyph_repertoire_probe(
@@ -4304,6 +4532,33 @@ class PDFConverterEx(PDFConverter):
         rsrcmgr: PDFResourceManager,
     ) -> None:
         PDFConverter.__init__(self, rsrcmgr, None, "utf-8", 1, None)
+
+    def preserve_source_stroke(self, start, end) -> bool:
+        """Keep graph strokes and complete outlines in their original stream."""
+        page_id = int(self.cur_item.pageid)
+        (x0, y0), (x1, y1) = sorted((start, end))
+        for stroke in getattr(self, "source_closed_box_strokes", {}).get(page_id, ()):
+            if all(abs(a - b) <= 0.01 for a, b in zip((x0, y0, x1, y1), stroke)):
+                return True
+        layout = getattr(self, "layout", {}).get(page_id)
+        if layout is None:
+            return False
+        height, width = layout.shape
+        samples = (start, end, ((x0 + x1) / 2, (y0 + y1) / 2))
+        if any(
+            layout[int(np.clip(y, 0, height - 1)), int(np.clip(x, 0, width - 1))] != 0
+            for x, y in samples
+        ):
+            return False
+        for detection in getattr(self, "layout_detections", {}).get(page_id, ()):
+            if detection.class_name not in {"figure", "table"}:
+                continue
+            left, bottom, right, top = detection.bounds
+            if all(left <= x <= right and bottom <= y <= top for x, y in samples):
+                # Preserve the original opacity, blend mode, clipping, cap,
+                # color, and transform together instead of rebuilding a rule.
+                return True
+        return False
 
     def mark_uri_underline(self, start, end, graphicstate) -> str:
         """Mark only a thin URI text underline; decide removal after reflow."""
@@ -5664,6 +5919,21 @@ class TranslateConverter(PDFConverterEx):
             region_types,
             {object_id(char) for char in code_chars | identity_chars},
         )
+        footnote_operators = _bridge_recovered_footnote_math(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            recovered_region_classes,
+            region_types,
+            {object_id(char) for char in code_chars | identity_chars},
+        )
+        source_list_markers = _source_list_markers(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            {object_id(char) for char in code_chars | identity_chars},
+        )
+        algorithm_displays = _algorithm_display_math_chars(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            recovered_region_classes,
+            region_types,
+        )
         boundary_text_classes = _recover_detector_boundary_text(
             [child for child in ltpage if isinstance(child, LTChar)],
             self.layout[ltpage.pageid],
@@ -5757,13 +6027,19 @@ class TranslateConverter(PDFConverterEx):
                     xt, child, xt_cls, actual_cls, logical_region_kind
                 ):
                     cls = xt_cls
-                # 锚定文档中 bullet 的位置
-                if child.get_text() == "•":
+                # Source list markers end the preceding item's reflow even
+                # when the detector puts the entire list in one region.
+                if object_id(child) in source_list_markers | algorithm_displays:
                     cls = 0
+                    # The formula renderer must use the original first glyph
+                    # anchor for this preserved run. A later list marker may
+                    # lie left of a display in the same PDF content sequence.
+                    child._pdf2zh_layout_class = 0
                 # 判定当前字符是否属于公式
                 if (                                                                                        # 判定当前字符是否属于公式
                     cls == 0                                                                                # 1. 类别为保留区域
                     or getattr(child, "_pdf2zh_scan_fragment", False)
+                    or object_id(child) in footnote_operators
                     or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79)  # 2. 角标字体，有 0.76 的角标和 0.799 的大写，这里用 0.79 取中，同时考虑首字母放大的情况
                     or (vflag(child.fontname, quote or child.get_text())
                         and not (not self.vfont and getattr(child, "_pdf2zh_cm_prose", False)))                                              # 3. 公式字体
@@ -6109,6 +6385,7 @@ class TranslateConverter(PDFConverterEx):
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
         if not self.vfont and not self.vchar:
             _release_tex_accented_prose_words(sstk, var, varp, pstk, paragraph_text_chars)
+            _release_reference_prose_fragments(sstk, var, varp, pstk, paragraph_text_chars)
             _release_standalone_prose_periods(sstk, var, varp, pstk, paragraph_text_chars)
             _restore_drawn_uri_underscores(
                 sstk, pstk, paragraph_text_chars, lstk,

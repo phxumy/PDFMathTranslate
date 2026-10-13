@@ -3317,6 +3317,23 @@ class ScientificTranslator(BaseTranslator):
                     author_end = year.end()
                     break
         if author_end is None:
+            # Initials/surname authors may end with a comma instead of a
+            # period. Require that grammar for every name, rather than taking
+            # the last comma of arbitrary Title Case text as the delimiter.
+            initialed_name = (
+                r"(?:[A-Z]\.(?:-?[A-Z]\.)?\s*){1,4}"
+                r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+"
+            )
+            comma_authors = re.match(
+                rf"{initialed_name}(?:(?:,\s*(?:and\s+)?|\s+and\s+)"
+                rf"{initialed_name})*,\s+",
+                entry[label.end() :],
+            )
+            if comma_authors is not None:
+                following = entry[label.end() + comma_authors.end() :]
+                if not re.match(r"(?:[A-Z]\.|and\b|&)", following):
+                    author_end = label.end() + comma_authors.end()
+        if author_end is None:
             return ()
         title_start = author_end
         while title_start < len(entry) and entry[title_start].isspace():
@@ -4325,8 +4342,17 @@ class ScientificTranslator(BaseTranslator):
             return False
         # These complete container names are ordinary capitalized nouns, with
         # neither an abbreviation dot nor a generic journal-word signal.
-        if compact in {"Quantum", "PRX Quantum"}:
+        if compact in {
+            "Quantum", "PRX Quantum", "Biometrika",
+            # This established journal subtitle includes punctuation that the
+            # general venue grammar must reject in leftover work-title prose.
+            "Sci. China: Phys., Mech. Astron",
+        }:
             return True
+        # A title fragment followed by a comma and the real journal must not
+        # become one large venue merely because the final abbreviation is valid.
+        if re.search(r"[,;:!?]", compact):
+            return False
         words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*", compact)
         if not words or len(words) > 14:
             return False
@@ -4347,17 +4373,32 @@ class ScientificTranslator(BaseTranslator):
             "du",
             "und",
             "et",
+            "i",
         }
         lowercase_brands = {"elife", "iscience", "npj"}
         venue_signals = {
             "ann",
             "annals",
+            "acta",
             "appl",
             "applied",
             "cell",
             "commun",
             "communications",
             "condens",
+            "constr",
+            "approx",
+            "found",
+            "comput",
+            "harmon",
+            "optim",
+            "inform",
+            "learn",
+            "mach",
+            "numer",
+            "res",
+            "statist",
+            "zhurnal",
             "j",
             "journal",
             "lett",
@@ -4483,6 +4524,14 @@ class ScientificTranslator(BaseTranslator):
         source_title: str,
         translated_title: str,
     ) -> bool:
+        # "Low-rank" is one source word to the general English detector, so
+        # the partial translation "低-rank" otherwise escapes its exact-word
+        # comparison.  Rank in these mathematical constructions is ordinary
+        # prose, unlike a named algorithm such as PhaseLift.
+        if re.search(
+            r"\b(?:low[-\s]+rank|rank[-\s]+one)\b", source_title, re.IGNORECASE
+        ) and re.search(r"(?<![A-Za-z])rank(?![A-Za-z])", translated_title, re.IGNORECASE):
+            return True
         if not has_suspicious_reference_title_residue(
             source_title,
             translated_title,
@@ -4497,15 +4546,42 @@ class ScientificTranslator(BaseTranslator):
                 source_title,
                 translated_title,
             )
+            or cls._reference_preserves_named_optimization_method(
+                source_title,
+                translated_title,
+            )
         )
 
-    @staticmethod
+    @classmethod
     def _reference_preserves_single_eponym_name(
+        cls,
         source_title: str,
         translated_title: str,
     ) -> bool:
         """Allow one Latin eponym only in an explicit scientific name phrase."""
 
+        # A TeX accent may be a protected glyph immediately before a surname,
+        # e.g. Kurdyka- {v42}Lojasiewicz.  Treat that exact source fragment as
+        # one name without treating the token's literal 'v' as English prose.
+        # Require the entire fragment to survive (apart from PDF line-wrap
+        # whitespace), including the accent's position; removing every
+        # placeholder would hide stray words
+        # or permit an accent to migrate elsewhere in the translated title.
+        accent_name = re.compile(
+            r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ]+[-–]\s*"
+            r"\{\{?v\d+\}?\}[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ]+"
+        )
+        for match in accent_name.finditer(source_title):
+            name = match.group(0)
+            target_name = re.compile(re.escape(name).replace(r"\ ", r"\s*"))
+            if source_title.count(name) == 1 and len(
+                target_name.findall(translated_title)
+            ) == 1:
+                visible_name = re.sub(
+                    r"[-–]\s+", "-", cls.FORMULA_TOKEN_RE.sub("", name)
+                )
+                source_title = source_title.replace(name, visible_name)
+                translated_title = target_name.sub(visible_name, translated_title)
         target_words = re.findall(
             r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’\-–][A-Za-zÀ-ÖØ-öø-ÿ]+)*",
             translated_title,
@@ -4543,6 +4619,19 @@ class ScientificTranslator(BaseTranslator):
         )
         if source_context.search(source_title) is not None:
             return True
+        # Capitalized mathematical adjectives are not necessarily surnames:
+        # "Strong-Convex inequality" must still be translated.  Certify only
+        # conventional compound inequality names rather than any title casing.
+        if folded in {
+            "kurdyka-lojasiewicz",
+            "cauchy-schwarz",
+            "cauchy-bunyakovsky-schwarz",
+        } and re.search(
+            rf"(?<![A-Za-z]){re.escape(source_eponym)}\s+inequalit(?:y|ies)\b",
+            source_title,
+            re.IGNORECASE,
+        ):
+            return True
         # Named physical transitions can use several hyphenated surnames.
         # Require a capitalized compound, not an ordinary single title word
         # such as "Quantum" or a modifier such as "Non-adiabatic".
@@ -4558,6 +4647,32 @@ class ScientificTranslator(BaseTranslator):
                 re.IGNORECASE,
             )
         )
+
+    @staticmethod
+    def _reference_preserves_named_optimization_method(
+        source_title: str,
+        translated_title: str,
+    ) -> bool:
+        """Permit a conventional algorithm name, never arbitrary math prose.
+
+        Bibliographies often lowercase LASSO and PhaseLift.  Both remain names
+        in Chinese; words such as rank, recovery, and optimization do not.  The
+        target must otherwise be Chinese and contain exactly the same one name
+        present in the source, so this does not exempt adjoining English prose.
+        """
+
+        target_words = re.findall(
+            r"[A-Za-z]+(?:['’\-–][A-Za-z]+)*", translated_title
+        )
+        if len(target_words) != 1 or re.search(
+            r"[\u3400-\u4dbf\u4e00-\u9fff]", translated_title
+        ) is None:
+            return False
+        name = target_words[0].casefold()
+        if name not in {"lasso", "phaselift"}:
+            return False
+        source_words = re.findall(r"[A-Za-z]+", source_title.casefold())
+        return source_words.count(name) == 1
 
     @staticmethod
     def _reference_prefix_is_author_et_al(prefix: str) -> bool:
@@ -4619,6 +4734,58 @@ class ScientificTranslator(BaseTranslator):
             rf"\s*[:,]\s*{number}\s*[,;]?\s*{terminal_year}"
         )
         if re.fullmatch(terminal_year, remaining) or re.fullmatch(fields, remaining):
+            return True
+        # A journal may be cited before its volume/pages are assigned.  A
+        # recognizable venue plus a terminal year is still complete metadata;
+        # title prose or another sentence after that year is not.
+        year_only_venue = re.fullmatch(
+            rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?),\s*{terminal_year}",
+            remaining,
+        )
+        if year_only_venue is not None and cls._reference_venue_name_is_plausible(
+            year_only_venue.group("venue"), allow_foreign_connector=True
+        ):
+            return True
+
+        pages = r"pp?\.\s+\d{1,7}(?:[-–]{1,2}\d{1,7})?"
+        location = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\- ]{0,60}"
+        # Complete university-press catalogues have a publisher, optional
+        # publication place, year, and optional page range.  Do not accept an
+        # arbitrary phrase merely because it contains 'Press'.
+        press = re.fullmatch(
+            rf"(?:[A-Z][A-Za-z'’\-]*\s+){{1,5}}University\s+Press,\s*"
+            rf"(?:{location},\s*){{0,2}}{year}(?:,\s*{pages})?\.?\s*",
+            remaining,
+        )
+        if press is not None:
+            return True
+
+        report = re.fullmatch(
+            rf"Technical\s+report,\s*(?P<institution>[^.!?{{}}\[\],]{{5,180}}),"
+            rf"\s*{year}(?:,\s*(?:\[\[PDF2ZH_FLOW_\d+\]\]|https?://\S+))?\.?\s*",
+            remaining,
+            re.IGNORECASE,
+        )
+        if report is not None and re.search(
+            r"\b(?:univer-?\s*sity|institute|department|laborator(?:y|ies))\b",
+            report.group("institution"),
+            re.IGNORECASE,
+        ):
+            return True
+
+        # An anthology is a container even when the bibliography does not say
+        # 'in'. Require an explicit selected-works label, a personal-name field,
+        # and complete date/pages to distinguish it from a work's subtitle.
+        person = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]*(?:\.)?"
+        collection = re.fullmatch(
+            rf"(?:in\s+)?(?:[A-Z][A-Za-z\- ]{{1,60}}:\s*)?"
+            rf"(?:Selected\s+(?:Papers|Works)|Selecta)\s+[Oo]f\s+"
+            rf"{person}(?:\s+{person}){{1,6}}(?:\s*:\s*With\s+Commentary)?"
+            rf",\s*(?:(?:[A-Z][A-Za-z'’\-]*\s*){{1,5}},\s*"
+            rf"(?:{location},\s*)?)?(?:\({year}\)|{year}),\s*{pages}\.?\s*",
+            remaining,
+        )
+        if collection is not None:
             return True
         # Some bibliographies give only a numeric publication month and year.
         # Validate the month and consume the entire field so "11 2022 methods"
@@ -4789,6 +4956,13 @@ class ScientificTranslator(BaseTranslator):
             or cls._styled_reference_title_spans(entry)
             or cls._structured_reference_title_spans(entry)
         )
+        if complete_titles and not any(
+            source_title in complete_title for complete_title in complete_titles
+        ):
+            # Once the complete work title is known, a second model proposal
+            # outside it is a container/author/publication field, not another
+            # translatable title. Keep support for main/subtitle fragments.
+            return False
         for complete_title in complete_titles:
             if source_title != complete_title and source_title in complete_title:
                 # A broad publication introducer such as "in" can also occur

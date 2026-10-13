@@ -328,6 +328,69 @@ def _collect_source_uri_links(document):
     }
 
 
+def _collect_closed_box_strokes(page):
+    """Find small outlines made of four strokes, such as a proof-end box.
+
+    TeX emits these four sides separately. Extracting just their horizontal
+    sides as fraction rules detaches them from the vertical sides on reflow.
+    Require a complete outline with matching stroke style and touching painted
+    endpoints; two fraction bars alone are never sufficient evidence.
+    """
+    horizontal = []
+    vertical = []
+    for drawing in page.get_drawings():
+        items = drawing["items"]
+        width = drawing.get("width") or 0
+        if (
+            drawing.get("type") != "s" or len(items) != 1
+            or items[0][0] != "l" or not 0 < width <= 1.5
+            or drawing.get("dashes") != "[] 0"
+        ):
+            continue
+        _, start, end = items[0]
+        # PyMuPDF drawings use unrotated page coordinates; layout and pdfminer
+        # use the displayed page with a bottom-left origin.
+        start = start * page.rotation_matrix
+        end = end * page.rotation_matrix
+        points = sorted((
+            (float(start.x), float(page.rect.height - start.y)),
+            (float(end.x), float(page.rect.height - end.y)),
+        ))
+        (x0, y0), (x1, y1) = points
+        style = (width, drawing.get("color"), drawing.get("stroke_opacity"),
+                 drawing.get("lineCap"))
+        if abs(y0 - y1) <= 0.005 and 2 <= x1 - x0 <= 14:
+            horizontal.append((x0, y0, x1, y1, style))
+        elif abs(x0 - x1) <= 0.005 and 2 <= abs(y1 - y0) <= 14:
+            vertical.append((x0, min(y0, y1), x1, max(y0, y1), style))
+
+    protected = set()
+    for index, top in enumerate(horizontal):
+        x0, y0, x1, _, style = top
+        for bottom in horizontal[index + 1:]:
+            a, y1, b, _, other_style = bottom
+            height = abs(y1 - y0)
+            if (
+                style != other_style or abs(a - x0) > 0.01
+                or abs(b - x1) > 0.01 or not 2 <= height <= 14
+                or not 0.4 <= (x1 - x0) / height <= 2.5
+            ):
+                continue
+            low, high = sorted((y0, y1))
+            tolerance = style[0] / 2 + 0.02
+            def has_side(x):
+                return any(
+                    vstyle == style and abs(vx - x) <= tolerance
+                    and abs(vlow - low) <= tolerance
+                    and abs(vhigh - high) <= tolerance
+                    for vx, vlow, _, vhigh, vstyle in vertical
+                )
+            if has_side(x0) and has_side(x1):
+                protected.add(tuple(top[:4]))
+                protected.add(tuple(bottom[:4]))
+    return tuple(sorted(protected))
+
+
 def translate_patch(
     inf: BinaryIO,
     pages: Optional[list[int]] = None,
@@ -376,6 +439,7 @@ def translate_patch(
     device.scan_backgrounds = {}
     device.source_spelling = collect_source_spelling(doc_zh)
     device.source_uri_links = _collect_source_uri_links(doc_zh)
+    device.source_closed_box_strokes = {}
 
     assert device is not None
     obj_patch = {}
@@ -418,6 +482,9 @@ def translate_patch(
             )
             layout_region_types[page.pageno] = page_region_types
             layout[page.pageno] = box
+            device.source_closed_box_strokes[page.pageno] = (
+                _collect_closed_box_strokes(doc_zh[page.pageno])
+            )
             # 新建一个 xref 存放新指令流
             page.page_xref = doc_zh.get_new_xref()  # hack 插入页面的新 xref
             doc_zh.update_object(page.page_xref, "<<>>")
