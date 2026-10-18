@@ -156,6 +156,42 @@ def test_stream_failure_releases_update_guard_and_exposes_message(ui):
     ui["update_manager"].end_translation.assert_called_once()
 
 
+def test_success_waits_for_worker_cleanup_without_cancelling_next_queued_file(ui):
+    result_posted, cleanup, closed = Event(), Event(), Event()
+
+    class FinishingQueue(Queue):
+        def put(self, item):
+            super().put(item)
+            if item[0] == "result":
+                result_posted.set()
+                assert cleanup.wait(5)
+
+    ui["Queue"] = FinishingQueue
+    ui["translate_file"].return_value = ("mono.pdf", "mono.pdf", "dual.pdf", {}, {}, {})
+    iterator = stream(ui)
+    next(iterator)
+    assert result_posted.wait(1)
+    assert "翻译完成" in next(iterator)[7]
+
+    def finish():
+        with pytest.raises(StopIteration):
+            next(iterator)
+        closed.set()
+
+    draining = Thread(target=finish)
+    draining.start()
+    try:
+        assert not closed.wait(0.05)
+        ui["stop_translate_file"].assert_not_called()
+        ui["update_manager"].end_translation.assert_not_called()
+    finally:
+        cleanup.set()
+        draining.join(5)
+    assert closed.is_set()
+    ui["stop_translate_file"].assert_not_called()
+    ui["update_manager"].end_translation.assert_called_once()
+
+
 def test_closing_stream_cancels_worker_and_retains_guard_until_stopped(ui):
     proceed, entered = Event(), Event()
 

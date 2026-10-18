@@ -701,6 +701,11 @@ def translate_file_stream(
                 )
                 raise gr.Error(message) from value
     finally:
+        if finished and worker is not None:
+            # The result can reach the UI just before the worker's final cleanup.
+            # Finish that cleanup before the queue advances; a successful file
+            # must not send a cancellation signal to the rest of the queue.
+            worker.join()
         if worker is not None and worker.is_alive():
             cancellation_event.set()
             stop_translate_file(state)
