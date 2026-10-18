@@ -734,6 +734,14 @@ def _affiliation_boundary(text: str, keyword_start: int) -> int:
 
 
 def split_author_affiliation(text: str) -> tuple[str, str] | None:
+    # A numbered institution can contain many capitalized phrases. It must not
+    # become an apparent author list ending at a later institution keyword.
+    if (
+        re.match(r"^\s*(?:\d{1,2}|\{\s*v[\d\s]+\s*\})", text)
+        and _AFFILIATION_RE.search(text.partition(",")[0])
+        and looks_like_affiliation(text)
+    ):
+        return None
     for match in _AFFILIATION_RE.finditer(text):
         boundary = _affiliation_boundary(text, match.start())
         author_text = text[:boundary]
@@ -1200,8 +1208,8 @@ class DocumentTranslationPolicy:
                         ),
                     ),
                 )
-            if looks_like_author_list(text):
-                return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
             if looks_like_affiliation(text):
                 return SegmentPlan(segment, _affiliation_parts(text, formula_texts))
+            if looks_like_author_list(text):
+                return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
         return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))

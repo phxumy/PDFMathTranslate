@@ -524,18 +524,65 @@ test('two batches of one PDF reuse the same chat and persist the prior-turn base
   assert.equal(task.conversation_url, 'https://chatgpt.com/c/our-request');
 }));
 
-test('an unfinished batch blocks later batches of the same task until recovery succeeds', async () => temporary(async directory => {
+test('a reordered batch recovers the pending task before submitting its own prompt', async () => temporary(async directory => {
   const f = fixture(); let captures = 0;
   f.deps.waitAnswer = async () => { if (++captures === 1) throw new Error('interrupted first batch'); return { text: 'complete' }; };
   const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
   const first = { ...await request(directory, 'translate', '-1'), task_id: 'same-pdf' };
   const second = { ...await request(directory, 'translate', '-2'), task_id: 'same-pdf' };
   assert.equal((await bridge.run(first)).not_submitted, false);
-  const blocked = await bridge.run(second);
-  assert.equal(blocked.error_code, 'TASK_PENDING_BATCH'); assert.equal(blocked.not_submitted, true); assert.equal(f.calls.submit, 1);
-  assert.equal((await bridge.run({ ...first, op: 'recover' })).ok, true);
   assert.equal((await bridge.run(second)).ok, true); assert.equal(f.calls.submit, 2);
+  assert.equal((await bridge.run({ ...first, op: 'recover' })).ok, true);
+  assert.equal(f.calls.submit, 2);
   assert.equal(f.calls.navigate.length, 2);
+}));
+
+test('eight PDF batches retain ordered identities when the shell mounts only the last five turns', async () => temporary(async directory => {
+  const f = fixture(); const submit = f.deps.submit;
+  f.deps.submit = async (...args) => {
+    await submit(...args);
+    const state = args[0].runtime.state;
+    state.shell = true; state.userIds = state.userIds.slice(-5); state.count = state.userIds.length;
+  };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  for (let index = 1; index <= 8; index++) {
+    const req = { ...await request(directory, 'translate', `-${index}`), task_id: 'virtualized-pdf' };
+    const result = await bridge.run(req);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json')));
+    assert.deepEqual(journal.accepted_user_ids, Array.from({ length: index }, (_, i) => `submitted-user-${i + 1}`));
+    assert.equal(journal.submitted_user_count, index);
+  }
+  assert.equal(f.calls.submit, 8); assert.equal(f.calls.navigate.length, 2);
+  assert.equal(f.tabs.get('owned-2').count, 5);
+}));
+
+test('an old unbound sixth batch recovers after prefix virtualization without resending', async () => temporary(async directory => {
+  const f = fixture(); const submit = f.deps.submit;
+  f.deps.submit = async (...args) => { await submit(...args); const s = args[0].runtime.state; s.shell = true; s.userIds = s.userIds.slice(-5); s.count = s.userIds.length; };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  for (let i = 1; i <= 5; i++) assert.equal((await bridge.run({ ...await request(directory, 'translate', `-${i}`), task_id: 'old-sixth' })).ok, true);
+  const req = { ...await request(directory, 'translate', '-6'), task_id: 'old-sixth' };
+  const completed = await bridge.run(req); assert.equal(completed.ok, true);
+  const file = path.join(req.request_dir, 'journal.json'); const saved = JSON.parse(await fs.readFile(file));
+  for (const key of ['submitted_prompt_hash', 'submitted_user_id', 'submitted_user_count', 'accepted_user_ids']) delete saved[key];
+  saved.status = 'paused'; await fs.writeFile(file, JSON.stringify(saved)); await fs.unlink(saved.output_file);
+  const taskFile = path.join(directory, 'tasks', 'old-sixth.json'); const task = JSON.parse(await fs.readFile(taskFile));
+  task.pending_request_dir = req.request_dir; await fs.writeFile(taskFile, JSON.stringify(task));
+  const recovered = await bridge.run({ ...req, op: 'recover' });
+  assert.equal(recovered.ok, true, JSON.stringify(recovered)); assert.equal(f.calls.submit, 6);
+  assert.equal(JSON.parse(await fs.readFile(file)).accepted_user_ids.length, 6);
+}));
+
+test('failed recovery of a reordered task never sends the new batch', async () => temporary(async directory => {
+  const f = fixture(); f.deps.waitAnswer = async () => { throw Object.assign(new Error('original answer pending'), { code: 'ASSISTANT_TIMEOUT' }); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const first = { ...await request(directory, 'translate', '-1'), task_id: 'still-pending' };
+  const second = { ...await request(directory, 'translate', '-2'), task_id: first.task_id };
+  assert.equal((await bridge.run(first)).ok, false);
+  const blocked = await bridge.run(second);
+  assert.equal(blocked.error_code, 'ASSISTANT_TIMEOUT'); assert.equal(blocked.not_submitted, true); assert.equal(f.calls.submit, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(directory, 'tasks', 'still-pending.json'))).pending_request_dir, first.request_dir);
 }));
 
 test('closed task tab reopens only the exact saved conversation before appending the next batch', async () => temporary(async directory => {

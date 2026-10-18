@@ -645,6 +645,18 @@ class AuthorAffiliationTests(unittest.TestCase):
                     [(ROLE_TRANSLATE, source)],
                 )
 
+    def test_numbered_institutions_are_not_misread_as_an_author_prefix(self) -> None:
+        source = (
+            "1Beijing Key Laboratory of Fault-Tolerant Quantum Computing, "
+            "Beijing Academy of Quantum Information Sciences, Beijing, China. "
+            "{v0}Hefei National Laboratory, Hefei, China. "
+            "{v1}Institute of Physics, Chinese Academy of Sciences, Beijing, China."
+        )
+        self.assertIsNone(split_author_affiliation(source))
+        plan = DocumentTranslationPolicy().plan_segment(segment(source), ("2", "3"))
+        self.assertTrue(all(part.role == ROLE_AFFILIATION for part in plan.parts))
+        self.assertEqual("".join(part.text for part in plan.parts), source)
+
     def test_combined_author_and_affiliation_are_split_exactly(self) -> None:
         source = (
             "Zijun Chen, A. Megrant, J. Kelly {v0}"

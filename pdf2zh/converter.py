@@ -134,7 +134,7 @@ _PROSE_ITALIC_FONT_RE = re.compile(
 )
 _PROSE_BOLD_FONT_RE = re.compile(r"(?:bold|demi|semibold)", re.IGNORECASE)
 _MATH_FONT_RE = re.compile(
-    r"(?:^CM(?:I(?!TT)|MI|SY|EX)|RMTMI|MTSY|MTEX|Math|Symbol|Sym$|TeX|Euler|"
+    r"(?:^CM(?:I(?!TT)|MI|SY|EX)|RMTMI|MTSY|MTEX|Math|Symbol|Sym$|TeX(?!t)|Euler|"
     r"AdvP[0-9A-Fa-f]+)",
     re.IGNORECASE,
 )
@@ -5873,6 +5873,9 @@ class TranslateConverter(PDFConverterEx):
         translated_segments: list[str] = []
         for plan, results in zip(plans, part_results, strict=True):
             pieces: list[str] = []
+            inline_affiliations = plan.source.region_kind == "footnote" and all(
+                part.role == ROLE_AFFILIATION for part in plan.parts
+            )
             for part, translated in zip(plan.parts, results, strict=True):
                 if translated is None:
                     raise ValueError("A planned translation part has no result")
@@ -5880,7 +5883,9 @@ class TranslateConverter(PDFConverterEx):
                     preceding = "".join(pieces).rstrip(" \t\u00a0")
                     pieces = [preceding]
                     if preceding and not preceding.endswith(("\n", "\r")):
-                        pieces.append("\n")
+                        # Compact footnote addresses share a physical row.
+                        # Forced rows shrink them unnecessarily during fitting.
+                        pieces.append(" " if inline_affiliations else "\n")
                 pieces.append(translated)
             translated_segments.append("".join(pieces))
 

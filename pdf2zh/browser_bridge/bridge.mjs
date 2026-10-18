@@ -8,7 +8,7 @@ import { browserPromptFingerprint, readUserMessageIds, readSubmittedPromptFinger
 import { buildConversationTurnCountExpression } from './node_modules/@steipete/oracle/dist/src/browser/conversationTurns.js';
 import * as nativeUI from './native-ui.mjs';
 import { effortKey } from './ui.mjs';
-import { shellSnapshot, shellPromptReady, shellFingerprint, shellSubmit, shellWaitAnswer } from './shell-page.mjs';
+import { shellSnapshot, shellPromptReady, shellFingerprint, shellSubmit, shellWaitAnswer, userIdsAreSuffix } from './shell-page.mjs';
 import { browserEndpoint, CONNECTION_GUIDANCE } from './endpoint.mjs';
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -280,9 +280,15 @@ function idsForTurn(turn) {
 function newTurnMatchesBaseline(turn, journal) {
   const previous = previousUserIds(journal);
   const current = idsForTurn(turn);
-  return !!previous && !!current && current.length === previous.length + 1 && turn.count === current.length &&
+  return !!previous && !!current && turn.count === current.length &&
     current.at(-1) === turn.messageId && typeof turn.messageId === 'string' && !previous.includes(turn.messageId) &&
-    previous.every((id, index) => current[index] === id);
+    (turn.shell
+      ? (previous.length === 0 ? current.length === 1 : current.length >= 2) && userIdsAreSuffix(current.slice(0, -1), previous)
+      : current.length === previous.length + 1 && previous.every((id, index) => current[index] === id));
+}
+function acceptedUserIds(turn, journal) {
+  const previous = previousUserIds(journal);
+  return previous && newTurnMatchesBaseline(turn, journal) ? [...previous, turn.messageId] : idsForTurn(turn);
 }
 function normalizedTurnMatches(turn, journal) {
   return !journal.prompt_normalized_hash || [turn.text, turn.renderedText, turn.structuredText, turn.inlineCodeText].some(text => typeof text === 'string' && hash(normalizedPrompt(text)) === journal.prompt_normalized_hash);
@@ -584,11 +590,25 @@ export function createBridge(overrides = {}) {
       last_request_dir: request.request_dir, pending_request_dir: null });
     await saveTask(request, task);
   }
-  async function assertNoPendingBatch(request, task) {
+  async function assertNoPendingBatch(request, task, recoverPrevious = false) {
     if (!task.pending_request_dir || task.pending_request_dir === request.request_dir) return;
     const previous = await readJournal(task.pending_request_dir);
     if (previous?.task_id === task.task_id && previous.status === 'complete') {
       await acceptTaskBatch({ ...request, request_dir: task.pending_request_dir }, previous, task);
+      return;
+    }
+    if (recoverPrevious && previous?.task_id === task.task_id && previous.dispatch_started) {
+      // Cache hits can change the first batch encountered on a rerun. Recover
+      // the durable pending request before sending any newly planned content.
+      const pendingDir = localPath(task.pending_request_dir, 'pending_request_dir');
+      const relative = path.relative(request.state_dir, pendingDir);
+      if (!relative || path.isAbsolute(relative) || relative.split(path.sep).includes('..')) {
+        throw coded('TASK_RECORD_UNREADABLE', '待恢复批次不在本地任务目录内，已停止。');
+      }
+      await recover({ ...request, op: 'recover', request_dir: pendingDir,
+        prompt_file: path.join(pendingDir, 'prompt.txt'), output_file: previous.output_file,
+        model: previous.model, effort: previous.effort, session_id: previous.session_id });
+      Object.assign(task, await readJson(taskPath(request, task.task_id)));
       return;
     }
     throw coded('TASK_PENDING_BATCH', '同一 PDF 的上一批尚未确认完成，已阻止后续批次。请恢复原批次；不会另开聊天。');
@@ -615,7 +635,7 @@ export function createBridge(overrides = {}) {
       throw coded('RECOVERY_IDENTITY_UNVERIFIED', '网页上的已发送文字尚不能与本批翻译对应，已暂停且不会重发。', { diagnostic });
     }
     Object.assign(journal, { submitted_prompt_hash: fingerprint, submitted_user_id: turn.messageId,
-      submitted_user_count: turn.count, accepted_user_ids: idsForTurn(turn),
+      submitted_user_count: acceptedUserIds(turn, journal)?.length ?? turn.count, accepted_user_ids: acceptedUserIds(turn, journal),
       matched_text_source: hash(normalizedPrompt(turn.text)) === journal.prompt_normalized_hash ? 'textContent' :
         hash(normalizedPrompt(turn.renderedText)) === journal.prompt_normalized_hash ? 'innerText' :
           hash(normalizedPrompt(turn.structuredText)) === journal.prompt_normalized_hash ? 'domStructure' : 'domInlineCode' });
@@ -705,14 +725,15 @@ export function createBridge(overrides = {}) {
     await save();
     const conversationId = journal.conversation_url?.split('/').at(-1);
     const answer = await deps.waitAnswer(Runtime, (request.timeout_seconds || 900) * 1000, quiet, journal.baseline_turns ?? 0, conversationId,
-      { ...before, localConversationId: journal.local_conversation_id || localConversationId(before.url) });
+      { ...before, verifiedUserIds: acceptedUserIds(before, journal), localConversationId: journal.local_conversation_id || localConversationId(before.url) });
     const after = await deps.userTurn(Runtime);
     if (after.messageId !== before.messageId || browserPromptFingerprint(after.text, after.messageId) !== journal.submitted_prompt_hash ||
-        after.count !== before.count || (journal.conversation_url && after.url !== journal.conversation_url)) {
+        (!previousUserIds(journal) ? after.count !== before.count : !newTurnMatchesBaseline(after, journal)) ||
+        (journal.conversation_url && after.url !== journal.conversation_url)) {
       throw coded('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时页面会话发生变化，已暂停。');
     }
     if (!conversationURL(after.url)) throw coded('RECOVERY_NOT_READY', '本批回答已出现，但网页尚未给出可保存的会话地址；已暂停，稍后恢复原批次。');
-    Object.assign(journal, { conversation_url: after.url, submitted_user_id: after.messageId, submitted_user_count: after.count, accepted_user_ids: idsForTurn(after),
+    Object.assign(journal, { conversation_url: after.url, submitted_user_id: after.messageId, submitted_user_count: acceptedUserIds(after, journal)?.length ?? after.count, accepted_user_ids: acceptedUserIds(after, journal),
       ...(answer.localConversationId ? { local_conversation_id: answer.localConversationId } : {}) });
     return persistAnswer(request, journal, answer.text, task);
   }
@@ -832,7 +853,7 @@ export function createBridge(overrides = {}) {
     const existing = await readJournal(request.request_dir);
     if (existing?.dispatch_started) return recover(request);
     const task = await loadTask(request, existing);
-    await assertNoPendingBatch(request, task);
+    await assertNoPendingBatch(request, task, true);
     const entry = connected(request.state_dir);
     const prompt = await fs.readFile(localPath(request.prompt_file, 'prompt_file'), 'utf8');
     if (!prompt.trim()) throw coded('INVALID_REQUEST', 'Empty translation prompt.');
@@ -892,7 +913,9 @@ export function createBridge(overrides = {}) {
       if (task.last_request_dir) {
         if (priorTurn.url !== task.conversation_url || priorTurn.messageId !== previousIds.at(-1) ||
             browserPromptFingerprint(priorTurn.text, priorTurn.messageId) !== task.last_user_fingerprint ||
-            (Array.isArray(task.last_user_ids) && JSON.stringify(previousIds) !== JSON.stringify(task.last_user_ids))) {
+            (Array.isArray(task.last_user_ids) && (priorTurn.shell
+              ? !userIdsAreSuffix(previousIds, task.last_user_ids)
+              : JSON.stringify(previousIds) !== JSON.stringify(task.last_user_ids)))) {
           throw coded('TASK_PREDECESSOR_UNVERIFIED', '原聊天在上一批完成后发生变化，不能附加下一批。');
         }
       } else if (previousIds.length || baseline !== 0) throw coded('NEW_CHAT_REQUIRED', '首次批次的软件标签页不是空白新聊天，已暂停。');
@@ -900,7 +923,7 @@ export function createBridge(overrides = {}) {
         created_at: new Date().toISOString(), session_id: `pdf-${randomUUID()}`, target_id: connection.targetId,
         browser_ws: entry.endpoint.browserWSEndpoint, port: entry.endpoint.port, prompt_hash: hash(prompt), prompt_normalized_hash: hash(normalizedPrompt(prompt)),
         output_file: output, model: selection.model, effort: selection.effort, baseline_turns: baseline,
-        previous_user_ids: previousIds, previous_user_count: previousIds.length,
+        previous_user_ids: task.last_user_ids || previousIds, previous_user_count: (task.last_user_ids || previousIds).length,
         conversation_url: task.conversation_url, local_conversation_id: task.local_conversation_id || null, prompt_submitted: false };
       const save = () => writeJson(path.join(request.request_dir, 'journal.json'), journal);
       task.pending_request_dir = request.request_dir;

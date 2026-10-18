@@ -57,6 +57,17 @@ test('shell reports a completed empty reply without resending and allows delayed
  await assert.rejects(shellWaitAnswer(snapshots([{ ...empty, assistant: { ...empty.assistant, complete: false } }]), 100, 0, 'created'), { code: 'ASSISTANT_TIMEOUT' });
 });
 
+test('shell accepts a bound sixth reply when mounted turn counts stay flat and old prefixes disappear', async () => {
+ const userIds = ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'];
+ const initial = { ...answered, messageId: 'u6', userIds: userIds.slice(1), count: 5, turnCount: 10, verifiedUserIds: userIds };
+ const trimmed = { ...initial, userIds: userIds.slice(2), count: 4, turnCount: 8 };
+ const restored = { ...initial, userIds, count: 6, turnCount: 12 };
+ assert.equal((await shellWaitAnswer(snapshots([initial, trimmed, restored, trimmed]), 3000, 10, 'created', initial)).text, answered.assistant.text);
+ for (const ids of [['u2', 'u4', 'u5', 'u6'], ['unknown', 'u5', 'u6'], ['u5', 'u5', 'u6'], ['u6', 'u5']]) {
+  await assert.rejects(shellWaitAnswer(snapshots([{ ...initial, userIds: ids, count: ids.length }]), 10, 10, 'created', initial), { code: 'RECOVERY_IDENTITY_UNVERIFIED' });
+ }
+});
+
 test('new shell reads exact user content and only completed assistant action bars; rejects streaming and wrong conversation', { skip: !chrome }, async () => {
  const browser = await chromium.launch({ executablePath: chrome, headless: true });
  try {

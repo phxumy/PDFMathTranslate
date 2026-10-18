@@ -69,6 +69,21 @@ def test_roman_prose_after_symbol_does_not_join_formula():
     assert not getattr(operator[0], "_pdf2zh_prose_word_start", False)
 
 
+def test_publisher_text_faces_do_not_hide_prose_as_tex_formulas():
+    for font in (
+        "HardingText-Regular2",
+        "ABCDEF+HardingText-Regular",
+        "MinionText-Regular",
+    ):
+        assert not _MATH_FONT_RE.search(font)
+        chars = run("The quantum gate fidelity is high", font=font, size=10)
+        _mark_prose_words(chars)
+        symbol = run("μ", font="STIXTwoMath-Regular", size=10)
+        assert not _should_extend_formula_run(symbol, chars[0])
+    for font in ("TeX-Math", "MTEX10", "STIXTwoMath-Regular", "CMMI10"):
+        assert _MATH_FONT_RE.search(font)
+
+
 def test_numeric_scientific_footnote_recovers_short_continuation_and_preserves_furniture():
     first = run("1An event happens with high probability", y=100)
     last = run("constants.", y=90)

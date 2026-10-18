@@ -58,6 +58,12 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.5.3
+
+- Continue ChatGPT translations when the website virtualizes older turns, including the sixth batch and later. Recover an existing pending batch before sending newly planned work.
+- Preserve the original failure from PDF Form objects. Fix `Text` font names being mistaken for TeX math fonts, which left some Nature abstracts and body paragraphs untranslated.
+- Keep numbered institution addresses translatable and compact footnotes readable. Validate the reported paper's first page through actual ChatGPT translation, PDF rendering and a cached repeat without additional submissions.
+
 ### New in v1.9.11-codex.5.2
 
 - Keep the first ChatGPT reply bound to its submitted message while the website assigns a permanent conversation URL. Persist the observed `local-chatgpt:` client ID so live replies remain readable after the address changes and across later batches.

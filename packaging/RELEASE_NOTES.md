@@ -1,3 +1,19 @@
+## v1.9.11-codex.5.3 — 修复第六批中断、续传与正文漏译
+
+修复 ChatGPT 连续翻译几批后反复提示“同一 PDF 的上一批尚未确认完成”的问题，以及 Nature 论文正文被误保留为英文的问题。
+
+- ChatGPT 网页会卸载较早的消息节点。本版按完整的已验证消息 ID 历史核验当前连续后缀，不再要求网页节点数量一直增长；仍校验原聊天地址、完整请求、最后消息及回答归属，拒绝未知、插入、重复或乱序消息。
+- 重试时若缓存改变了批次顺序，先取回原任务中未完成批次的回答，再处理新批次。失败恢复仍会停止发送，不重发未确认请求。
+- PDF Form 对象中的翻译中断会直接停止当前页，保留最初错误，不再误启动后续批次。
+- 修正 `HardingText` 等普通字体中的 `Text` 被误匹配为 `TeX` 数学字体，避免摘要和正文整体漏译。真正的公式字体仍保留。
+- 编号机构地址不再误判为作者名单；紧凑脚注机构在原区域内自然换行，避免额外强制分行导致字体过小。
+
+已使用用户报告问题的 Nature Physics 论文第一页实测：取回原第六批、在同一聊天中继续超过五轮、完成摘要与正文翻译并生成预览及 PDF；再次运行不新增翻译请求。另验证发布安装包的安装、覆盖升级及页面生成。本次实测范围为第一页，不声称全九页已经验证。
+
+从 `.5.2` 可通过应用内更新或下载 EXE 覆盖安装。保留用户设置、缓存和原聊天记录。
+
+This release handles virtualized ChatGPT conversation history, recovers pending batches before replanned work, propagates PDF Form translation failures, and fixes ordinary Text fonts being mistaken for TeX math fonts. Validation uses the reported paper's first page and a repeat run with no new submissions.
+
 ## v1.9.11-codex.5.2 — 修复首批回答读取与旧任务恢复
 
 修复 `.5.1` 中连接和模型读取正常，但翻译时报“等待回答时原聊天发生变化”或“原聊天暂不可用且没有可恢复地址”的问题。

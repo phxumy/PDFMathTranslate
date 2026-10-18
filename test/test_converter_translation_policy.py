@@ -58,6 +58,18 @@ def converter_with(translator) -> TranslateConverter:
 
 
 class ConverterPolicyIntegrationTests(unittest.TestCase):
+    def test_compact_footnote_institutions_wrap_without_forced_tiny_rows(self):
+        converter = converter_with(FakeCodexTranslator())
+        source = "1Department of Physics, Example University {v0}Institute for Quantum Science"
+        props = paragraph()
+        props.region_kind = "footnote"
+        result = converter._translate_planned_segments(
+            [source], [props], formula_texts=["2"], page_width=612.0
+        )[0]
+        self.assertIn("1物理系", result)
+        self.assertIn(" {v0}量子科学研究所", result)
+        self.assertNotIn("\n", result)
+
     def test_authors_affiliations_and_references_follow_separate_roles(self) -> None:
         translator = FakeCodexTranslator()
         converter = converter_with(translator)

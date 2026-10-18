@@ -3,6 +3,14 @@ import { browserPromptFingerprint } from './node_modules/@steipete/oracle/dist/s
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const fail = (code, message) => Object.assign(new Error(message), { code });
+// The shell virtualizes old turns. Only a contiguous suffix of a verified
+// history may disappear; inserted, reordered, duplicate or unknown IDs fail.
+export function userIdsAreSuffix(observed, expected) {
+  const valid = ids => Array.isArray(ids) && ids.every(id => typeof id === 'string' && id) && new Set(ids).size === ids.length;
+  return valid(observed) && valid(expected) && observed.length <= expected.length &&
+    (observed.length > 0 || expected.length === 0) &&
+    observed.every((id, index) => id === expected[expected.length - observed.length + index]);
+}
 async function evaluate(runtime, expression) {
   const result = await runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
   if (result.exceptionDetails) throw fail('PAGE_SCRIPT_ERROR', 'ChatGPT 页面状态读取失败。');
@@ -112,13 +120,15 @@ export async function shellWaitAnswer(runtime, timeout, baseline, conversationId
   // Start with the turn already verified by capture, so a remount between the
   // two reads cannot replace the request that this wait is allowed to accept.
   const initial = submittedTurn || await shellSnapshot(runtime);
-  const identity = state => JSON.stringify([state.userIds, state.messageId, state.text, state.count]);
+  const verifiedIds = initial?.verifiedUserIds || initial?.userIds;
+  const sameTurn = state => state.messageId === initial.messageId && state.text === initial.text &&
+    state.count === state.userIds?.length && userIdsAreSuffix(state.userIds, verifiedIds);
   const home = url => url === 'https://chatgpt.com/';
   const local = url => /^https:\/\/chatgpt\.com\/c\/local-chatgpt(?::|%3a)[a-zA-Z0-9-]+$/i.test(url || '');
   const conversation = url => /^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(url || '');
   if (!initial?.messageId || typeof initial.text !== 'string' || !Array.isArray(initial.userIds) ||
       !initial.userIds.length || initial.count !== initial.userIds.length || initial.userIds.at(-1) !== initial.messageId || initial.userIds.some(id => typeof id !== 'string' || !id) ||
-      new Set(initial.userIds).size !== initial.userIds.length || (!home(initial.url) && !local(initial.url) && !conversation(initial.url))) {
+      !userIdsAreSuffix(initial.userIds, verifiedIds) || (!home(initial.url) && !local(initial.url) && !conversation(initial.url))) {
     throw fail('RECOVERY_IDENTITY_UNVERIFIED', '无法确认等待回答的原请求身份，已停止读取。');
   }
   let expectedUrl = conversationId ? `https://chatgpt.com/c/${conversationId}` : initial.url;
@@ -142,7 +152,7 @@ export async function shellWaitAnswer(runtime, timeout, baseline, conversationId
       await sleep(300);
       continue;
     }
-    if (identity(state) !== identity(initial)) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
+    if (!sameTurn(state)) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
     if (state.url !== expectedUrl) {
       if (canAdvance(state.url)) expectedUrl = state.url;
       else throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
@@ -153,7 +163,9 @@ export async function shellWaitAnswer(runtime, timeout, baseline, conversationId
       localConversationId = observed;
     }
     const answer = state.assistant;
-    if (conversation(state.url) && state.turnCount > baseline && answer?.complete) {
+    // The answer is bound to the exact submitted user turn by shellDOM. Total
+    // mounted nodes need not grow when the oldest turn leaves the viewport.
+    if (conversation(state.url) && answer?.complete) {
       const signature = JSON.stringify([state.url, answer]);
       if (signature !== prior) { prior = signature; since = Date.now(); polls = 0; }
       if (++polls >= 3 && Date.now() - since >= 1200) {
