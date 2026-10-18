@@ -8,8 +8,10 @@ INSTALL AND START
    installation is required.
 3. Open PDFMathTranslate Codex. In the Codex account panel, check your account
    status or start sign-in. Complete the official sign-in page when it opens.
-4. Choose a PDF and translate. Finished pages appear while remaining pages
-   are being processed. Final PDF downloads become available when complete.
+4. Select one or more PDFs. The queue translates them in displayed order.
+   Completed translation and bilingual downloads remain available after a
+   later failure or Stop. Retry the same queue/settings in this session to
+   skip completed outputs; Ignore cache requests a new run.
 
 UPDATES
 Use Check for updates in the application, then explicitly click Download and
@@ -41,7 +43,7 @@ An account with tighter rate limits may work better with lower concurrency.
 
 WHAT IS INCLUDED
 - The Windows desktop shell and command-line/browser launchers.
-- Official Codex CLI 0.145.0, Node.js 24.19.0, and locked browser bridge packages.
+- Official stable Codex CLI 0.163.0, Node.js 24.19.0, and locked browser bridge packages.
 - Python and pinned dependencies, plus offline layout/OCR/font assets.
 - Source references and third-party license notices.
 No account, allowance, API key, credentials, or personal documents are bundled.

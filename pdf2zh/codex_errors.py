@@ -1,6 +1,7 @@
 """Separate CLI execution failures from recoverable response-shape errors."""
 
 import re
+import json
 
 
 class CodexExecutionError(RuntimeError):
@@ -27,6 +28,27 @@ def codex_cli_error(returncode: int, detail: str) -> CodexExecutionError:
         re.fullmatch(r"ERROR:\s*(.*)", lines[-1], re.IGNORECASE) if lines else None
     )
     message = terminal.group(1).casefold() if terminal else ""
+    if terminal:
+        try:
+            payload = json.loads(terminal.group(1))
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            status = payload.get("status")
+            if (
+                isinstance(error, dict)
+                and status in {400, 401, 403, 404, 422}
+                and error.get("type")
+                in {"invalid_request_error", "authentication_error", "permission_error"}
+                and isinstance(error.get("message"), str)
+            ):
+                # Only the terminal CLI error is authoritative. Do not classify
+                # echoed PDF text or expose the entire prompt in a UI error.
+                return CodexPermanentError(
+                    f"Codex 请求被拒绝（HTTP {status}）：{error['message']}"
+                    " 请检查所选 CLI 版本、模型 ID、推理强度及账号权限。"
+                )
     permanent = any(
         reason in message
         for reason in (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import subprocess
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +38,30 @@ def stub():
 
 
 class CodexTypedFailureTests(unittest.TestCase):
+    def test_structured_model_rejection_is_actionable_without_retry_or_prompt_leak(
+        self,
+    ):
+        message = "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."
+        payload = {
+            "type": "error",
+            "status": 400,
+            "error": {"type": "invalid_request_error", "message": message},
+        }
+        failure = codex_cli_error(
+            1, "Private source text\nERROR: " + json.dumps(payload)
+        )
+        self.assertIsInstance(failure, CodexPermanentError)
+        self.assertIn("HTTP 400", str(failure))
+        self.assertIn(message, str(failure))
+        self.assertNotIn("Private source", str(failure))
+        self.assertFalse(_retryable_translation_error(failure))
+        for status in (429, 500):
+            payload["status"] = status
+            self.assertIs(
+                type(codex_cli_error(1, "ERROR: " + json.dumps(payload))),
+                CodexExecutionError,
+            )
+
     def test_cli_usage_limit_cannot_masquerade_as_a_translations_shape_error(self):
         obj = stub()
         detail = 'Source Texts JSON: [{"text":"test"}]\nReturn {"translations": []}.\nERROR: You\'ve hit your usage limit. Try again later.'

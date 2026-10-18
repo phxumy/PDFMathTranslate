@@ -68,55 +68,15 @@ Codex 登录凭据、用户论文、API Key 或翻译缓存。登录和账户规
 pdf2zh -i
 ```
 
-在 `Service` 中选择 `Codex`，然后设置：
+在 `Service` 中选择 `Codex`，再设置程序、模型和推理强度。字段规则及模型 ID 已于 **2026-10-18** 核对，完整表格、官方来源和同机 CLI 对照结果见 [简体中文 README 的 Codex 配置说明](./README_zh-CN.md#codex-fields)。
 
-| 选项 | 建议值 | 说明 |
-| --- | --- | --- |
-| `CODEX_BIN` | 保持全新 Release 默认的 `codex`，或填写本机 `codex.exe` 的完整路径 | `codex` 表示自动查找并优先选择包内 CLI；若界面显示解压目录中以 `codex-cli/x86_64-pc-windows-msvc/bin/codex.exe` 结尾的完整路径，也同样正确。留空与 `codex` 等效，之后才检查 `CODEX_CLI_PATH`、`PATH` 和 Codex Desktop。显式路径不存在时直接报错；不要只填目录。 |
-| `CODEX_PROFILE` | 留空 | 只填 profile 名，例如 `translation` 对应 `$CODEX_HOME/translation.config.toml`，不要填路径。留空时不传 `--profile`，且内置 CLI 的正常快速路径会忽略用户配置和规则；纯空格会被当作真实名称。 |
-| `CODEX_MODEL` | 留空，或下表中的精确 ID | 留空时不传 `--model`。未选 profile 时由 Codex/当前账户选择推荐模型，而不是继承桌面应用选择器或用户 `config.toml`；内置 CLI 0.145.0 在核对日通常选 `gpt-5.6-sol`，但没有被固定。选了 profile 时，其/基础配置可以提供模型。 |
-| `CODEX_REASONING_EFFORT` | `low`（.5起默认），或模型支持的其他值 | 空值会被本程序明确改成 `low`，每次都覆盖 CLI、模型、profile 和 `config.toml` 的默认值。后端允许 `none`、`low`、`medium`、`high`、`xhigh`、`max`，具体模型可能只支持其中一部分。 |
-| `CODEX_TIMEOUT` | `120` | 留空也使用 `120` 秒；长段落或较慢网络可适当增加。 |
+- `CODEX_MODEL` 使用精确 ID，例如 `gpt-6-luna`、`gpt-6.1-sol`、`gpt-6-sol` 或 `gpt-6-astra`，程序将它原样传给 CLI。留空则不传 `--model`，具体自动选择由所选 CLI 决定。
+- GPT-6 Luna 支持 `max`。当前翻译后端允许 `none`、`low`、`medium`、`high`、`xhigh`、`max`；从 `.5` 起，推理强度留空使用 `low`，不是旧文档写的 `none`。模型自身的支持范围仍需核对。
+- `.5.4` 内置官方稳定版 CLI `0.163.0`，`CODEX_BIN=codex` 或留空会优先选择它。旧 `.5.3` 包内仍为 `0.145.0`，可覆盖升级；若使用其他 CLI，填写完整路径并核对 `--version`。
+- 同机对照中，旧 CLI 拒绝 `gpt-6-luna` / `max`，官方稳定版 `0.163.0` 使用相同账号和参数成功返回短文本译文。这不等于模型 ID 无效，也不等于所有账号已开放。请按完整说明核验当前 CLI 与登录权限。
+- `CODEX_PROFILE` 一般留空；`CODEX_TIMEOUT` 默认 120 秒。`RetryError` 是外层重试提示，应读取内部错误；延长超时不能修复 HTTP 400 的模型拒绝。
 
-最容易混淆的是两个空值：`CODEX_MODEL` 留空表示让 Codex 选择推荐模型，而
-`CODEX_REASONING_EFFORT` 留空表示本程序强制使用 `low`。如果选择了 profile，
-显式模型会覆盖 profile 模型，effort 字段（包括空值变成的 `low`）也会覆盖 profile
-中的推理强度。
-
-`CODEX_BIN` 显示的是可执行程序路径，不包含开发者的账号、额度或登录凭据。下载者仍须
-运行 `Login-Codex.cmd` 登录自己的账户。
-
-### 当前 Codex 模型 ID（核对日期：2026-09-05）
-
-| 官方名称 | `CODEX_MODEL` 精确值 | 说明 |
-| --- | --- | --- |
-| GPT-6 Astra | `gpt-6-astra` | OpenAI 当前能力最强的端到端工作模型，仍在逐步开放。官方支持 `low`、`medium`、`high`、`xhigh`、`max`；选它时不要显式设置 effort 为 `none`。 |
-| GPT-5.6 Sol | `gpt-5.6-sol` | 旗舰模型；`gpt-5.6` 当前是指向 Sol 的滚动别名。 |
-| GPT-5.6 Terra | `gpt-5.6-terra` | 智能和成本均衡。 |
-| GPT-5.6 Luna | `gpt-5.6-luna` | 快速、经济，适合翻译等高吞吐任务。 |
-| GPT-5.5 | `gpt-5.5` | 上一代通用模型，当前客户端模型目录仍列出。 |
-| GPT-5.4 | `gpt-5.4` | 当前部分客户端仍显示；官方称其 ChatGPT 登录方式已于 2026-08-31 退役。 |
-| GPT-5.4 Mini | `gpt-5.4-mini` | 当前部分客户端仍显示；官方称其 ChatGPT 登录方式已于 2026-08-31 退役。 |
-| GPT-5.3 Codex Spark | `gpt-5.3-codex-spark` | 极速编程模型；不是已弃用的 `gpt-5.3-codex`。 |
-
-模型 ID 会作为 `codex exec --model` 的参数原样传入。`gpt-5.6-luna` 中的小写
-`luna` 是正确写法；只写 `luna` 并不是官方模型 ID。本 fork 不会改写模型名称或在
-模型无效时静默回退。模型可用范围取决于套餐、工作区、地区和发布状态，请同时查看
-[OpenAI 官方模型目录](https://developers.openai.com/api/docs/models)、
-[GPT-6 Astra 官方页面](https://developers.openai.com/api/docs/models/gpt-6-astra)、
-[Codex 官方模型说明](https://learn.chatgpt.com/docs/models)和
-[Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
-
-模型 ID 拼错、已经退役或当前账户无权使用时，Codex CLI 会让请求失败。翻译器可能
-使用相同 ID 重试，最终在界面报错或保留源文，但不会偷偷改用另一模型。官方已建议
-ChatGPT 登录用户用 `gpt-5.6-terra` 代替 `gpt-5.4`、用 `gpt-5.6-luna` 代替
-`gpt-5.4-mini`。菜单在灰度更新期间仍可能暂时列出旧条目；API Key 登录不受这项
-ChatGPT 登录退役规则影响。
-
-本后端的输入校验支持 `none`、`low`、`medium`、`high`、`xhigh`、`max` 六种推理
-强度；`ultra` 不是当前 PDF 翻译后端可填写的值。模型自身可能只支持其中一部分，
-不受支持的组合会报错。例如 `gpt-5.6-luna` 与 `max` 表示请求 Luna + Max；
-`gpt-6-astra` 应搭配 `low` 至 `max`，不能显式设置为 `none`。
+`.5.4` 可一次选择多个 PDF，按列表顺序逐个处理；失败或停止后保留已完成下载，当前窗口重试同一队列会跳过已完成文件。完整操作见上述 README。
 
 选择 Codex 时，WebUI 会把 `number of threads` 默认设为 `4`，输入框仍可编辑。该数值表示最多同时运行多少个相互独立的 Codex 请求；默认设置下，程序会保留原有的批次划分和输出顺序，只把已经划分好的批次最多并行执行 4 个。并行不会把同一内容重复翻译，因此同一文档的总输入/输出量通常与单线程接近，但瞬时请求速率会提高，限流、超时或结果校验失败造成的重试可能带来少量额外消耗。如遇账户限流或电脑负载过高，可以调低为 `1` 或 `2`。
 

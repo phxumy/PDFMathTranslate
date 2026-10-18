@@ -22,6 +22,7 @@ from pdf2zh import __version__
 from pdf2zh.high_level import translate
 from pdf2zh.doclayout import ModelInstance
 from pdf2zh.config import ConfigManager
+from pdf2zh.translation_queue import queue_files, queue_signature, queue_summary
 from pdf2zh.app_update import APP_VERSION, REPOSITORY_URL, update_manager
 from pdf2zh.codex_account import (
     get_codex_status,
@@ -258,6 +259,9 @@ def stop_translate_file(state: dict) -> None:
 
     Returns:- None
     """
+    queue_event = cancellation_event_map.get(state.get("queue_id"))
+    if queue_event is not None:
+        queue_event.set()
     session_id = state["session_id"]
     if session_id is None:
         return
@@ -537,6 +541,9 @@ def translate_file_stream(
     *envs,
 ):
     """Keep the UI responsive while publishing completed page images."""
+    queue_event = cancellation_event_map.get(state.get("queue_id"))
+    if queue_event is not None and queue_event.is_set():
+        raise gr.Error("队列已停止。")
     update_manager.begin_translation()
     events = Queue()
     worker = None
@@ -545,6 +552,8 @@ def translate_file_stream(
     cancellation_event_map[session_id] = cancellation_event
     state["session_id"] = session_id
     state["service"] = service_map[service].name
+    if queue_event is not None and queue_event.is_set():
+        cancellation_event.set()
     finished = False
     preview_dir = Path("pdf2zh_files") / ("preview-" + uuid.uuid4().hex)
     pages = {}
@@ -710,6 +719,210 @@ def translate_file_stream(
             target = preview_dir.resolve()
             if target.parent == root and target.name.startswith("preview-"):
                 shutil.rmtree(target, ignore_errors=True)
+
+
+def preview_uploaded_queue(value):
+    files = queue_files(value)
+    names = [Path(path).name for path in files]
+    return (
+        gr.update(value=files[0] if files else None, visible=True),
+        gr.update(value=[], visible=False),
+        (
+            f"已载入 {len(files)} 个 PDF，按列表顺序逐个翻译。"
+            if files
+            else "请选择 PDF。"
+        ),
+        queue_summary(names, ["待翻译"] * len(files)) if files else "",
+    )
+
+
+def translate_queue_stream(
+    file_type,
+    file_input,
+    link_input,
+    service,
+    lang_from,
+    lang_to,
+    page_range,
+    page_input,
+    prompt,
+    threads,
+    skip_subset_fonts,
+    ignore_cache,
+    vfont,
+    use_babeldoc,
+    recaptcha_response,
+    state,
+    chatgpt_model,
+    chatgpt_effort,
+    codex_fast,
+    codex_speed,
+    codex_parallel,
+    progress=gr.Progress(),
+    *envs,
+):
+    """Run one PDF at a time and retain completed downloads after a failure."""
+    files = queue_files(file_input) if file_type == "File" else [None]
+    if not files:
+        raise gr.Error("请先选择至少一个 PDF。")
+    names = [Path(path).name if path else "链接 PDF" for path in files]
+    settings = [
+        file_type,
+        link_input if file_type != "File" else None,
+        service,
+        lang_from,
+        lang_to,
+        page_range,
+        page_input,
+        prompt,
+        threads,
+        skip_subset_fonts,
+        ignore_cache,
+        vfont,
+        use_babeldoc,
+        chatgpt_model,
+        chatgpt_effort,
+        codex_fast,
+        codex_speed,
+        codex_parallel,
+        list(envs),
+    ]
+    try:
+        signature = queue_signature(files if file_type == "File" else [], settings)
+    except ValueError as error:
+        raise gr.Error(str(error)) from error
+    saved = state.get("queue_results") or []
+    reuse = (
+        not ignore_cache
+        and file_type == "File"
+        and state.get("queue_signature") == signature
+    )
+    records = [
+        (
+            saved[i]
+            if reuse
+            and i < len(saved)
+            and saved[i]
+            and all(Path(path).is_file() for path in saved[i])
+            else None
+        )
+        for i in range(len(files))
+    ]
+    statuses = ["已完成" if record else "待翻译" for record in records]
+    state["queue_signature"] = signature
+    state["queue_results"] = records
+    queue_id = uuid.uuid4()
+    cancelled = Event()
+    update_manager.begin_translation()
+    cancellation_event_map[queue_id] = cancelled
+    state["queue_id"] = queue_id
+
+    def downloads():
+        return gr.update(
+            value=[path for record in records if record for path in record],
+            visible=any(records),
+        )
+
+    def status_update(message):
+        return (
+            *[gr.update() for _ in range(7)],
+            message,
+            state,
+            downloads(),
+            queue_summary(names, statuses),
+        )
+
+    current = None
+    index = 0
+    try:
+        yield status_update(f"**准备队列** · 共 {len(files)} 个 PDF")
+        for index, file in enumerate(files):
+            if cancelled.is_set():
+                break
+            if records[index]:
+                mono, dual = records[index]
+                yield (
+                    mono,
+                    gr.update(value=mono, visible=True),
+                    dual,
+                    gr.update(visible=True),
+                    gr.update(visible=True),
+                    gr.update(visible=True),
+                    gr.update(visible=False),
+                    f"**复用已完成文件** · {index + 1}/{len(files)}",
+                    state,
+                    downloads(),
+                    queue_summary(names, statuses),
+                )
+                continue
+            statuses[index] = "翻译中"
+            current = translate_file_stream(
+                file_type,
+                file,
+                link_input,
+                service,
+                lang_from,
+                lang_to,
+                page_range,
+                page_input,
+                prompt,
+                threads,
+                skip_subset_fonts,
+                ignore_cache,
+                vfont,
+                use_babeldoc,
+                recaptcha_response,
+                state,
+                chatgpt_model,
+                chatgpt_effort,
+                codex_fast,
+                codex_speed,
+                codex_parallel,
+                progress,
+                *envs,
+            )
+            completed = False
+            for result in current:
+                values = list(result)
+                if isinstance(values[0], str) and isinstance(values[2], str):
+                    paths = [values[0], values[2]]
+                    if not all(Path(path).is_file() for path in paths):
+                        raise gr.Error("译文文件未保存完整，队列已停止。")
+                    records[index] = paths
+                    statuses[index] = "已完成"
+                    completed = True
+                values[7] = f"**文件 {index + 1}/{len(files)}** · {values[7]}"
+                yield (*values, downloads(), queue_summary(names, statuses))
+            current.close()
+            current = None
+            if not completed:
+                raise gr.Error("当前 PDF 未完成，队列已停止。")
+        if cancelled.is_set():
+            statuses = [
+                "已停止" if status == "翻译中" else status for status in statuses
+            ]
+            yield status_update(
+                "**队列已停止** · 已完成的文件仍可下载；再次翻译可继续。"
+            )
+        else:
+            yield status_update(
+                f"**队列翻译完成** · 已完成 {len(files)}/{len(files)} 个 PDF"
+            )
+    except Exception as error:
+        if statuses[index] != "已完成":
+            statuses[index] = "已停止" if cancelled.is_set() else "失败"
+        message = "队列已停止" if cancelled.is_set() else f"队列已暂停：{error}"
+        yield status_update(f"**{message}** · 已完成的文件仍可下载；再次翻译可继续。")
+        if not cancelled.is_set():
+            raise
+    finally:
+        cancelled.set()
+        if current is not None:
+            current.close()
+        cancellation_event_map.pop(queue_id, None)
+        if state.get("queue_id") == queue_id:
+            state["queue_id"] = None
+        update_manager.end_translation()
 
 
 def refresh_codex_account(configured_bin):
@@ -971,6 +1184,10 @@ custom_css = """
     .pdf-canvas canvas {
         width: 100%;
     }
+    #queue-status table {width: 100%; table-layout: fixed;}
+    #queue-status th:first-child, #queue-status td:first-child {width: 56px; white-space: nowrap;}
+    #queue-status th:last-child, #queue-status td:last-child {width: 88px; white-space: nowrap;}
+    #queue-status td:nth-child(2) {overflow-wrap: anywhere;}
     """
 
 desktop_css = """
@@ -1246,8 +1463,8 @@ with gr.Blocks(
                 value="File",
             )
             file_input = gr.File(
-                label="File",
-                file_count="single",
+                label="PDF 文件（按列表顺序翻译）",
+                file_count="multiple",
                 file_types=[".pdf"],
                 type="filepath",
                 elem_classes=["input-file"],
@@ -1498,12 +1715,17 @@ with gr.Blocks(
             output_file_dual = gr.File(
                 label="Download Translation (Dual)", visible=False
             )
+            queue_downloads = gr.File(
+                label="队列已完成文件（译文与双语 PDF）",
+                file_count="multiple",
+                visible=False,
+            )
             recaptcha_response = gr.Textbox(
                 label="reCAPTCHA Response", elem_id="verify", visible=False
             )
             recaptcha_box = gr.HTML('<div id="recaptcha-box"></div>')
-            translate_btn = gr.Button("Translate", variant="primary")
-            cancellation_btn = gr.Button("Cancel", variant="secondary")
+            translate_btn = gr.Button("翻译 / 继续队列", variant="primary")
+            cancellation_btn = gr.Button("停止队列", variant="secondary")
             with gr.Accordion("关于与更新", open=False):
                 gr.Markdown(
                     f"**Codex Edition {APP_VERSION}** · [GitHub 仓库]({REPOSITORY_URL}) · [发行记录]({REPOSITORY_URL}/releases)"
@@ -1615,6 +1837,7 @@ with gr.Blocks(
             translation_status = gr.Markdown(
                 "上传 PDF 后可查看原文；翻译期间会逐页显示已完成的结果。"
             )
+            queue_status = gr.Markdown("", elem_id="queue-status")
             live_preview = gr.Gallery(
                 label="已翻译页面（按原文页码）",
                 visible=False,
@@ -1630,14 +1853,10 @@ with gr.Blocks(
             )
 
     # Event handlers
-    file_input.upload(
-        lambda x: (
-            gr.update(value=x, visible=True),
-            gr.update(value=[], visible=False),
-            "已载入原文。点击翻译后会逐页显示已完成的结果。",
-        ),
+    file_input.change(
+        preview_uploaded_queue,
         inputs=file_input,
-        outputs=[preview, live_preview, translation_status],
+        outputs=[preview, live_preview, translation_status, queue_status],
         js=(
             f"""
             (a,b)=>{{
@@ -1658,7 +1877,7 @@ with gr.Blocks(
     state = gr.State({"session_id": None})
 
     translate_btn.click(
-        translate_file_stream,
+        translate_queue_stream,
         inputs=[
             file_type,
             file_input,
@@ -1693,7 +1912,10 @@ with gr.Blocks(
             live_preview,
             translation_status,
             state,
+            queue_downloads,
+            queue_status,
         ],
+        api_name="translate_file_stream",
         concurrency_limit=1,
         show_progress="minimal",
     ).then(lambda: None, js="()=>{grecaptcha.reset()}" if flag_demo else "")

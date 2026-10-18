@@ -42,77 +42,82 @@
 
 适用于 **Windows 10/11 x64**，无需安装 Python。
 
-- **推荐直接下载：** [`PDFMathTranslate-Codex-win64-with-assets.zip`](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-win64-with-assets.zip)
+- **推荐直接下载：** [`PDFMathTranslate-Codex-Setup-win64.exe`](https://github.com/phxumy/PDFMathTranslate/releases/latest/download/PDFMathTranslate-Codex-Setup-win64.exe)
 - [查看最新 Release、版本说明和 SHA-256](https://github.com/phxumy/PDFMathTranslate/releases/latest)
 - [桌面版完整安装和故障排查](./DESKTOP_APP_zh-CN.md)
 
 一分钟上手：
 
-1. 下载上面的 ZIP 并完整解压，不要直接在压缩包预览窗口中运行。
-2. 使用 Codex 服务前，双击包内的 `Login-Codex.cmd`，在浏览器中完成官方登录。
+1. 下载并运行上面的 EXE 安装包；已有版本可覆盖安装。
+2. 打开软件，在 Codex 设置里登录自己的账户，或使用安装目录中的 `Login-Codex.cmd`。
 3. 双击 `PDFMathTranslate-Codex.exe`。
 4. 在 `Service` 中选择 `Codex`，上传 PDF 后开始翻译。
 
-发布包内置官方 **Codex CLI 0.145.0 程序**，无需另装 Python 或 Codex CLI；但不包含
+`.5.4` 发布包内置官方稳定版 **Codex CLI 0.163.0**，无需另装 Python 或 Codex CLI；但不包含
 账号、套餐或免费额度、登录凭据、API Key、用户论文或翻译缓存。界面只绑定
 `127.0.0.1`，选择云翻译服务后，待翻译文本仍会发送给对应服务商；Codex 后端会使用
 你登录的账户调用 OpenAI/Codex 服务。账户和登录方式以 [OpenAI 官方 Codex CLI 说明](https://developers.openai.com/codex/cli)为准。
 
-### Codex 各字段怎么填（核对日期：2026-09-05）
+### 多个 PDF 按顺序翻译（`.5.4` 起）
+
+一次选择多个 PDF，文件区列出的顺序就是翻译顺序；语言、页码范围、服务和模型设置应用于每个文件。点击“翻译 / 继续队列”后，软件一次处理一份 PDF，并显示当前文件、页码进度和队列表格。
+
+完成的译文和双语 PDF 会持续列在“队列已完成文件”中。某份文件失败会暂停队列；点击“停止队列”会停止当前任务并阻止后续文件开始。在同一窗口中，用相同文件和设置再次点击翻译，会跳过仍可下载的已完成文件；勾选 Ignore cache 则重新处理。重启后的文件列表需要重新选择，已有翻译缓存仍可复用。
+
+<a id="codex-fields"></a>
+
+### Codex 各字段怎么填（核对日期：2026-10-18）
+
+以下字段行为适用于桌面版 `.5` 至 `.5.4`。模型 ID、所调用的 CLI 版本、登录方式和账户权限共同决定请求能否执行。
 
 | 字段 | 建议填写 | 留空时的实际行为 |
 | --- | --- | --- |
-| `CODEX_BIN` | 全新 Release 默认显示 `codex`，保持不动即可；它表示自动查找并优先选择包内 CLI。若界面显示的是解压目录中以 `codex-cli/x86_64-pc-windows-msvc/bin/codex.exe` 结尾的完整路径，也同样正确。自定义时应填另一个 `codex.exe` 的完整路径，不要只填目录。 | 留空也等同于 `codex`，程序依次查找便携包、`CODEX_CLI_PATH`、系统 `PATH` 和 Codex Desktop。若显式填写了不存在的完整路径，则直接报错。 |
-| `CODEX_PROFILE` | 通常留空。需要时只填 profile 名，例如 `translation`，对应 `$CODEX_HOME/translation.config.toml`，不要填文件路径。 | 不传 `--profile`；使用内置 CLI 的正常快速路径时，还会忽略用户 `config.toml` 和用户规则。只输入空格不算留空。 |
-| `CODEX_MODEL` | 留空让 Codex 自动选择，或填写下表中的精确模型 ID。 | 不传 `--model`。未填写 profile 时，由 CLI/当前账户选择“推荐模型”，不会继承 Codex 桌面应用模型选择器或用户 `config.toml`。截至核对日，内置 CLI 0.145.0 的当前目录通常会选择 `gpt-5.6-sol`，但它没有被本程序固定，以后可能变化。若填写了 profile，则其/基础配置可以提供模型。 |
-| `CODEX_REASONING_EFFORT` | 按模型支持情况填写 `none`、`low`、`medium`、`high`、`xhigh` 或 `max`。 | 本程序会把空值明确转换为 `none` 并逐次传给 CLI；不会继承模型、CLI、profile 或 `config.toml` 的默认强度。 |
-| `CODEX_TIMEOUT` | 通常填 `120`；网络慢或段落较长时可增大，单位为秒。 | 使用 `120` 秒。 |
+| `CODEX_BIN` | `.5.4` 保持默认 `codex` 即使用包内稳定版 CLI `0.163.0`；自定义时填写其他 `codex.exe` 的完整路径。 | 留空等同于 `codex`，依次查找包内 CLI、`CODEX_CLI_PATH`、`PATH` 和 Codex Desktop。显式路径不存在时直接报错。 |
+| `CODEX_PROFILE` | 一般留空；需要时填写所选 CLI 支持的 profile 名称。 | 不传 `--profile`。内置 CLI 的快速路径还会忽略用户配置和规则；兼容路径的配置解析由所选 CLI 决定。 |
+| `CODEX_MODEL` | 填写下表中的精确 ID，或留空让 CLI 选择。 | 不传 `--model`，不固定到某一个模型。最终取决于所选 CLI、其可用配置和账户；不要据此推断它会跟随桌面应用当前选择的模型。 |
+| `CODEX_REASONING_EFFORT` | 默认 `low`，也可填写所选模型支持的强度。 | 从 `.5` 起，空值明确转换为 `low`，并通过命令行覆盖 CLI/profile 的默认值。旧文档所写的“留空变成 `none`”已不适用。 |
+| `CODEX_TIMEOUT` | 默认 `120` 秒；确实发生超时时，可为长段落增加等待时间。 | 使用 `120` 秒。HTTP 400 的模型拒绝不会通过延长超时解决。 |
 
-因此，`CODEX_MODEL` 和 `CODEX_REASONING_EFFORT` 同时留空时，当前实际含义是：
-**模型交给 Codex 选择推荐项（核对日通常为 `gpt-5.6-sol`，但未固定），推理强度则由
-本程序固定为 `none`**。若选了 profile，显式 `CODEX_MODEL` 会覆盖 profile 模型；
-effort 字段即使留空也会以 `none` 覆盖 profile 的推理强度。
+`CODEX_MODEL` 和推理强度同时留空，表示**自动选模型 + `low`**。显式模型 ID 会原样传给 `codex exec --model`；本程序没有模型名称白名单，不会把未知 ID 偷换为其他模型。`CODEX_BIN` 是程序路径，账户仍由用户自己的登录凭据决定。
 
-`CODEX_BIN` 里显示的只是程序路径，不包含开发者的账号、额度或登录信息。每位用户仍需
-通过包内 `Login-Codex.cmd` 登录自己的账户。
+<a id="codex-models"></a>
 
-### Codex 模型 ID（核对日期：2026-09-05）
+### Codex 模型 ID（核对日期：2026-10-18）
 
-`CODEX_MODEL` 的内容会原样传给 `codex exec --model`，这里要填的是精确模型 ID，
-不是简称。
+`gpt-6-luna` 是官方有效 ID，包含连字符；不要填写 `gpt6luna`、`luna` 或其他简称。下表列出官方模型，不表示旧安装包内置的 CLI 已能使用每一项。
 
-| 官方名称 | `CODEX_MODEL` 精确值 | 适合用途 |
+| 官方名称 | `CODEX_MODEL` 精确值 | 说明 |
 | --- | --- | --- |
-| GPT-6 Astra | `gpt-6-astra` | OpenAI 当前能力最强的端到端工作模型，仍在按账户逐步开放。官方列出的强度为 `low`、`medium`、`high`、`xhigh`、`max`，因此使用它时请至少填写 `low`，不要让 effort 留空变成 `none`。 |
-| GPT-5.6 Sol | `gpt-5.6-sol` | 旗舰模型，适合复杂推理和高质量工作；滚动别名 `gpt-5.6` 当前也指向 Sol。 |
-| GPT-5.6 Terra | `gpt-5.6-terra` | 智能、速度和成本较均衡，适合日常工作。 |
-| GPT-5.6 Luna | `gpt-5.6-luna` | 快速且成本较低，适合翻译等可重复或高吞吐任务。 |
-| GPT-5.5 | `gpt-5.5` | 上一代编程与通用工作模型；当前 Codex 客户端模型目录仍列出。 |
-| GPT-5.4 | `gpt-5.4` | 某些客户端目录仍显示的旧模型；官方说明其 ChatGPT 登录方式已于 2026-08-31 退役。 |
-| GPT-5.4 Mini | `gpt-5.4-mini` | 某些客户端目录仍显示的旧款小模型；官方说明其 ChatGPT 登录方式已于 2026-08-31 退役。 |
-| GPT-5.3 Codex Spark | `gpt-5.3-codex-spark` | 当前客户端目录列出的极速编程模型；不要与已弃用的 `gpt-5.3-codex` 混淆。 |
+| GPT-6 Luna | `gpt-6-luna` | 面向重复、批量任务；可用于翻译。官方支持 `none`、`low`、`medium`、`high`、`xhigh`、`max`，不支持 Ultra。 |
+| GPT-6.1 Sol | `gpt-6.1-sol` | 当前 Sol 型号，适合复杂工作；需当前客户端及账户已开放。 |
+| GPT-6 Sol | `gpt-6-sol` | GPT-6 系列的前一款 Sol，按账户可用性选择。 |
+| GPT-6 Astra | `gpt-6-astra` | 适合较难的推理工作；使用 `low` 至 `max`，不要显式填 `none`。 |
+| GPT-5.6 Sol / Terra / Luna | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` | 上一代型号；是否仍可使用，以当前客户端、账户和官方公告为准。 |
 
-例如，填写 `gpt-5.6-luna` 并把 `CODEX_REASONING_EFFORT` 设为 `max`，请求的就是
-**Luna + Max 推理强度**。模型 ID 中的小写 `luna` 是官方正确写法。不要只填 `luna`、
-`terra` 或 `sol`：这些简称不是官方模型 ID，本 fork 不会替你扩展简称，也不会在模型
-无效或账户不可用时静默换成其他模型，而是让 Codex CLI 明确报错。
+型号与推理强度分别设置：`CODEX_MODEL=gpt-6-luna`、`CODEX_REASONING_EFFORT=max` 就是请求 GPT-6 Luna + Max。翻译后端接受 `none`、`low`、`medium`、`high`、`xhigh`、`max`，尚不接受 `ultra`。Luna 的官方能力见 [GPT-6 Luna 模型页](https://developers.openai.com/api/docs/models/gpt-6-luna)；Codex 入口与账户可用性见 [官方 Models 说明](https://learn.chatgpt.com/docs/models)。
 
-下拉菜单或本机模型目录在客户端、服务灰度更新期间可能继续显示旧模型，但服务端仍会
-逐次检查当前账户权限。模型 ID 拼错、已经退役或账户无权使用时，Codex CLI 会让请求
-失败；翻译器可能用同一个 ID 重试，最后在界面报错或为保护内容而保留英文原文，但绝不
-会自动切换成另一模型。使用 ChatGPT 登录 Codex 时，OpenAI 建议把 `gpt-5.4` 替换成
-`gpt-5.6-terra`，把 `gpt-5.4-mini` 替换成 `gpt-5.6-luna`；使用 API Key 登录时的
-模型可用范围是另一套规则。
+旧型号不应继续列为当前推荐项：ChatGPT 登录下的 `gpt-5.4` / `gpt-5.4-mini` 已于 2026-08-31 退役，`gpt-5.3-codex-spark` 于 2026-09-14 退役，`gpt-5.5` 于 2026-10-14 退役。API Key 登录的可用范围和计费另按 API 规则处理，不能从订阅登录的结果推断。
 
-当前 PDF 翻译后端只允许输入 `none`、`low`、`medium`、`high`、`xhigh`、`max`，
-不接受 `ultra`；但具体模型可能只支持其中一部分，不受支持的模型/强度组合会报错，
-不会自动降级。具体可用模型仍取决于账号套餐、工作区策略、地区和 OpenAI 的灰度发布。
-最新信息请以 [OpenAI 官方模型目录](https://developers.openai.com/api/docs/models)、
-[GPT-6 Astra 官方页面](https://developers.openai.com/api/docs/models/gpt-6-astra)、
-[Codex 官方模型说明](https://learn.chatgpt.com/docs/models)和
-[Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)为准。
-本程序调用的是 Codex CLI；ChatGPT/Codex 订阅登录不会变成 OpenAI API Key，直接
-调用 API 仍是另一套计费。
+### `.5.4` 内置 CLI 与新版模型
+
+**`.5.4` 已将内置 CLI 更新为官方稳定版 `0.163.0`；保持 `CODEX_BIN=codex` 即可使用。** `.5.3` 及此前安装包捆绑的 CLI 为 `0.145.0`。官方 [2026-09-23 更新记录](https://learn.chatgpt.com/docs/changelog)记载 CLI **0.156.1** 加入 GPT-6 Sol/Luna 模型目录；应使用当前官方 CLI，并核对账户可用性。这个记录不代表任意账户仅升级到某个版本就一定获得权限。
+
+2026-10-18 的同机短文本对照结果：
+
+| 调用程序 | 模型 / 强度 | 结果 |
+| --- | --- | --- |
+| 安装包内 CLI `0.145.0` | `gpt-6-luna` / `max` | HTTP 400：`The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.` |
+| `.5.4` 使用的官方稳定版 CLI `0.163.0` | 同一账号、同一模型 / 强度 | 成功返回中文译文。 |
+
+这证明该环境的问题与所调用的旧 CLI 有关，不能将报错解释为“GPT-6 Luna 普遍不支持 Codex 订阅登录”或“Luna 不支持 `max`”。表格是短文本兼容性对照；PDF 第一页及队列验证范围见发行说明。
+
+升级及排查方法：
+
+1. 优先覆盖安装 `.5.4`，`CODEX_BIN` 保持 `codex`。若仍使用 `.5.3` 或更早版本，可改填已安装新版 `codex.exe` 的完整路径，并用该路径执行 `--version` 确认。仅升级 `PATH` 中的 Codex 不会替换优先级更高的包内旧版本。
+2. 保持 `CODEX_MODEL=gpt-6-luna`，按需要选择 `high` 或 `max`；先用短文本或第一页验证。不要为了绕过模型拒绝而把模型名改为简称。
+3. 若当前 CLI 仍返回拒绝，继续核对登录账号、套餐、工作区权限和原始错误。旧版界面的 `RetryError` 只是重试异常的外层包装；`.5.4` 会直接展示结构化模型/权限拒绝并停止无效重试。
+
+此处设置属于 **Codex 服务**。另一个 **ChatGPT 聊天服务** 从当前网页读取模型选项，不能照抄这里的 CLI 模型 ID。
 
 科学 PDF 文档翻译及双语对照工具
 
@@ -177,9 +182,9 @@ Codex 增强版的问题请提交到[本 fork 的 GitHub Issues](https://github.
 <details>
   <summary>2. Windows exe</summary>
 
-1. 从[本 fork 最新 Release](https://github.com/phxumy/PDFMathTranslate/releases/latest)下载 `PDFMathTranslate-Codex-win64-with-assets.zip`。
+1. 从[本 fork 最新 Release](https://github.com/phxumy/PDFMathTranslate/releases/latest)下载 `PDFMathTranslate-Codex-Setup-win64.exe`。
 
-2. 完整解压；使用 Codex 前双击 `Login-Codex.cmd` 完成登录。
+2. 运行 EXE 安装；使用 Codex 前在软件中完成账户登录。
 
 3. 双击 `PDFMathTranslate-Codex.exe`。包内的 `pdf2zh.exe` 仍用于经典浏览器 WebUI 和命令行。
 

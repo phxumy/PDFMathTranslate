@@ -58,6 +58,12 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.5.4
+
+- Bundle official stable Codex CLI 0.163.0 so the default executable supports current models such as `gpt-6-luna`. The CLI archive is pinned by SHA-256 in the release workflow.
+- Select multiple PDFs and translate them in displayed order. Completed mono/bilingual downloads remain available if a later file fails. Stop halts the queue; retrying the same files/settings in the current session skips completed outputs unless Ignore cache is selected.
+- Show structured model/access rejections directly instead of retrying them into an opaque `RetryError`. The model documentation now distinguishes official IDs, CLI versions and account availability.
+
 ### New in v1.9.11-codex.5.3
 
 - Continue ChatGPT translations when the website virtualizes older turns, including the sixth batch and later. Recover an existing pending batch before sending newly planned work.
@@ -92,74 +98,33 @@ translation provider you select; Codex requests are sent to OpenAI according to
 the account that signs in. See the [official OpenAI Codex CLI documentation](https://developers.openai.com/codex/cli)
 for account and sign-in details.
 
-### Codex fields and model IDs
+### Codex fields and model IDs (checked October 18, 2026)
 
-Field defaults below apply to codex.5. The model table records the catalog
-checked on September 5, 2026; the account's current availability may differ.
+These field rules apply to desktop releases codex.5 through codex.5.4. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
 
-The Codex fields in the WebUI map to the bundled `codex exec` command as
-follows:
+| Field | Behavior |
+| --- | --- |
+| `CODEX_BIN` | Blank or `codex` prefers the bundled CLI before `CODEX_CLI_PATH`, `PATH`, and the desktop CLI. To use another installed version, enter its full executable path and check that exact binary with `--version`. |
+| `CODEX_PROFILE` | Usually blank. A selected profile and configuration handling depend on the chosen CLI; the supported fast path ignores user configuration and rules. |
+| `CODEX_MODEL` | Exact model ID, or blank to omit `--model`. Automatic selection is not pinned to a model or synchronized with the desktop model picker. |
+| `CODEX_REASONING_EFFORT` | Defaults to `low`, including an empty field. It explicitly overrides the CLI/profile reasoning default. The backend accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`, but not `ultra`. |
+| `CODEX_TIMEOUT` | Defaults to 120 seconds. Increasing it cannot resolve an HTTP 400 model rejection. |
 
-| Field | Recommended value | Exact behavior when blank |
-| --- | --- | --- |
-| `CODEX_BIN` | Keep the fresh Release default, `codex`. This means automatic discovery and selects the bundled CLI first. If the field instead shows a full path ending in `codex-cli/x86_64-pc-windows-msvc/bin/codex.exe` inside the extracted Release, that is also correct. You may enter a full path to another `codex.exe`; do not enter a directory. | Treated as `codex`; the app searches the portable package, `CODEX_CLI_PATH`, `PATH`, and Codex Desktop in that order. An explicit missing path is an error and is not silently replaced. |
-| `CODEX_PROFILE` | Usually leave blank. To use a profile, enter only its exact name, such as `translation`, for `$CODEX_HOME/translation.config.toml`. | No `--profile` is passed. With the bundled CLI, the normal fast path also ignores user `config.toml` and user rules. Whitespace is not a blank value. |
-| `CODEX_MODEL` | Leave blank for automatic selection, or enter an exact model ID from the table below. | No `--model` is passed. With no profile, Codex selects the recommended model for the CLI/account rather than inheriting the model selected in Codex Desktop or user `config.toml`. On the bundled CLI 0.145.0 catalog checked on this date, that is normally `gpt-5.6-sol`, but it is not pinned and can change. With a profile, its/base configuration may supply the model. |
-| `CODEX_REASONING_EFFORT` | `low` (default), or a value supported by the selected model. | Starting in codex.5, blank means `low`; it overrides the CLI/model/profile default. Explicit `none` is only suitable for models that support it. |
-| `CODEX_TIMEOUT` | `120`, or a larger number of seconds for slow/long requests. | Treated as `120` seconds. |
+| Model | Exact ID |
+| --- | --- |
+| GPT-6 Luna | `gpt-6-luna` |
+| GPT-6.1 Sol | `gpt-6.1-sol` |
+| GPT-6 Sol | `gpt-6-sol` |
+| GPT-6 Astra | `gpt-6-astra` |
+| Previous-generation GPT-5.6 Sol / Terra / Luna | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` |
 
-In short, blank `CODEX_MODEL` and blank `CODEX_REASONING_EFFORT` behave
-differently: the model is delegated to Codex, while reasoning is explicitly
-forced to `low`. If a profile is selected, an explicit model overrides the
-profile model, and the reasoning field (including blank -> `low`) overrides
-the profile reasoning setting.
+GPT-6 Luna is an official Codex model and supports reasoning through `max`. Use the full hyphenated ID, not `gpt6luna` or `luna`. See the [Luna model specification](https://developers.openai.com/api/docs/models/gpt-6-luna) and [Codex model availability](https://learn.chatgpt.com/docs/models). GPT-6 Astra does not support explicit `none`.
 
-The desktop automatic-model configuration migrates the old `none` default to
-`low`, because current automatic models can reject `none`. Explicit model and
-profile choices retain their selected reasoning value.
+**codex.5.4 bundles official stable CLI 0.163.0; keep `CODEX_BIN=codex` to use it.** Earlier codex.5.3 installers bundle 0.145.0. The [official September 23 changelog](https://learn.chatgpt.com/docs/changelog) records the Sol/Luna catalog addition in CLI 0.156.1. A local comparison on October 18 found that 0.145.0 rejected `gpt-6-luna` + `max` with HTTP 400, while official stable 0.163.0 translated a short text successfully with the same account and settings. This identifies the older CLI as a compatibility issue in that environment, rather than proving Luna or Max unavailable in general. The compatibility comparison uses a short request; PDF and queue checks are described in the release notes.
 
-`CODEX_BIN` is only an executable path. It contains no developer account,
-allowance, or credentials; every user must sign in with their own account.
+On codex.5.3 or earlier, upgrade the application to codex.5.4 or point `CODEX_BIN` to a current official CLI. Updating the CLI on `PATH` alone does not override the bundled executable. Check account/workspace access if the current CLI still rejects the request. `RetryError` is a retry wrapper, not the underlying reason. Starting with codex.5.4, structured model/access rejections stop immediately with their original message.
 
-`CODEX_MODEL` is passed verbatim to `codex exec --model`. It expects an exact
-model ID, not a short nickname.
-
-| Official name | Exact `CODEX_MODEL` value | Intended use |
-| --- | --- | --- |
-| GPT-6 Astra | `gpt-6-astra` | A model for difficult end-to-end work. Availability is account-dependent. Its documented efforts are `low`, `medium`, `high`, `xhigh`, and `max`; use `low` or a higher supported value. |
-| GPT-5.6 Sol | `gpt-5.6-sol` | Flagship model for complex reasoning and high-quality work. The moving alias `gpt-5.6` currently routes to Sol. |
-| GPT-5.6 Terra | `gpt-5.6-terra` | Balanced intelligence and cost for everyday work. |
-| GPT-5.6 Luna | `gpt-5.6-luna` | Fast, cost-efficient model for repeatable or high-volume work such as translation. |
-| GPT-5.5 | `gpt-5.5` | Previous-generation model for coding and general work; still listed by the current Codex client catalog. |
-| GPT-5.4 | `gpt-5.4` | Legacy model still visible in some client catalogs. Official Codex guidance says it retired for ChatGPT sign-in on August 31, 2026. |
-| GPT-5.4 Mini | `gpt-5.4-mini` | Legacy smaller model still visible in some client catalogs. Official Codex guidance says it retired for ChatGPT sign-in on August 31, 2026. |
-| GPT-5.3 Codex Spark | `gpt-5.3-codex-spark` | Ultra-fast coding model listed by the current Codex client catalog. This is not the deprecated `gpt-5.3-codex` ID. |
-
-For example, `gpt-5.6-luna` with `CODEX_REASONING_EFFORT=max` requests **Luna
-with Max reasoning**. The lower-case suffix is the correct spelling. Do not enter
-only `luna`, `terra`, or `sol`: those short labels are not documented model IDs,
-and this fork does not expand them or silently fall back to another model.
-
-The model picker and the local model catalog can include legacy entries during
-client or service rollouts. The server still checks the signed-in account for
-every request. If an ID is misspelled, retired, or unavailable to that account,
-Codex CLI fails the request; the translator may retry the same ID and can
-eventually show an error or preserve the source text, but it never switches to
-another model automatically. For ChatGPT-authenticated Codex, OpenAI recommends
-replacing `gpt-5.4` with `gpt-5.6-terra` and `gpt-5.4-mini` with
-`gpt-5.6-luna`. API-key-authenticated Codex has separate model availability.
-
-This release validates reasoning values `none`, `low`, `medium`, `high`,
-`xhigh`, and `max`; it does not accept `ultra` in the PDF translation backend.
-Each model supports only a subset, and an unsupported model/effort combination
-fails rather than falling back. In particular, do not combine GPT-6 Astra with
-explicit `none`. Model availability still depends on the signed-in plan, workspace
-policy, region, and OpenAI rollout. See the [official OpenAI model catalog](https://developers.openai.com/api/docs/models),
-[GPT-6 Astra model page](https://developers.openai.com/api/docs/models/gpt-6-astra),
-the [official Codex models guide](https://learn.chatgpt.com/docs/models), and
-[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
-This program invokes Codex CLI; it does not turn a ChatGPT subscription into an
-OpenAI API key, and direct API usage is billed separately.
+For ChatGPT sign-in, the old `gpt-5.4` / `gpt-5.4-mini`, Spark, and `gpt-5.5` entries have retired; consult the linked Codex guide instead of relying on an old local catalog. API-key availability and billing follow separate rules. The **ChatGPT chat** service uses its web model picker, not these CLI IDs.
 
 PDF scientific paper translation and bilingual comparison.
 

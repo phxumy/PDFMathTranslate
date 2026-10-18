@@ -1,3 +1,19 @@
+## v1.9.11-codex.5.4 — 更新 Codex CLI 与多 PDF 顺序队列
+
+内置 Codex CLI 从 `0.145.0` 更新至官方稳定版 `0.163.0`，解决旧 CLI 调用 `gpt-6-luna` 时返回 HTTP 400 的兼容问题。保持 `CODEX_BIN=codex` 即使用新版本，模型 ID 和推理强度仍由用户明确选择。
+
+- 支持一次选择多个 PDF，按文件列表顺序逐个翻译。语言、页码范围、服务、模型和推理强度应用于整条队列；每份 PDF 内部仍遵守所选服务的并行设置。
+- 显示当前文件、页码进度和队列状态，保留所有已完成文件的译文及双语下载。失败时暂停后续文件；“停止队列”停止当前任务并阻止下一份开始。
+- 同一窗口中重试相同队列和设置会跳过已完成且文件仍存在的结果；修改文件或设置、删除输出、或选择 Ignore cache 会重新处理。跨重启可重新选择文件并复用翻译缓存。
+- 对结构化的模型、参数或权限拒绝直接显示 HTTP 状态和原始原因，停止无效重试，避免只显示 `RetryError`。临时网络故障仍保留重试。
+- 更新中英文模型 ID 说明，补充 GPT-6 Luna / Sol / GPT-6.1 Sol、有效推理强度、已退役型号及 CLI 版本区别。
+
+CLI 官方压缩包固定 SHA-256：`901028b285614a9974f431f9d9f6534b3e5ed8d62eba4ba64f4762c00f040522`。验证覆盖 `gpt-6-luna + max`、真实 PDF 第一页队列、完成后重复运行不新增请求、停止/失败/恢复，以及安装与覆盖升级。
+
+本次真实 PDF 验证范围为所选文件的第一页；不声称所有页已经验证。升级保留账户、配置、缓存和已有译文。原来显式填写其他 CLI 路径的用户仍使用该路径；改为 `codex` 才会选择包内版本。
+
+This release bundles official stable Codex CLI 0.163.0 and adds an ordered multi-PDF queue with per-file progress, retained downloads and resume in the current session. Permanent structured model/access rejections now stop with their original reason.
+
 ## v1.9.11-codex.5.3 — 修复第六批中断、续传与正文漏译
 
 修复 ChatGPT 连续翻译几批后反复提示“同一 PDF 的上一批尚未确认完成”的问题，以及 Nature 论文正文被误保留为英文的问题。
