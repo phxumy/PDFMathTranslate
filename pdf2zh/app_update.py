@@ -21,7 +21,7 @@ from pdf2zh.version import APP_VERSION, REPOSITORY, REPOSITORY_URL
 INSTALLER_NAME = "PDFMathTranslate-Codex-Setup-win64.exe"
 CHECKSUM_NAME = "SHA256SUMS.txt"
 MAX_INSTALLER_BYTES = 2 * 1024**3
-_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)-codex\.(\d+)$")
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)-codex\.(\d+)(?:\.(\d+))?$")
 
 
 class UpdateError(RuntimeError):
@@ -32,7 +32,7 @@ def version_key(version: str) -> tuple[int, ...]:
     match = _VERSION.fullmatch(version)
     if not match:
         raise UpdateError("发行版本号格式不受支持。")
-    return tuple(map(int, match.groups()))
+    return tuple(int(part or 0) for part in match.groups())
 
 
 def _release_url(url: str, tag: str, name: str) -> bool:

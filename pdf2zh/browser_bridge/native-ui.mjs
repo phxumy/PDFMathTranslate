@@ -82,6 +82,35 @@ export function createNativePage(client, { timeoutMs = 9000, modeTimeoutMs = 300
     },
     async press(key, selector) {
       if (!(key in KEY_CODES)) throw coded('INVALID_KEY', '不支持的浏览器按键。');
+      const menuKey = selector === '[data-pdf2zh-native-slider="owner"]' && ['ArrowLeft', 'ArrowRight'].includes(key)
+        || !selector && key === 'Escape';
+      if (menuKey && await page.evaluate(() => document.visibilityState === 'hidden')) {
+        // Headed Chrome can drop CDP keyboard input on a background PDF tab.
+        // Dispatch only slider movement or menu dismissal in the bound target;
+        // the slider reader still verifies its actual position and label.
+        const dispatched = await page.evaluate(({ key, keyCode, selector, menus }) => {
+          const excluded = 'article,[data-message-author-role],[data-chatgpt-search-unit-key],[inert],[data-active="false"],[hidden],[aria-hidden="true"],input,textarea,[contenteditable="true"],[data-testid="send-button"],[data-testid*="stop-button"]';
+          const visible = node => {
+            const rect = node.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== 'hidden' && !node.closest(excluded);
+          };
+          const roots = [...document.querySelectorAll(menus)].filter(visible);
+          const node = selector
+            ? [...document.querySelectorAll(selector)].find(candidate => visible(candidate) && roots.includes(candidate.closest(menus)))
+            : roots.at(-1);
+          if (!node) return !selector;
+          if (node.disabled || node.closest('[aria-disabled="true"]')) return false;
+          if (selector && (!node.matches('[role="menuitem"]') || !node.querySelector('[data-model-reasoning-effort-slider],[data-model-picker-power-slider]') || node.querySelector('input,textarea,[contenteditable="true"],[data-testid="send-button"],[data-testid*="stop-button"]'))) return false;
+          if (selector) node.focus();
+          const detail = { key, code: key, keyCode, which: keyCode, bubbles: true, cancelable: true, composed: true };
+          node.dispatchEvent(new KeyboardEvent('keydown', detail));
+          node.dispatchEvent(new KeyboardEvent('keyup', detail));
+          return true;
+        }, { key, keyCode: KEY_CODES[key], selector, menus: MENU });
+        if (!dispatched) throw coded('CONTROL_UNAVAILABLE', '后台标签页的推理强度菜单控件不可用。');
+        page.interactionCounts.keyPresses++;
+        return;
+      }
       if (selector) {
         const focused = await page.evaluate(selector => {
           const node = document.querySelector(selector);

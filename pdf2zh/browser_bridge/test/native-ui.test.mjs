@@ -246,6 +246,43 @@ test('native power slider reads semantic view toggle and visible model rows, ret
   });
 });
 
+test('native hidden-tab slider keys and Escape stay in its menu when CDP keyboard input is ignored', { skip: !chrome }, async () => {
+  await fixture(powerMenuFixture(), async (page, source) => {
+    // Headless Chrome reports background targets visible. Model the headed
+    // background state and the dropped CDP keys observed in a fresh PDF tab.
+    await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { get: () => 'hidden' }));
+    const nativeKeys = [];
+    page.client.Input = { dispatchKeyEvent: async event => { nativeKeys.push(event.key); } };
+    page.client.Page = { bringToFront: () => assert.fail('Reading a background slider must not activate its tab') };
+    page.timeoutMs = 900;
+    const foreground = await (await source.context().browser().newContext()).newPage();
+    await foreground.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<textarea id="draft">Keep this draft</textarea><script>window.keys=[];document.onkeydown=e=>keys.push(e.key)</script>' }));
+    await foreground.goto('https://chatgpt.com/foreground-fixture');
+    await foreground.locator('#draft').focus();
+    const before = await foreground.evaluate(() => ({ focus: document.hasFocus(), active: document.activeElement.id, draft: document.querySelector('#draft').value }));
+    const choices = await readChoices(page, 'effort');
+    assert.deepEqual(choices.options.map(item => item.value), ['即时', '标准', '高']);
+    assert.equal(choices.selected, '高');
+    assert.equal(await page.evaluate(() => document.querySelector('#power-menu').hidden), true);
+    assert.equal((await readChoices(page, 'effort', '标准')).selected, '标准');
+    assert.deepEqual(nativeKeys, []);
+    assert.deepEqual(await foreground.evaluate(() => window.keys), []);
+    assert.deepEqual(await foreground.evaluate(() => ({ focus: document.hasFocus(), active: document.activeElement.id, draft: document.querySelector('#draft').value })), before);
+    await page.evaluate(() => {
+      document.querySelector('#power-menu').hidden = false;
+      document.querySelector('[data-reasoning-slider]').setAttribute('aria-disabled', 'true');
+    });
+    await assert.rejects(() => page.press('ArrowRight', '[data-pdf2zh-native-slider="owner"]'), error => error.code === 'CONTROL_UNAVAILABLE');
+    await page.evaluate(() => {
+      document.querySelector('[data-reasoning-slider]').removeAttribute('data-pdf2zh-native-slider');
+      document.body.insertAdjacentHTML('afterbegin', '<article><div role="menu"><div role="menuitem" data-pdf2zh-native-slider="owner"><div data-model-picker-power-slider>Quoted control</div></div></div></article>');
+    });
+    await assert.rejects(() => page.press('ArrowRight', '[data-pdf2zh-native-slider="owner"]'), error => error.code === 'CONTROL_UNAVAILABLE');
+    assert.equal(await page.evaluate(() => document.querySelector('#simple [role="slider"]').getAttribute('aria-valuenow')), '1');
+    assert.deepEqual(nativeKeys, []);
+  });
+});
+
 test('effort keys normalize only the four known Simplified and Traditional label pairs', () => {
   for (const [simple, traditional] of [['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度']]) {
     assert.equal(effortKey(simple), traditional);

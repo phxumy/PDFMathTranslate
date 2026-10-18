@@ -53,8 +53,31 @@ class Response:
 
 def test_version_order_is_numeric_and_rejects_other_projects():
     assert version_key("v1.9.11-codex.10") > version_key("v1.9.11-codex.9")
+    assert version_key("v1.9.11-codex.5.1") > version_key("v1.9.11-codex.5")
+    assert version_key("v1.9.11-codex.5.10") > version_key("v1.9.11-codex.5.9")
+    assert version_key("v1.9.11-codex.6") > version_key("v1.9.11-codex.5.99")
+    assert version_key("v1.9.11-codex.5.0") == version_key("v1.9.11-codex.5")
     with pytest.raises(UpdateError):
         version_key("../../other.exe")
+    with pytest.raises(UpdateError):
+        version_key("v1.9.11-codex.5.1.2")
+
+
+def test_patch_release_is_detected_from_a_base_release_without_downloading():
+    manager = UpdateManager()
+    with (
+        patch("pdf2zh.app_update.APP_VERSION", "v1.9.11-codex.5"),
+        patch(
+            "pdf2zh.app_update._verified_response",
+            return_value=Response(data=release_data("v1.9.11-codex.5.1")),
+        ) as get,
+        patch("pdf2zh.app_update.subprocess.Popen") as popen,
+    ):
+        result = manager.check()
+    assert result["available"] is True
+    assert result["latest_version"] == "v1.9.11-codex.5.1"
+    get.assert_called_once()
+    popen.assert_not_called()
 
 
 def test_release_requires_installer_and_checksums_from_exact_repository():

@@ -7,10 +7,12 @@ The final release contains `PDFMathTranslate-Codex-Setup-win64.exe` and `SHA256S
 For a prepared, clean staging directory on Windows:
 
 ```powershell
-.\script\build-windows-installer.ps1 -ReleaseRoot C:\staging\PDFMathTranslate-Codex -ReleaseTag v1.9.11-codex.5 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+.\script\build-windows-installer.ps1 -ReleaseRoot C:\staging\PDFMathTranslate-Codex -ReleaseTag v1.9.11-codex.5.1 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 ```
 
 Do not build a release from a user's working application folder. Copy only clean dependency packages, tracked project files, offline assets and required license files. Never bundle `.codex`, `auth.json`, environment files, translation caches, or PDFs.
+
+Release tags may include one hotfix component, such as `v1.9.11-codex.5.1`. The build script maps the Codex revision and hotfix to the fourth Windows version component (`revision * 100 + hotfix`), so this tag has file version `1.9.11.501`. Hotfix values are limited to 0–99; every Windows component must fit 0–65535.
 
 An isolated install can be tested with `/VERYSILENT /NORESTART /NOICONS /TESTMODE=1 /DIR="C:\isolated-test"`. Test mode skips shortcuts, Add/Remove Programs registration and automatic launch. Use a new empty directory, never a user's application directory. Normal installs use a stable AppId and the current-user Programs directory; upgrades reuse the existing installation location.
 

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string] $ReleaseRoot,
-    [string] $ReleaseTag = "v1.9.11-codex.5",
+    [string] $ReleaseTag = "v1.9.11-codex.5.1",
     [string] $OutputRoot,
     [string] $Compiler
 )
@@ -10,7 +10,19 @@ if (-not $OutputRoot) { $OutputRoot = Join-Path $repositoryRoot "release-dist" }
 $ReleaseRoot = (Resolve-Path -LiteralPath $ReleaseRoot).Path
 New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
 $OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
-if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+-codex\.\d+$') { throw "Invalid release tag." }
+$versionMatch = [regex]::Match($ReleaseTag, '^v(\d+)\.(\d+)\.(\d+)-codex\.(\d+)(?:\.(\d+))?$')
+if (-not $versionMatch.Success) { throw "Invalid release tag." }
+$hotfix = if ($versionMatch.Groups[5].Success) { [int]$versionMatch.Groups[5].Value } else { 0 }
+$versionParts = @(
+    [int]$versionMatch.Groups[1].Value
+    [int]$versionMatch.Groups[2].Value
+    [int]$versionMatch.Groups[3].Value
+    ([long]$versionMatch.Groups[4].Value * 100 + $hotfix)
+)
+if ($hotfix -gt 99 -or @($versionParts | Where-Object { $_ -gt 65535 }).Count) {
+    throw "Release version exceeds the Windows four-part version range."
+}
+$fileVersion = $versionParts -join '.'
 if (-not $Compiler) {
     $candidate = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if ($candidate) { $Compiler = $candidate.Source }
@@ -32,7 +44,7 @@ $forbidden = @(Get-ChildItem -LiteralPath $ReleaseRoot -Recurse -Force | Where-O
 })
 if ($forbidden.Count -gt 0) { throw "Private data or user documents found in release staging." }
 $installerSource = Join-Path $repositoryRoot "packaging\windows-installer.iss"
-& $Compiler /Qp "/DReleaseRoot=$ReleaseRoot" "/DReleaseTag=$ReleaseTag" "/DOutputRoot=$OutputRoot" $installerSource
+& $Compiler /Qp "/DReleaseRoot=$ReleaseRoot" "/DReleaseTag=$ReleaseTag" "/DFileVersion=$fileVersion" "/DOutputRoot=$OutputRoot" $installerSource
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed with exit code $LASTEXITCODE." }
 $installer = Join-Path $OutputRoot "PDFMathTranslate-Codex-Setup-win64.exe"
 if ((Get-Item -LiteralPath $installer).Length -ge 2GB) { throw "Installer exceeds GitHub's asset size limit." }

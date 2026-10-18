@@ -3,7 +3,10 @@
   #error ReleaseRoot must name the clean application staging directory
 #endif
 #ifndef ReleaseTag
-  #define ReleaseTag "v1.9.11-codex.5"
+  #define ReleaseTag "v1.9.11-codex.5.1"
+#endif
+#ifndef FileVersion
+  #error FileVersion must be supplied by script/build-windows-installer.ps1
 #endif
 #ifndef OutputRoot
   #define OutputRoot "..\release-dist"
@@ -13,7 +16,7 @@
 AppId={{FEAEBBB2-BD3B-47D0-9E8E-7D836479A9B2}
 AppName=PDFMathTranslate Codex
 AppVersion={#ReleaseTag}
-VersionInfoVersion={#StringChange(StringChange(ReleaseTag, "v", ""), "-codex", "")}
+VersionInfoVersion={#FileVersion}
 AppPublisher=phxumy (unofficial community edition)
 AppPublisherURL=https://github.com/phxumy/PDFMathTranslate
 AppSupportURL=https://github.com/phxumy/PDFMathTranslate/issues

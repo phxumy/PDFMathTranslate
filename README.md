@@ -58,6 +58,12 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.5.1
+
+- Fix ChatGPT reasoning-effort selection in background PDF tabs. Chrome could ignore the slider's keyboard input even though the browser connection and model list were available, causing a false synchronization error before translation started.
+- Keep slider movement and menu dismissal inside the translation tab, with the existing position, label, model, and conversation checks.
+- Support hotfix version tags in release builds and future update checks. **Users on codex.5 should download the new EXE manually**, because that version's updater does not recognize `.5.1` tags. Install over the existing application to retain settings and documents.
+
 ### New in v1.9.11-codex.5
 
 - In-app Codex account status, browser/device-code login, and login cancellation.

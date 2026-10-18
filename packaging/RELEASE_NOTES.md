@@ -1,3 +1,18 @@
+## v1.9.11-codex.5.1 — 修复 ChatGPT 后台翻译标签页的推理强度选择
+
+修复 ChatGPT 已连接、模型可正常读取，但点击翻译后提示“网页推理强度的位置与文字标签尚未同步”的问题。
+
+- 新建 PDF 翻译标签页位于后台时，Chrome 可能忽略发给滑块的 CDP 方向键，导致档位一直停在 High，翻译在发送前被同步校验中止。本版在后台标签页内对已确认的推理强度菜单分发方向键和 Escape，完成档位读取、选择与菜单关闭。
+- 保留实际滑块位置、文字标签、模型和聊天归属的校验；后台菜单操作不会切换前台标签页或操作其他输入框。
+- 增加回归测试，覆盖后台 CDP 按键无效、档位恢复、菜单关闭、禁用及引用控件拒绝，以及前台草稿保持。
+- 发布构建、Windows 安装器版本字段与更新检查支持 `.5.1` 形式的补丁版本号，并按数字比较后续版本。
+
+**codex.5 用户请从本页手动下载 `PDFMathTranslate-Codex-Setup-win64.exe` 并覆盖安装。旧版更新器不识别 `.5.1` 版本号，不能依靠 codex.5 的“检查更新”完成这次升级。**
+
+关闭正在运行的翻译软件，运行 EXE 安装到原位置，即可保留设置、账号、翻译缓存和译文工作区。启动新版后，在 ChatGPT 服务中连接已登录的 Chrome，刷新模型和推理强度，再对原 PDF 点击翻译。同页 `SHA256SUMS.txt` 提供安装包完整性校验。
+
+This hotfix fixes reasoning-effort selection in background ChatGPT PDF tabs, where Chrome could drop CDP keyboard input despite a working browser connection. It also adds hotfix version support to release builds and the updater. Users of codex.5 must manually download and install this EXE; the older updater cannot parse the `.5.1` tag. Existing settings and documents are preserved.
+
 ## v1.9.11-codex.5 — 账号登录、并行翻译、实时预览与 EXE 更新
 
 本版开始提供 Windows x64 EXE 安装程序：下载 `PDFMathTranslate-Codex-Setup-win64.exe` 并安装，无需手动解压运行。
