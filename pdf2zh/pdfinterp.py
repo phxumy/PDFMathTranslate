@@ -1,4 +1,5 @@
 import logging
+from asyncio import CancelledError
 from typing import Any, Dict, Optional, Sequence, Tuple, cast
 import numpy as np
 
@@ -37,6 +38,9 @@ from pdfminer.utils import (
     mult_matrix,
     apply_matrix_pt,
 )
+
+from pdf2zh.codex_errors import CodexPermanentError
+from pdf2zh.translator import TranslationAbortedError
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +297,12 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                 self.obj_patch[self.xobjmap[xobjid].objid] = (
                     f"q {ops_base}Q {a} {b} {c} {d} {e} {f} cm {ops_new}"
                 )
+            except (CancelledError, TranslationAbortedError, CodexPermanentError):
+                # end_figure translates text inside Form XObjects, including
+                # journal mastheads. A pending browser request must stop the
+                # page here, before later regions can hide the original error
+                # behind TASK_PENDING_BATCH or produce an incomplete page.
+                raise
             except Exception:
                 pass
         elif subtype is LITERAL_IMAGE and "Width" in xobj and "Height" in xobj:
