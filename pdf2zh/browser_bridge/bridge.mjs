@@ -60,6 +60,13 @@ function identity(journal) {
 function conversationURL(value) {
   try { const url = new URL(value); return url.origin === 'https://chatgpt.com' && /^\/c\/[a-zA-Z0-9-]+$/.test(url.pathname) && !url.search && !url.hash; } catch { return false; }
 }
+function localConversationId(value) {
+  try {
+    const url = new URL(value);
+    const id = decodeURIComponent(url.pathname.slice(3));
+    return url.origin === 'https://chatgpt.com' && !url.search && !url.hash && url.pathname.startsWith('/c/') && /^local-chatgpt:[a-zA-Z0-9-]+$/.test(id) ? id : null;
+  } catch { return null; }
+}
 async function evaluation(runtime, expression) {
   const result = await runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
   if (result.exceptionDetails) throw coded('PAGE_SCRIPT_ERROR', 'ChatGPT 页面状态读取失败。');
@@ -241,7 +248,7 @@ export async function readAssistantCompletionDiagnostic(runtime, turn, journal) 
     return { status: 'request_identity_unverified' };
   }
   if (turn.shell) {
-    const current = await shellSnapshot(runtime);
+    const current = await shellSnapshot(runtime, undefined, journal.local_conversation_id);
     if (!current || current.url !== turn.url || current.messageId !== turn.messageId || current.text !== turn.text || JSON.stringify(current.userIds) !== JSON.stringify(turn.userIds)) return { status: 'identity_changed' };
     return { status: 'inspected', layout: 'browser-shell', turn_count: current.turnCount,
       assistant_associated: !!current.assistant, assistant_complete: !!current.assistant?.complete,
@@ -398,7 +405,7 @@ export function textSubmissionInput(input) {
 export function createBridge(overrides = {}) {
   const deps = { discover: browserEndpoint, attach: connectToRemoteChromeTarget, scopedAttach: connectOwnedPage, ui: nativeUI,
     submit: async (options, ...args) => (await shellSnapshot(options.runtime)) ? shellSubmit(options, ...args) : submitPrompt(options, ...args),
-    waitAnswer: async (runtime, timeout, log, baseline, conversationId) => (await shellSnapshot(runtime)) ? shellWaitAnswer(runtime, timeout, baseline, conversationId) : waitForAssistantResponse(runtime, timeout, log, baseline, conversationId),
+    waitAnswer: async (runtime, timeout, log, baseline, conversationId, submittedTurn) => (submittedTurn?.shell || await shellSnapshot(runtime)) ? shellWaitAnswer(runtime, timeout, baseline, conversationId, submittedTurn) : waitForAssistantResponse(runtime, timeout, log, baseline, conversationId),
     promptReady: promptReadyForLayout,
     readUserIds: async (runtime, timeout) => (await shellSnapshot(runtime))?.userIds ?? readUserMessageIds(runtime, timeout),
     readFingerprint: async (runtime, previous, timeout) => (await shellSnapshot(runtime)) ? shellFingerprint(runtime, previous, timeout) : readSubmittedPromptFingerprint(runtime, previous, timeout),
@@ -571,6 +578,7 @@ export function createBridge(overrides = {}) {
     if (task.conversation_url && journal.conversation_url !== task.conversation_url) throw coded('TASK_CONVERSATION_MISMATCH', '本批会话与 PDF 已保存会话不一致，不能接受回答。');
     Object.assign(task, { target_id: journal.target_id, browser_ws: journal.browser_ws,
       conversation_url: journal.conversation_url || task.conversation_url,
+      local_conversation_id: journal.local_conversation_id || task.local_conversation_id || null,
       last_user_id: journal.submitted_user_id || null, last_user_fingerprint: journal.submitted_prompt_hash || null,
       last_user_ids: journal.accepted_user_ids || null, last_user_count: journal.submitted_user_count ?? null,
       last_request_dir: request.request_dir, pending_request_dir: null });
@@ -611,6 +619,8 @@ export function createBridge(overrides = {}) {
       matched_text_source: hash(normalizedPrompt(turn.text)) === journal.prompt_normalized_hash ? 'textContent' :
         hash(normalizedPrompt(turn.renderedText)) === journal.prompt_normalized_hash ? 'innerText' :
           hash(normalizedPrompt(turn.structuredText)) === journal.prompt_normalized_hash ? 'domStructure' : 'domInlineCode' });
+    const localId = localConversationId(turn.url) || (/^local-chatgpt:[a-zA-Z0-9-]+$/.test(turn.localConversationId || '') ? turn.localConversationId : null);
+    if (localId) journal.local_conversation_id = localId;
     if (conversationURL(turn.url)) journal.conversation_url = turn.url;
     await writeJson(path.join(request.request_dir, 'journal.json'), journal);
   }
@@ -690,16 +700,20 @@ export function createBridge(overrides = {}) {
       normalizedTurnMatches(before, journal) && (!previousUserIds(journal) || newTurnMatchesBaseline(before, journal));
     if (!matches) throw coded('RECOVERY_IDENTITY_UNVERIFIED', '无法确认该页面最后一条请求属于本批次，已暂停；不会重发或读取其他会话的回答。');
     if (conversationURL(before.url)) journal.conversation_url = before.url;
+    if (!journal.local_conversation_id) journal.local_conversation_id = localConversationId(before.url) ||
+      (/^local-chatgpt:[a-zA-Z0-9-]+$/.test(before.localConversationId || '') ? before.localConversationId : null);
     await save();
     const conversationId = journal.conversation_url?.split('/').at(-1);
-    const answer = await deps.waitAnswer(Runtime, (request.timeout_seconds || 900) * 1000, quiet, journal.baseline_turns ?? 0, conversationId);
+    const answer = await deps.waitAnswer(Runtime, (request.timeout_seconds || 900) * 1000, quiet, journal.baseline_turns ?? 0, conversationId,
+      { ...before, localConversationId: journal.local_conversation_id || localConversationId(before.url) });
     const after = await deps.userTurn(Runtime);
     if (after.messageId !== before.messageId || browserPromptFingerprint(after.text, after.messageId) !== journal.submitted_prompt_hash ||
         after.count !== before.count || (journal.conversation_url && after.url !== journal.conversation_url)) {
       throw coded('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时页面会话发生变化，已暂停。');
     }
     if (!conversationURL(after.url)) throw coded('RECOVERY_NOT_READY', '本批回答已出现，但网页尚未给出可保存的会话地址；已暂停，稍后恢复原批次。');
-    Object.assign(journal, { conversation_url: after.url, submitted_user_id: after.messageId, submitted_user_count: after.count, accepted_user_ids: idsForTurn(after) });
+    Object.assign(journal, { conversation_url: after.url, submitted_user_id: after.messageId, submitted_user_count: after.count, accepted_user_ids: idsForTurn(after),
+      ...(answer.localConversationId ? { local_conversation_id: answer.localConversationId } : {}) });
     return persistAnswer(request, journal, answer.text, task);
   }
   async function waitForRecoveryIdentity(request, journal, page, runtime) {
@@ -834,7 +848,12 @@ export function createBridge(overrides = {}) {
     }
     if (!connection && conversationURL(task.conversation_url)) connection = await newOwned(entry, task.conversation_url);
     if (!connection) {
-      if (task.target_id || task.last_request_dir || task.pending_request_dir) throw coded('TASK_CONVERSATION_UNAVAILABLE', '本 PDF 的原聊天暂不可用且没有可恢复地址，不能改为新聊天继续。');
+      // Settings are saved before the first dispatch journal. A task that never
+      // got that far may retain a closed tab from a failed picker in an older
+      // version; replacing it is safe only while all submission markers are absent.
+      const pristine = task.model === null && task.effort === null && !task.conversation_url && !task.last_request_dir && !task.pending_request_dir &&
+        !task.last_user_id && !task.last_user_fingerprint && !task.last_user_ids && !task.last_user_count && !existing;
+      if (!pristine) throw coded('TASK_CONVERSATION_UNAVAILABLE', '本 PDF 的原聊天暂不可用且没有可恢复地址，不能改为新聊天继续。');
       connection = await newOwned(entry);
     }
     task.target_id = connection.targetId;
@@ -882,7 +901,7 @@ export function createBridge(overrides = {}) {
         browser_ws: entry.endpoint.browserWSEndpoint, port: entry.endpoint.port, prompt_hash: hash(prompt), prompt_normalized_hash: hash(normalizedPrompt(prompt)),
         output_file: output, model: selection.model, effort: selection.effort, baseline_turns: baseline,
         previous_user_ids: previousIds, previous_user_count: previousIds.length,
-        conversation_url: task.conversation_url, prompt_submitted: false };
+        conversation_url: task.conversation_url, local_conversation_id: task.local_conversation_id || null, prompt_submitted: false };
       const save = () => writeJson(path.join(request.request_dir, 'journal.json'), journal);
       task.pending_request_dir = request.request_dir;
       await saveTask(request, task);

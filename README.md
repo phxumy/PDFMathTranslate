@@ -58,6 +58,12 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.5.2
+
+- Keep the first ChatGPT reply bound to its submitted message while the website assigns a permanent conversation URL. Persist the observed `local-chatgpt:` client ID so live replies remain readable after the address changes and across later batches.
+- Recover a closed setup tab only when its task has no submission history. Preserve existing pending tasks across the observed English/Chinese effort labels, including `High` and `高`, rather than starting another chat.
+- Report completed empty replies explicitly. Recovery does not regenerate or resend automatically; regenerate the response in its original chat only when you intend to request a new answer.
+
 ### New in v1.9.11-codex.5.1
 
 - Fix ChatGPT reasoning-effort selection in background PDF tabs. Chrome could ignore the slider's keyboard input even though the browser connection and model list were available, causing a false synchronization error before translation started.

@@ -660,7 +660,7 @@ export async function readSlider(page, requested) {
       if (!current.label) throw coded('PICKER_UNAVAILABLE', '网页没有提供推理强度文字标签。');
       choices.push({ value: current.label, label: current.label, position });
     }
-    if (new Set(choices.map(item => item.value)).size !== choices.length) throw coded('PICKER_UNAVAILABLE', '网页推理强度标签无法区分，已暂停。');
+    if (new Set(choices.map(item => effortKey(item.value))).size !== choices.length) throw coded('PICKER_UNAVAILABLE', '网页推理强度标签无法区分，已暂停。');
     if (requested) {
       const selected = choices.find(item => effortKey(item.value) === effortKey(requested));
       if (!selected) throw coded('OPTION_UNAVAILABLE', `当前账号没有提供推理强度：${requested}。`);
@@ -698,7 +698,9 @@ export async function readChoices(page, kind, requested) {
     if (options.absent) options = [];
     if (requested) {
       const matches = item => kind === 'effort' ? effortKey(item.value) === effortKey(requested) : item.value === requested;
-      const selected = options.find(matches);
+      const matching = options.filter(matches);
+      if (matching.length > 1) throw coded('PICKER_UNAVAILABLE', '网页选项的语言别名无法唯一对应，已暂停。');
+      const selected = matching[0];
       if (!selected) throw coded('OPTION_UNAVAILABLE', `当前账号的网页没有可用选项：${requested}。请刷新列表重新选择。`);
       if (!selected.selected) {
         await clickRow(page, selected);

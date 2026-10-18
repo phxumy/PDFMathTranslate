@@ -96,6 +96,78 @@ def test_ui_language_change_preserves_pending_request_and_target_language(
         )
 
 
+@pytest.mark.parametrize(
+    "legacy_label,current_label",
+    [("高", "High"), ("中", "Medium"), ("Instant", "即時")],
+)
+def test_english_chinese_labels_resume_the_unique_legacy_pending_task(
+    translator, monkeypatch, legacy_label, current_label
+):
+    selection = {"ok": True, "model": "actual-web-model", "effort": legacy_label}
+    monkeypatch.setattr(cg, "refresh_chatgpt_options", lambda *a, **kw: selection)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(cg, "_effort_key", lambda value: value)
+        old = cg.ChatGPTTranslator(
+            "en", "fr", task_id="same-pdf", envs={"CHATGPT_EFFORT": legacy_label}
+        )
+    selection["effort"] = current_label
+    pristine = cg.ChatGPTTranslator(
+        "en", "fr", task_id="same-pdf", envs={"CHATGPT_EFFORT": current_label}
+    )
+    assert pristine.task_id != old.task_id
+    cg._write_json(
+        cg.chatgpt_state_dir() / "tasks" / f"{pristine.task_id}.json",
+        {"version": 1, "task_id": pristine.task_id, "model": None, "effort": None},
+    )
+    bridge = Mock(
+        side_effect=[
+            {"ok": False, "not_submitted": False, "message": "interrupted"},
+            {"ok": True, "answer": '{"translations":["traduction"]}'},
+        ]
+    )
+    monkeypatch.setattr(cg, "_invoke_bridge", bridge)
+    with pytest.raises(TranslationAbortedError):
+        execute(old)
+    original = bridge.call_args.args[0]
+    cg._write_json(
+        cg.chatgpt_state_dir() / "tasks" / f"{old.task_id}.json",
+        {
+            "version": 1,
+            "task_id": old.task_id,
+            "model": old.model,
+            "effort": old.reasoning_effort,
+            "pending_request_dir": original["request_dir"],
+        },
+    )
+    resumed = cg.ChatGPTTranslator(
+        "en", "fr", task_id="same-pdf", envs={"CHATGPT_EFFORT": current_label}
+    )
+    assert resumed.task_id == old.task_id
+    assert resumed.reasoning_effort == old.reasoning_effort
+    assert execute(resumed) == ["traduction"]
+    payload = bridge.call_args.args[0]
+    assert payload["op"] == "recover"
+    assert payload["request_dir"] == original["request_dir"]
+    unrelated = cg.ChatGPTTranslator(
+        "en", "fr", task_id="another-pdf", envs={"CHATGPT_EFFORT": current_label}
+    )
+    assert unrelated.task_id != old.task_id
+    assert unrelated.reasoning_effort == cg._effort_key(current_label)
+    cg._write_json(
+        cg.chatgpt_state_dir() / "tasks" / f"{pristine.task_id}.json",
+        {
+            "version": 1,
+            "task_id": pristine.task_id,
+            "pending_request_dir": "another-pending-request",
+        },
+    )
+    with pytest.raises(TranslationAbortedError, match="多个"):
+        cg.ChatGPTTranslator(
+            "en", "fr", task_id="same-pdf", envs={"CHATGPT_EFFORT": current_label}
+        )
+    assert bridge.call_count == 2
+
+
 def test_completed_answer_reused_without_resubmission(translator, monkeypatch):
     bridge = Mock(
         return_value={

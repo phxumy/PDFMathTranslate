@@ -237,6 +237,7 @@ test('native power slider reads semantic view toggle and visible model rows, ret
     assert.equal(changed.model, 'Beta');
     assert.equal(changed.effort, '即时');
     assert.equal((await readChoices(page, 'effort', '標準')).selected, '标准');
+    assert.equal((await readChoices(page, 'effort', 'High')).selected, '高');
     assert.ok(await page.evaluate(() => window.viewClicks) > 0);
     assert.equal(await page.evaluate(() => window.togglePointerDowns), 0);
   });
@@ -283,12 +284,21 @@ test('native hidden-tab slider keys and Escape stay in its menu when CDP keyboar
   });
 });
 
-test('effort keys normalize only the four known Simplified and Traditional label pairs', () => {
-  for (const [simple, traditional] of [['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度']]) {
+test('native slider refuses two positions with the same translated effort key', { skip: !chrome }, async () => {
+  const html = powerMenuFixture().replace('高，第 3 项，共 3 项。', '中，第 3 项，共 3 项。')
+    .replace("['即时','标准','高'][position]", "['Instant','Medium','中'][position]");
+  await fixture(html, async page => {
+    await assert.rejects(() => readChoices(page, 'effort', 'Medium'), error => error.code === 'PICKER_UNAVAILABLE');
+    assert.equal(await page.evaluate(() => document.querySelector('[role="slider"]').getAttribute('aria-valuenow')), '2');
+  });
+});
+
+test('effort keys normalize known web label translations without inventing account options', () => {
+  for (const [simple, traditional] of [['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度'], ['Instant', '即時'], ['高', 'High'], ['中', 'Medium']]) {
     assert.equal(effortKey(simple), traditional);
     assert.equal(effortKey(traditional), traditional);
   }
-  for (const label of ['高', 'Alpha', '即時 Pro', 'Custom', '']) assert.equal(effortKey(label), label);
+  for (const label of ['Alpha', '即時 Pro', 'Custom', '']) assert.equal(effortKey(label), label);
 });
 
 test('native shell without a return toggle confirms only the uniquely selected model once', { skip: !chrome }, async () => {

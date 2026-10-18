@@ -120,6 +120,29 @@ test('one translation persists before submit, selects actual model and completes
   assert.equal(f.calls.submit, 1);
   assert.ok(f.calls.attach.every(x => x.targetId !== 'personal-tab'));
 }));
+test('first submission persists its local client conversation ID through permanent URL assignment', async () => temporary(async directory => {
+  const f = fixture(); const send = f.deps.submit;
+  f.deps.submit = async (options, ...args) => { await send(options, ...args); if (options.runtime.state.count === 1) options.runtime.state.url = 'https://chatgpt.com/c/local-chatgpt%3Aclient-id'; };
+  f.deps.waitAnswer = async (runtime, _timeout, _log, _baseline, conversationId, submittedTurn) => {
+    assert.ok(conversationId === undefined || conversationId === 'our-request');
+    assert.equal(submittedTurn.localConversationId, 'local-chatgpt:client-id');
+    runtime.state.url = 'https://chatgpt.com/c/our-request';
+    return { text: '{"translation":"complete"}', localConversationId: submittedTurn.localConversationId };
+  };
+  const req = { ...await request(directory), task_id: 'local-binding-across-batches' }; const bridge = createBridge(f.deps);
+  await bridge.run({ op: 'login', state_dir: directory });
+  assert.equal((await bridge.run(req)).ok, true);
+  const journal = JSON.parse(await fs.readFile(path.join(req.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(journal.local_conversation_id, 'local-chatgpt:client-id');
+  assert.equal(journal.conversation_url, 'https://chatgpt.com/c/our-request');
+  assert.equal(f.calls.submit, 1);
+  const next = { ...await request(directory, 'translate', '-next'), task_id: req.task_id };
+  assert.equal((await bridge.run(next)).ok, true);
+  const nextJournal = JSON.parse(await fs.readFile(path.join(next.request_dir, 'journal.json'), 'utf8'));
+  assert.equal(nextJournal.local_conversation_id, 'local-chatgpt:client-id');
+  assert.equal(f.calls.submit, 2);
+}));
+
 test('cancelled caller does not duplicate pending work and a different batch is blocked', async () => temporary(async directory => {
   const f = fixture(); let release; let entered;
   const capturing = new Promise(resolve => { entered = resolve; });
@@ -530,6 +553,36 @@ test('closed task tab reopens only the exact saved conversation before appending
   assert.equal((await bridge.run(second)).ok, true);
   assert.deepEqual(f.calls.navigate, ['https://chatgpt.com/', 'https://chatgpt.com/', 'https://chatgpt.com/c/our-request']);
   assert.equal(f.calls.submit, 2);
+}));
+
+test('closed pristine task tab can be replaced after a model-picker failure that never reached submission', async () => temporary(async directory => {
+  const f = fixture(); const catalog = f.deps.ui.catalog;
+  f.deps.ui.catalog = async () => { throw Object.assign(new Error('picker not ready'), { code: 'PICKER_UNAVAILABLE' }); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'unsent-picker-failure' };
+  assert.equal((await bridge.run(req)).not_submitted, true);
+  assert.equal(f.calls.submit, 0);
+  f.tabs.delete('owned-2'); f.deps.ui.catalog = catalog;
+  assert.equal((await bridge.run(req)).ok, true);
+  assert.equal(f.calls.submit, 1);
+  assert.ok(!f.calls.attach.some(item => item.targetId === 'personal-tab'));
+}));
+
+test('closed task without a saved conversation cannot be replaced once settings or a dispatch journal exist', async () => temporary(async directory => {
+  const f = fixture(); const ids = f.deps.readUserIds;
+  f.deps.readUserIds = async () => { throw new Error('baseline interrupted'); };
+  const bridge = createBridge(f.deps); await bridge.run({ op: 'login', state_dir: directory });
+  const req = { ...await request(directory), task_id: 'possibly-used-task' };
+  await bridge.run(req); f.tabs.delete('owned-2'); f.deps.readUserIds = ids;
+  assert.equal((await bridge.run(req)).error_code, 'TASK_CONVERSATION_UNAVAILABLE');
+  assert.equal(f.calls.submit, 0);
+  const taskFile = path.join(directory, 'tasks', `${req.task_id}.json`);
+  const task = JSON.parse(await fs.readFile(taskFile, 'utf8'));
+  Object.assign(task, { model: null, effort: null }); await fs.writeFile(taskFile, JSON.stringify(task));
+  await fs.writeFile(path.join(req.request_dir, 'journal.json'), JSON.stringify({ version: 3, task_id: req.task_id, dispatch_started: true, previous_user_ids: [], target_id: 'owned-2', browser_ws: 'ws://127.0.0.1:9222/devtools/browser/fixture' }));
+  const before = f.calls.navigate.length;
+  assert.equal((await bridge.run(req)).error_code, 'RECOVERY_UNAVAILABLE');
+  assert.equal(f.calls.navigate.length, before); assert.equal(f.calls.submit, 0);
 }));
 
 test('fixed task model and changed prior user IDs prevent continuation before any send', async () => temporary(async directory => {

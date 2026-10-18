@@ -8,7 +8,7 @@ async function evaluate(runtime, expression) {
   if (result.exceptionDetails) throw fail('PAGE_SCRIPT_ERROR', 'ChatGPT 页面状态读取失败。');
   return result.result?.value;
 }
-export function shellDOM(serialize) {
+export function shellDOM(serialize, localConversationId = null) {
   const form = document.querySelector('form[data-chatgpt-composer]');
   if (!form) return null;
   const editor = form.querySelector('[data-composer-markdown][contenteditable="true"]');
@@ -38,9 +38,17 @@ export function shellDOM(serialize) {
   const group = last?.closest('[data-turn-key]');
   const assistantId = id(assistant);
   const selection = assistantBody?.closest('[data-chatgpt-selection-message-id]');
-  const conversation = location.pathname.match(/^\/c\/([a-zA-Z0-9-]+)$/)?.[1];
-  const associated = !!(last && assistantBody && assistantId && group?.contains(assistant) && (last.compareDocumentPosition(assistant) & 4) &&
-    selection?.getAttribute('data-chatgpt-selection-message-id') === assistantId && selection?.getAttribute('data-chatgpt-selection-conversation-id') === conversation);
+  const route = location.pathname.match(/^\/c\/([^/]+)$/)?.[1];
+  let conversation;
+  try { conversation = route && decodeURIComponent(route); } catch { /* Unrecognized routes cannot bind an answer. */ }
+  const selectedConversation = selection?.getAttribute('data-chatgpt-selection-conversation-id');
+  const matchingConversation = selectedConversation === conversation ||
+    (/^local-chatgpt:[a-zA-Z0-9-]+$/.test(localConversationId || '') && selectedConversation === localConversationId &&
+      location.origin === 'https://chatgpt.com' && /^\/c\/[a-zA-Z0-9-]+$/.test(location.pathname));
+  const sameTurn = !!(last && assistantBody && assistantId && group?.contains(assistant) && (last.compareDocumentPosition(assistant) & 4) &&
+    selection?.getAttribute('data-chatgpt-selection-message-id') === assistantId);
+  const observedLocalConversation = sameTurn && /^local-chatgpt:[a-zA-Z0-9-]+$/.test(selectedConversation || '') ? selectedConversation : null;
+  const associated = sameTurn && matchingConversation;
   const bars = associated ? [...group.querySelectorAll('.turn-action-controls')].filter(bar =>
     !bar.closest('[data-chatgpt-search-unit-key],pre,code') && (assistant.compareDocumentPosition(bar) & 4)) : [];
   const complete = bars.some(bar => {
@@ -51,11 +59,11 @@ export function shellDOM(serialize) {
   return { shell: true, url: location.href, count: users.length, messageId: id(last), text: body?.textContent,
     renderedText: body?.innerText, structuredText: structure.text, inlineCodeText: structure.inlineCodeText,
     ...Object.fromEntries(['inlineCodeCount', 'buttonCount', 'controlCount', 'tagCounts'].map(k => [k, structure[k]])),
-    userIds: users.map(id), hasDraft: !!editor?.textContent?.trim(), generating: stop || busy,
+    userIds: users.map(id), localConversationId: observedLocalConversation, hasDraft: !!editor?.textContent?.trim(), generating: stop || busy,
     editorReady: !!editor && visible(editor), turnCount: units.length,
     assistant: associated ? { id: assistantId, text: assistantBody.innerText || assistantBody.textContent, complete: complete && !stop && !busy } : null };
 }
-export const shellSnapshot = (runtime, serialize) => evaluate(runtime, `(${shellDOM.toString()})(${serialize ? serialize.toString() : ''})`);
+export const shellSnapshot = (runtime, serialize, localConversationId) => evaluate(runtime, `(${shellDOM.toString()})(${serialize ? serialize.toString() : 'undefined'},${JSON.stringify(localConversationId || null)})`);
 export async function shellPromptReady(runtime, timeout) {
   const deadline = Date.now() + timeout;
   do {
@@ -100,19 +108,58 @@ export async function shellSubmit({ runtime, input, onPromptSubmitted }, prompt)
   if (!clicked) throw fail('SEND_UNAVAILABLE', '发送按钮尚未就绪，已保留草稿；不会重复发送。');
   await onPromptSubmitted?.();
 }
-export async function shellWaitAnswer(runtime, timeout, baseline, conversationId) {
-  const initial = await shellSnapshot(runtime);
-  const identity = state => JSON.stringify([state.url, state.userIds, state.text]);
+export async function shellWaitAnswer(runtime, timeout, baseline, conversationId, submittedTurn) {
+  // Start with the turn already verified by capture, so a remount between the
+  // two reads cannot replace the request that this wait is allowed to accept.
+  const initial = submittedTurn || await shellSnapshot(runtime);
+  const identity = state => JSON.stringify([state.userIds, state.messageId, state.text, state.count]);
+  const home = url => url === 'https://chatgpt.com/';
+  const local = url => /^https:\/\/chatgpt\.com\/c\/local-chatgpt(?::|%3a)[a-zA-Z0-9-]+$/i.test(url || '');
+  const conversation = url => /^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(url || '');
+  if (!initial?.messageId || typeof initial.text !== 'string' || !Array.isArray(initial.userIds) ||
+      !initial.userIds.length || initial.count !== initial.userIds.length || initial.userIds.at(-1) !== initial.messageId || initial.userIds.some(id => typeof id !== 'string' || !id) ||
+      new Set(initial.userIds).size !== initial.userIds.length || (!home(initial.url) && !local(initial.url) && !conversation(initial.url))) {
+    throw fail('RECOVERY_IDENTITY_UNVERIFIED', '无法确认等待回答的原请求身份，已停止读取。');
+  }
+  let expectedUrl = conversationId ? `https://chatgpt.com/c/${conversationId}` : initial.url;
+  let localConversationId = initial.localConversationId || (local(initial.url) ? decodeURIComponent(new URL(initial.url).pathname.slice(3)) : null);
+  if (localConversationId && !/^local-chatgpt:[a-zA-Z0-9-]+$/.test(localConversationId)) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '临时聊天标识无法确认，已停止读取。');
+  if (conversationId && initial.url !== expectedUrl) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '原请求不在已保存的聊天地址，已停止读取。');
   let prior = null, since = 0, polls = 0;
   const deadline = Date.now() + timeout;
   do {
-    const state = await shellSnapshot(runtime);
-    if (!state || identity(state) !== identity(initial) || (conversationId && state.url !== `https://chatgpt.com/c/${conversationId}`)) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
+    const state = await shellSnapshot(runtime, undefined, localConversationId);
+    // New chats can render at home, then at a local-chatgpt: client URL, before
+    // receiving their permanent address. Every transition must retain the exact
+    // submitted turn; a permanent conversation can never change again.
+    const canAdvance = url => !conversationId &&
+      ((home(expectedUrl) && local(url)) || ((home(expectedUrl) || local(expectedUrl)) && conversation(url)));
+    if (state && state.url !== expectedUrl && !canAdvance(state.url)) {
+      throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
+    }
+    if (!state || (!state.userIds?.length && !state.messageId && !state.text)) {
+      prior = null; polls = 0;
+      await sleep(300);
+      continue;
+    }
+    if (identity(state) !== identity(initial)) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
+    if (state.url !== expectedUrl) {
+      if (canAdvance(state.url)) expectedUrl = state.url;
+      else throw fail('RECOVERY_IDENTITY_UNVERIFIED', '等待回答时原聊天发生变化，已停止读取。');
+    }
+    if (local(state.url)) {
+      const observed = decodeURIComponent(new URL(state.url).pathname.slice(3));
+      if (localConversationId && observed !== localConversationId) throw fail('RECOVERY_IDENTITY_UNVERIFIED', '临时聊天发生变化，已停止读取。');
+      localConversationId = observed;
+    }
     const answer = state.assistant;
-    if (state.turnCount > baseline && answer?.complete && answer.text?.trim()) {
-      const signature = JSON.stringify(answer);
+    if (conversation(state.url) && state.turnCount > baseline && answer?.complete) {
+      const signature = JSON.stringify([state.url, answer]);
       if (signature !== prior) { prior = signature; since = Date.now(); polls = 0; }
-      if (++polls >= 3 && Date.now() - since >= 1200) return { text: answer.text, messageId: answer.id };
+      if (++polls >= 3 && Date.now() - since >= 1200) {
+        if (answer.text?.trim()) return { text: answer.text, messageId: answer.id, localConversationId };
+        if (Date.now() - since >= 3000) throw fail('EMPTY_RESPONSE', '原聊天的回答已结束但正文为空，请在原聊天点击“重新生成”后再恢复此 PDF。本批不会重复发送。');
+      }
     } else { prior = null; polls = 0; }
     await sleep(300);
   } while (Date.now() < deadline);

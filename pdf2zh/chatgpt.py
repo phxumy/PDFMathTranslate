@@ -37,9 +37,22 @@ _cancel_wait = threading.Event()
 def _effort_key(value):
     # Keep existing request/task identities across a web UI language change.
     # These are label aliases, never a list of available account options.
-    return {"即时": "即時", "标准": "標準", "扩展": "擴展", "轻度": "輕度"}.get(
-        value, value
-    )
+    return {
+        "即时": "即時",
+        "标准": "標準",
+        "扩展": "擴展",
+        "轻度": "輕度",
+        "Instant": "即時",
+        "高": "High",
+        "中": "Medium",
+    }.get(value, value)
+
+
+_LEGACY_EFFORT_KEYS = {
+    "High": ("High", "高"),
+    "Medium": ("Medium", "中"),
+    "即時": ("即時", "Instant"),
+}
 
 
 @contextmanager
@@ -336,21 +349,55 @@ class ChatGPTTranslator(ScientificTranslator):
         super().__init__(
             lang_in, lang_out, actual_model, prompt=prompt, ignore_cache=ignore_cache
         )
+
+        def identify(effort):
+            return hashlib.sha256(
+                json.dumps(
+                    {
+                        "task": self.task_seed,
+                        "model": actual_model,
+                        "effort": effort,
+                        "lang_in": self.lang_in,
+                        "lang_out": self.lang_out,
+                        "prompt": getattr(prompt, "template", prompt),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+
+        # Preserve the exact pre-upgrade task and request hashes if a translated
+        # effort label already owns a conversation. Match the full document and
+        # settings identity; never adopt another PDF by its label alone.
+        histories = []
+        for legacy_effort in _LEGACY_EFFORT_KEYS.get(actual_effort, (actual_effort,)):
+            legacy_id = identify(legacy_effort)
+            saved = _read_json(chatgpt_state_dir() / "tasks" / f"{legacy_id}.json")
+            if not saved:
+                continue
+            if saved.get("version") != 1 or saved.get("task_id") != legacy_id:
+                raise TranslationAbortedError(
+                    "ChatGPT 的已有 PDF 会话记录不完整，已停止。"
+                )
+            if any(
+                saved.get(key)
+                for key in (
+                    "conversation_url",
+                    "pending_request_dir",
+                    "last_request_dir",
+                    "last_user_id",
+                    "last_user_fingerprint",
+                )
+            ):
+                histories.append(legacy_effort)
+        if len(histories) > 1:
+            raise TranslationAbortedError(
+                "同一 PDF 存在多个推理强度语言别名的聊天记录，已停止以避免重复提交。"
+            )
+        if histories:
+            actual_effort = histories[0]
         self.reasoning_effort = actual_effort
-        self.task_id = hashlib.sha256(
-            json.dumps(
-                {
-                    "task": self.task_seed,
-                    "model": actual_model,
-                    "effort": actual_effort,
-                    "lang_in": self.lang_in,
-                    "lang_out": self.lang_out,
-                    "prompt": getattr(prompt, "template", prompt),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
+        self.task_id = identify(actual_effort)
         self.add_cache_impact_parameters("reasoning_effort", actual_effort)
         self.add_cache_impact_parameters("transport", "oracle-browser-v1")
         self._request_root = chatgpt_state_dir() / "requests"

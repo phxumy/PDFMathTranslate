@@ -1,3 +1,19 @@
+## v1.9.11-codex.5.2 — 修复首批回答读取与旧任务恢复
+
+修复 `.5.1` 中连接和模型读取正常，但翻译时报“等待回答时原聊天发生变化”或“原聊天暂不可用且没有可恢复地址”的问题。
+
+- 首次发送时，ChatGPT 会经过 `local-chatgpt:` 临时聊天地址，再分配正式地址。本版在原消息 ID、完整原文和消息顺序仍一致时接受这段正常转换，保存实际观察到的临时标识，并将其传递给同一 PDF 的后续批次。
+- 正式地址下的实时回答节点可能仍使用临时标识。本版用已绑定的临时标识核验这些回答，继续保留正式会话地址、用户消息和回答归属校验。
+- 对因旧版模型选择失败而留下的任务，仅在没有模型绑定、提交记录或历史消息时允许重新打开空白任务页。已经发送过的批次仍恢复原聊天，不会自动重发。
+- 兼容实际网页中 `High/高`、`Medium/中`、`Instant/即时` 的标签变化。以完整 PDF 和设置身份查找唯一旧任务，保留原请求及缓存；存在多个已使用的别名任务时停止自动接管。
+- 已结束但正文为空的回答会明确提示先在原聊天重新生成，不再一直等待。程序不会自行重新生成或重复发送。
+
+验证包括真实 ChatGPT 连续两批翻译、同一聊天复用，以及两次恢复均不增加发送次数；另包含离线回归、安装与覆盖升级检查。
+
+从 `.5.1` 可使用应用内更新，也可手动下载本页 EXE 覆盖安装。`.5` 用户仍需手动下载。升级保留账号、设置、原请求、翻译缓存和译文工作区。
+
+This hotfix binds ChatGPT's provisional client conversation ID to its permanent URL, restores first-response capture and later batches, and preserves pending requests across observed effort-label translations. Completed empty replies are reported explicitly; recovery never resends or regenerates automatically.
+
 ## v1.9.11-codex.5.1 — 修复 ChatGPT 后台翻译标签页的推理强度选择
 
 修复 ChatGPT 已连接、模型可正常读取，但点击翻译后提示“网页推理强度的位置与文字标签尚未同步”的问题。

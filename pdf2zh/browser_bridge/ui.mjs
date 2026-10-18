@@ -10,7 +10,7 @@ export function normalize(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-const EFFORT_KEYS = new Map([['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度']]);
+const EFFORT_KEYS = new Map([['即时', '即時'], ['标准', '標準'], ['扩展', '擴展'], ['轻度', '輕度'], ['Instant', '即時'], ['高', 'High'], ['中', 'Medium']]);
 export function effortKey(value) {
   return EFFORT_KEYS.get(value) ?? value;
 }
