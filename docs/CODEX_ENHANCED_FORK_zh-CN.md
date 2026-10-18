@@ -39,7 +39,7 @@ Windows 10/11 x64 用户可以直接下载带离线版面资源的桌面包，�
 
 详细步骤、SHA-256 校验和故障排查参阅[桌面工作台说明](./DESKTOP_APP_zh-CN.md)。
 
-发布包包含经过固定哈希校验的官方 Codex CLI 0.145.0 程序，但不包含账号、套餐额度、
+`.5.4` 发布包包含经过固定哈希校验的官方稳定版 Codex CLI 0.163.0，但不包含账号、套餐额度、
 Codex 登录凭据、用户论文、API Key 或翻译缓存。登录和账户规则以
 [OpenAI 官方 Codex CLI 说明](https://developers.openai.com/codex/cli)为准。
 

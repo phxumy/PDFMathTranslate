@@ -90,7 +90,7 @@ Quick start:
 - Remaining time uses a rolling range from actually completed pages, excludes the first cold-start sample and waits for sufficient observations. Font processing and final PDF writing are shown as a separate stage.
 - A Windows EXE installer and explicit in-app GitHub updates, with size and SHA-256 verification before installation. Translation must finish or be cancelled before updating.
 
-The release includes the official **Codex CLI 0.145.0 program** so a separate
+The release includes the official stable **Codex CLI 0.163.0 program** so a separate
 Python or Codex installation is unnecessary. It does **not** include an account,
 subscription, free quota, login credentials, API keys, user PDFs, or translation
 caches. The desktop interface is bound to `127.0.0.1`, but text is sent to the

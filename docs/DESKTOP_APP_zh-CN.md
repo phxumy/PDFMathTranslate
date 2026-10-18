@@ -14,7 +14,7 @@
 
 - Windows 10/11 x64；
 - 建议安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；
-- 无需安装 Python，也无需单独安装 Codex CLI；发布包已带经过哈希校验的官方 Codex CLI 0.145.0。
+- 无需安装 Python，也无需单独安装 Codex CLI；`.5.4` 发布包已带经过哈希校验的官方稳定版 Codex CLI 0.163.0。
 
 如果以后想改用系统里更新的 Codex CLI，可以参考 [OpenAI 官方 Codex CLI 页面](https://developers.openai.com/codex/cli)。OpenAI 当前提供的 Windows 安装命令是：
 
@@ -148,7 +148,7 @@ pdf2zh --desktop --serverport 7868 --onnx "D:\models\doclayout.onnx"
 3. 系统 `PATH` 返回的绝对 `.exe` 或 `.CMD` 路径；
 4. Codex Desktop 的本机安装目录。
 
-当前公开 Release 会在第一项路径内置经过固定 SHA-256 校验的官方 Codex CLI 0.145.0，
+`.5.4` Release 会在第一项路径内置经过固定 SHA-256 校验的官方稳定版 Codex CLI 0.163.0，
 所以通常保持 `CODEX_BIN=codex` 即可。包内只有 CLI 程序，不包含账户、登录状态或额度。
 
 显式填写完整路径时始终优先使用该路径；路径不存在会直接报错，不会悄悄切换到另一份 Codex。便携版建议保持默认自动发现，或填写同目录内的完整 `codex.exe` 路径。
