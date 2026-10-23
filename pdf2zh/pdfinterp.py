@@ -40,7 +40,7 @@ from pdfminer.utils import (
     apply_matrix_pt,
 )
 
-from pdf2zh.codex_errors import CodexPermanentError
+from pdf2zh.codex_errors import CodexExecutionError, CodexOutputError, CodexTimeoutError
 from pdf2zh.source_font import repair_embedded_cff_encoding
 from pdf2zh.translator import TranslationAbortedError
 
@@ -328,7 +328,13 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                 self.obj_patch[self.xobjmap[xobjid].objid] = (
                     f"q {ops_base}Q {a} {b} {c} {d} {e} {f} cm {ops_new}"
                 )
-            except (CancelledError, TranslationAbortedError, CodexPermanentError):
+            except (
+                CancelledError,
+                TranslationAbortedError,
+                CodexExecutionError,
+                CodexOutputError,
+                CodexTimeoutError,
+            ):
                 # end_figure translates text inside Form XObjects, including
                 # journal mastheads. A pending browser request must stop the
                 # page here, before later regions can hide the original error

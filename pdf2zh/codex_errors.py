@@ -31,7 +31,7 @@ def codex_cli_error(returncode: int, detail: str) -> CodexExecutionError:
     terminal = (
         re.fullmatch(r"ERROR:\s*(.*)", lines[-1], re.IGNORECASE) if lines else None
     )
-    message = terminal.group(1).casefold() if terminal else ""
+    message = terminal.group(1).casefold().replace("’", "'") if terminal else ""
     if terminal:
         try:
             payload = json.loads(terminal.group(1))
@@ -66,4 +66,5 @@ def codex_cli_error(returncode: int, detail: str) -> CodexExecutionError:
         )
     )
     error_type = CodexPermanentError if permanent else CodexExecutionError
-    return error_type(f"Codex translator failed with exit code {returncode}: {detail}")
+    reason = terminal.group(1) if terminal else detail
+    return error_type(f"Codex translator failed with exit code {returncode}: {reason}")

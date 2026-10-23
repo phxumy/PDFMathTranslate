@@ -2992,12 +2992,19 @@ class ScientificTranslator(BaseTranslator):
                 identity_target = "".join(
                     text.strip(boundary_whitespace) for text in normalized_targets
                 )
-                if has_unchanged_translatable_english(
-                    identity_source,
-                    identity_target,
-                ) or has_suspicious_english_residue(
-                    joined_source,
-                    joined_target,
+                if (
+                    has_unchanged_translatable_english(
+                        identity_source,
+                        identity_target,
+                    )
+                    or has_suspicious_english_residue(
+                        joined_source,
+                        joined_target,
+                    )
+                    or has_omitted_scientific_content(
+                        joined_source,
+                        joined_target,
+                    )
                 ):
                     return None
             return normalized_targets
@@ -4565,6 +4572,34 @@ class ScientificTranslator(BaseTranslator):
         ):
             return replacements
 
+        if len(source_left) < len(
+            source_right
+        ) and not self._continuation_load_distribution_is_plausible(
+            [source_left, source_right], [target_left, target_right]
+        ):
+            # The title has already been validated as a whole. Repartition only
+            # plain Chinese text, preserving its exact concatenation, so a tiny
+            # source tail does not receive almost the entire translated title.
+            combined = target_left + target_right
+            total = self._continuation_visible_load(source_left + source_right)
+            ideal = (
+                len(combined)
+                * self._continuation_visible_load(source_left)
+                / max(total, 1)
+            )
+            boundaries = [
+                i
+                for i in range(1, len(combined))
+                if re.fullmatch(self.CJK_CHAR_RE, combined[i - 1])
+                and re.fullmatch(self.CJK_CHAR_RE, combined[i])
+            ]
+            if boundaries:
+                split = min(boundaries, key=lambda i: abs(i - ideal))
+                return (
+                    ExactReplacement(left.source, combined[:split]),
+                    ExactReplacement(right.source, combined[split:]),
+                )
+
         suffix = next(
             (
                 candidate
@@ -5150,6 +5185,13 @@ class ScientificTranslator(BaseTranslator):
         volume.  Every accepted route must consume the complete metadata tail.
         """
         remaining = remaining.strip()
+        from pdf2zh.translation_policy import is_publication_catalogue
+
+        if is_publication_catalogue(remaining):
+            return True
+        edition = re.match(r"\d{1,2}(?:st|nd|rd|th),?\s+[Ee]d\.?[,\s]+", remaining)
+        if edition and is_publication_catalogue(remaining[edition.end() :]):
+            return True
         year = r"(?:19|20)\d{2}[a-z]?"
         number = r"\d{1,7}[A-Za-z]?(?:[-–]\d{1,7})?"
         terminal_year = rf"(?:\({year}\)|{year})\.?\s*"

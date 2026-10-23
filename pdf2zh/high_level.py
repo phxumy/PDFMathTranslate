@@ -184,7 +184,88 @@ def _layout_detections(
     if source_page is None:
         return detections
     detections = _recover_abandoned_prose(detections, source_page, height, width)
-    return _recover_table_note_lines(detections, source_page, height, width)
+    detections = _recover_table_note_lines(detections, source_page, height, width)
+    return _recover_publisher_cover_lines(detections, source_page, height, width)
+
+
+def _recover_publisher_cover_lines(detections, page, height, width):
+    """Recover publisher citation lines and linked recommendation titles.
+
+    Only a first-page publisher cover with an explicit recommendations heading
+    qualifies. Source hyperlinks identify the title lines; author names and
+    download notices outside those rectangles remain untouched.
+    """
+    if getattr(page, "number", None) != 0:
+        return detections
+    headings = page.search_for("You may also like")
+    if not headings:
+        return detections
+    links = [link["from"] for link in page.get_links() if link.get("from")]
+    recovered = list(detections)
+    for block in page.get_text("dict")["blocks"]:
+        selected = []
+        for line in block.get("lines", []):
+            text = "".join(span.get("text", "") for span in line["spans"]).strip()
+            left, top, right, bottom = line["bbox"]
+            is_citation = text.startswith("To cite this article:")
+            recommended = (
+                len(re.findall(r"[A-Za-z]+", text)) >= 1
+                and any(
+                    left >= head.x0
+                    and top >= head.y1
+                    and top - head.y1 < page.rect.height * 0.25
+                    for head in headings
+                )
+                and any(
+                    min(right, link.x1) - max(left, link.x0) >= 0.8 * (right - left)
+                    and link.y0 <= (top + bottom) / 2 <= link.y1
+                    for link in links
+                )
+            )
+            if is_citation or recommended:
+                selected.append(line["bbox"])
+        if selected:
+            sx, sy = width / page.rect.width, height / page.rect.height
+            bounds = (
+                max(0, int(min(b[0] for b in selected) * sx) - 1),
+                max(0, int(height - max(b[3] for b in selected) * sy) - 1),
+                min(width - 1, int(max(b[2] for b in selected) * sx) + 1),
+                min(height - 1, int(height - min(b[1] for b in selected) * sy) + 1),
+            )
+            recovered.append(
+                _LayoutDetection(
+                    max((d.value for d in recovered), default=1) + 1,
+                    "publisher_text",
+                    bounds,
+                    1.0,
+                )
+            )
+            # Text following the linked title within the same source block is
+            # the publisher's author list. Preserve its original glyphs, even
+            # if PDF extraction omitted accents or initials punctuation.
+            for line in block.get("lines", []):
+                left, top, right, bottom = line["bbox"]
+                if line["bbox"] in selected or not any(
+                    left >= head.x0 for head in headings
+                ):
+                    continue
+                if top < min(b[1] for b in selected):
+                    continue
+                bounds = (
+                    max(0, int(left * sx) - 1),
+                    max(0, int(height - bottom * sy) - 1),
+                    min(width - 1, int(right * sx) + 1),
+                    min(height - 1, int(height - top * sy) + 1),
+                )
+                recovered.append(
+                    _LayoutDetection(
+                        max(d.value for d in recovered) + 1,
+                        "publisher_identity",
+                        bounds,
+                        1.0,
+                    )
+                )
+    return recovered
 
 
 def _recover_table_note_lines(detections, source_page, height: int, width: int):
@@ -412,6 +493,25 @@ def _build_layout_mask(
                 force=not defer_formula,
             )
 
+    for detection in detections:
+        if detection.class_name == "publisher_text":
+            _paint_layout_region(
+                layout_box,
+                confidence_map,
+                detection.bounds,
+                detection.value,
+                detection.confidence,
+                force=True,
+            )
+        elif detection.class_name == "publisher_identity":
+            _paint_layout_region(
+                layout_box,
+                confidence_map,
+                detection.bounds,
+                0,
+                detection.confidence,
+                force=True,
+            )
     return layout_box, region_types
 
 

@@ -21,7 +21,8 @@ _ABBREVIATED_REFERENCE = re.compile(
 _SENTENCE_END = re.compile(r"[.!?;:](?:\s+|$)")
 _INTERNAL_TOKEN = re.compile(r"\[\[PDF2ZH_(?:FLOW_\d+|ITALIC_\d+_(?:BEGIN|END))\]\]")
 _CONTINUING_ABBREVIATION = re.compile(
-    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|viz\.|cf\.)" r"(?=\s*[,;:]?\s+\S)",
+    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|[ad]\.\s*c\.|viz\.|cf\.)"
+    r"(?=\s*[,;:]?\s+\S)",
     re.IGNORECASE,
 )
 _CONTINUING_STATISTICAL_ABBREVIATION = re.compile(

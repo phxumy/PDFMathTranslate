@@ -11,7 +11,11 @@ from pdfminer.pdfinterp import PDFResourceManager
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
 
-from pdf2zh.codex_errors import CodexPermanentError
+from pdf2zh.codex_errors import (
+    CodexPermanentError,
+    CodexTranslationValidationError,
+    CodexExecutionError,
+)
 from pdf2zh.converter import PDFConverterEx
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.translator import TranslationAbortedError
@@ -57,6 +61,8 @@ def process_document(data, translate):
     [
         TranslationAbortedError("Original ChatGPT answer is still pending"),
         CodexPermanentError("Authentication required"),
+        CodexTranslationValidationError("Incomplete translated paragraph"),
+        CodexExecutionError("Provider request failed"),
         CancelledError("Translation cancelled"),
     ],
 )

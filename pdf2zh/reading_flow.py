@@ -4,6 +4,10 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
+from pdf2zh.source_segmentation import (
+    scientific_abbreviation_spans,
+    scientific_reference_spans,
+)
 
 from pdf2zh.translation_policy import (
     find_reference_markers,
@@ -76,6 +80,7 @@ class FlowSegment:
     page_width: float
     page_height: float
     region_kind: str = "plain text"
+    formula_texts: tuple[str, ...] = ()
 
     @property
     def width(self) -> float:
@@ -211,8 +216,18 @@ def _column_index(segment: FlowSegment) -> int | None:
     return 0 if segment.center_x < segment.page_width / 2 else 1
 
 
-def _has_reference_terminal(text: str) -> bool:
-    compact = text.rstrip()
+def _has_reference_terminal(text: str, formula_texts: Sequence[str] = ()) -> bool:
+    compact = (
+        re.sub(
+            r"\{v(\d+)\}",
+            lambda m: (
+                formula_texts[int(m[1])] if int(m[1]) < len(formula_texts) else m[0]
+            ),
+            text,
+        )
+        .rstrip()
+        .replace("−", "-")
+    )
     return bool(
         _REFERENCE_YEAR_END_RE.search(compact)
         or _REFERENCE_VOLUME_PAGE_END_RE.search(compact)
@@ -231,7 +246,9 @@ def _reference_tail(
 ) -> _ReferenceTail | None:
     if segment.region_kind != "plain text":
         return None
-    region = split_numbered_reference_region(segment.text)
+    region = split_numbered_reference_region(
+        segment.text, formula_texts=segment.formula_texts
+    )
     if region is None:
         markers = find_reference_markers(segment.text)
         if (
@@ -256,7 +273,7 @@ def _reference_tail(
     candidate = segment.text[span.start : span.end]
     if _has_unsafe_reference_token(
         candidate, allow_formulas=allow_formulas
-    ) or _has_reference_terminal(candidate):
+    ) or _has_reference_terminal(candidate, segment.formula_texts):
         return None
     return _ReferenceTail(
         segment=segment,
@@ -283,7 +300,7 @@ def _reference_head(
     if (
         not candidate.strip()
         or _has_unsafe_reference_token(candidate, allow_formulas=allow_formulas)
-        or not _has_reference_terminal(candidate)
+        or not _has_reference_terminal(candidate, segment.formula_texts)
     ):
         return None
     return _ReferenceHead(
@@ -770,7 +787,10 @@ def detect_reference_continuation(
 
 
 def _sentence_endings(text: str):
+    protected = scientific_abbreviation_spans(text) + scientific_reference_spans(text)
     for match in _SENTENCE_END_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in protected):
+            continue
         # A figure/equation abbreviation belongs to the following number, not
         # the preceding sentence. Splitting at ``Fig.`` strands its panel label
         # outside the jointly translated continuation fragment.

@@ -28,6 +28,21 @@ def is_quantum_gate_label(text: str) -> bool:
     )
 
 
+def is_publication_catalogue(text: str) -> bool:
+    """An entire publisher/year field contains no prose to translate."""
+    publisher = (
+        r"(?:Springer(?:[- ]Verlag)?|Wiley(?:[- ](?:VCH|IEEE))?|Elsevier|"
+        r"Prentice[- ]Hall|Academic Press|(?:[A-Z][A-Za-z'-]+\s+){1,4}University Press|"
+        r"Association for Computing Machinery|Institute of Electrical and Electronics Engineers)"
+    )
+    place = r"[A-Z][A-Za-z .'-]{1,50}"
+    catalogue = rf"{publisher},\s*(?:{place},\s*){{0,2}}(?:19|20)\d{{2}}"
+    return (
+        re.fullmatch(rf"(?:\({catalogue}\)|{catalogue})[.,]?\s*", text.strip())
+        is not None
+    )
+
+
 @dataclass(frozen=True)
 class SourceSegment:
     index: int
@@ -712,6 +727,8 @@ def looks_like_reference_title_prefix(text: str) -> bool:
     words = re.findall(r"[^\W\d_]+", author, flags=re.UNICODE)
     if not words or (not year and len(words[-1]) < 2):
         return False
+    if words[-1][:1].islower() and words[-1].casefold() != "al":
+        return False
     return looks_like_reference_author_block(author)
 
 
@@ -1022,6 +1039,18 @@ class DocumentTranslationPolicy:
         if not stripped:
             return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
 
+        if segment.region_kind == "publisher_text":
+            citation = re.match(r"\s*To cite this article:\s*", text)
+            if citation:
+                return SegmentPlan(
+                    segment,
+                    (
+                        SegmentPart(ROLE_TRANSLATE, citation.group()),
+                        SegmentPart(ROLE_PRESERVE, text[citation.end() :]),
+                    ),
+                )
+            return SegmentPlan(segment, (SegmentPart(ROLE_TRANSLATE, text),))
+
         if (
             segment.region_kind == RUNNING_HEADER_REGION_KIND
             or is_running_header_segment(segment)
@@ -1071,6 +1100,9 @@ class DocumentTranslationPolicy:
         metadata_parts = _publication_metadata_parts(segment)
         if metadata_parts:
             return SegmentPlan(segment, metadata_parts)
+
+        if is_publication_catalogue(text):
+            return SegmentPlan(segment, (SegmentPart(ROLE_PRESERVE, text),))
 
         heading = _REFERENCE_HEADING_RE.fullmatch(stripped)
         if heading:
@@ -1190,6 +1222,7 @@ class DocumentTranslationPolicy:
                     else (
                         ROLE_PRESERVE
                         if reference_entry_score(prefix) >= 3
+                        or is_publication_catalogue(prefix)
                         else ROLE_TRANSLATE
                     )
                 )

@@ -363,6 +363,10 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     ):
         return True
     concepts = (
+        (
+            r"\bcan\s+be\s+(?:extracted|obtained|derived)\s+from\b",
+            r"提取|抽取|获取|獲取|得到|获得|獲得|导出|導出|求得|求出|确定|確定|推算|计算|計算|反推",
+        ),
         (r"\bdenominator\b", r"分母|除数|除數"),
         (
             r"\bsecond\s+excited\s+state\b",

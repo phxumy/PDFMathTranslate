@@ -38,6 +38,15 @@ def stub():
 
 
 class CodexTypedFailureTests(unittest.TestCase):
+    def test_usage_limit_with_typographic_apostrophe_is_not_retried(self):
+        failure = codex_cli_error(
+            1,
+            "Private PDF source\nERROR: You’ve hit your usage limit. Try again later.",
+        )
+        self.assertIsInstance(failure, CodexPermanentError)
+        self.assertFalse(_retryable_translation_error(failure))
+        self.assertNotIn("Private PDF source", str(failure))
+
     def test_structured_model_rejection_is_actionable_without_retry_or_prompt_leak(
         self,
     ):

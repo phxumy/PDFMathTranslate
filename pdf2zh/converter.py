@@ -972,12 +972,21 @@ def _recover_author_information_affiliations(
                     expanded,
                 )
             )
-            < 2
+            < 1
             or not re.search(r"\b\d{5,6}\b|\bEmail:|orcid\.org/", expanded)
         ):
             continue
         names = list(name_pattern.finditer(expanded))
-        if not names or expanded[: names[0].start()].strip():
+        if not names:
+            if (
+                re.search(r"\b\d{5,6}\b", expanded)
+                and "orcid.org/" in expanded
+                and re.search(r"\bEmail:\s*\S+@", expanded)
+            ):
+                segments[paragraph_id] = expanded
+                paragraph.affiliation_parts = (SegmentPart(ROLE_AFFILIATION, expanded),)
+            continue
+        if expanded[: names[0].start()].strip():
             continue
         parts = []
         cursor = 0
@@ -3113,6 +3122,35 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     em = max(float(getattr(candidate, "size", 0.0)), float(previous.size), 1.0)
     right_edge = max(float(char.x1) for char in chars)
     gap = float(candidate.x0) - right_edge
+    # A reduced roman word below a mathematical base remains its subscript,
+    # even when the word is marked as ordinary prose by the lexical detector.
+    anchors = [
+        ch
+        for ch in chars
+        if _MATH_FONT_RE.search(_formula_font_name(ch))
+        or _is_prose_emphasis_font(ch.fontname)
+        or re.search(r"-It$", _formula_font_name(ch))
+    ]
+    if anchors and len(value) == 1 and value.isalpha():
+        anchor = max(anchors, key=lambda ch: float(ch.size))
+        anchor_em = float(anchor.size)
+        if (
+            0.45 * anchor_em <= float(candidate.size) <= 1.02 * anchor_em
+            and 0.10 * anchor_em
+            <= _char_baseline(anchor) - _char_baseline(candidate)
+            <= 0.80 * anchor_em
+            and -0.20 * anchor_em <= gap <= 0.30 * anchor_em
+            and not _is_non_horizontal_text_matrix(candidate.matrix)
+            and (
+                float(candidate.size) < 0.90 * anchor_em
+                or (
+                    _char_baseline(anchor) - _char_baseline(candidate)
+                    >= 0.24 * anchor_em
+                    and gap <= 0.12 * anchor_em
+                )
+            )
+        ):
+            return True
     if (
         previous_value in {"ˆ", "^", "¯", "~"}
         and _MATH_FONT_RE.search(_formula_font_name(previous))
@@ -6488,6 +6526,7 @@ class TranslateConverter(PDFConverterEx):
                 page_width=draft.width,
                 page_height=draft.height,
                 region_kind=paragraph.region_kind,
+                formula_texts=tuple(draft.formula_texts),
             )
             for index, (text, paragraph) in enumerate(
                 zip(draft.sstk, draft.pstk, strict=True)
