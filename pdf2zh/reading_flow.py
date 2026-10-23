@@ -45,7 +45,7 @@ _REFERENCE_YEAR_END_RE = re.compile(
     re.IGNORECASE,
 )
 _REFERENCE_VOLUME_PAGE_END_RE = re.compile(
-    r"\b\d{1,4}\s*[,;:]\s*"
+    r"\b\d{1,4}(?:\s*\(\d{1,4}\))?\s*[,;:]\s*"
     r"(?:[A-Za-z]?\d{2,}(?:\s*[-\u2013\u2014]\s*\d+)?|e\d+)\.?\s*$",
     re.IGNORECASE,
 )
@@ -216,8 +216,8 @@ def _column_index(segment: FlowSegment) -> int | None:
     return 0 if segment.center_x < segment.page_width / 2 else 1
 
 
-def _has_reference_terminal(text: str, formula_texts: Sequence[str] = ()) -> bool:
-    compact = (
+def _resolved_reference_text(text: str, formula_texts: Sequence[str] = ()) -> str:
+    return (
         re.sub(
             r"\{v(\d+)\}",
             lambda m: (
@@ -228,6 +228,10 @@ def _has_reference_terminal(text: str, formula_texts: Sequence[str] = ()) -> boo
         .rstrip()
         .replace("−", "-")
     )
+
+
+def _has_reference_terminal(text: str, formula_texts: Sequence[str] = ()) -> bool:
+    compact = _resolved_reference_text(text, formula_texts)
     return bool(
         _REFERENCE_YEAR_END_RE.search(compact)
         or _REFERENCE_VOLUME_PAGE_END_RE.search(compact)
@@ -741,6 +745,43 @@ def detect_reference_continuation(
         for segment in following
         if (candidate := _reference_head(segment, allow_formulas=allow_formulas))
     ]
+    # Detectors may isolate a complete continuation prefix into its own block,
+    # immediately above the next numbered entry. Keep offsets in the original
+    # prefix block while using that adjacent entry only as numbering evidence.
+    meaningful = [
+        s for s in following if s.region_kind == "plain text" and s.text.strip()
+    ]
+    for head_segment in meaningful:
+        if find_reference_markers(head_segment.text) or not _has_reference_terminal(
+            head_segment.text, head_segment.formula_texts
+        ):
+            continue
+        for next_segment in meaningful:
+            markers = find_reference_markers(next_segment.text)
+            if not markers or next_segment.text[: markers[0].start].strip():
+                continue
+            if (
+                _column_index(head_segment) != _column_index(next_segment)
+                or abs(head_segment.x0 - next_segment.x0) > head_segment.size
+                or not -0.2 * head_segment.size
+                <= head_segment.y0 - next_segment.y1
+                <= 2.5 * head_segment.size
+            ):
+                continue
+            if _has_unsafe_reference_token(
+                head_segment.text, allow_formulas=allow_formulas
+            ):
+                continue
+            marker = markers[0]
+            heads.append(
+                _ReferenceHead(
+                    head_segment,
+                    FragmentSpan(head_segment.ref, 0, len(head_segment.text)),
+                    marker.number,
+                    marker.prefix,
+                )
+            )
+            break
     tails.sort(
         key=lambda item: (
             item.segment.y0,
@@ -758,7 +799,9 @@ def detect_reference_continuation(
 
     for tail in tails:
         left_text = tail.segment.text[tail.span.start : tail.span.end]
-        left_score = reference_entry_score(left_text)
+        left_score = reference_entry_score(
+            _resolved_reference_text(left_text, tail.segment.formula_texts)
+        )
         for head in heads:
             if head.prefix != tail.prefix or head.number != tail.number + 1:
                 continue
@@ -772,7 +815,9 @@ def detect_reference_continuation(
                 continue
             right_text = head.segment.text[head.span.start : head.span.end]
             combined_score = reference_entry_score(
-                f"{left_text.rstrip()} {right_text.lstrip()}"
+                _resolved_reference_text(left_text, tail.segment.formula_texts)
+                + " "
+                + _resolved_reference_text(right_text, head.segment.formula_texts)
             )
             if combined_score < 5 or combined_score <= left_score:
                 continue

@@ -4373,6 +4373,7 @@ class ScientificTranslator(BaseTranslator):
         left_entry: str,
         right_prefix: str,
         payload: object,
+        formula_context: dict[str, str] | None = None,
     ) -> tuple[ExactReplacement, ExactReplacement] | None:
         if not isinstance(payload, dict):
             return None
@@ -4399,8 +4400,8 @@ class ScientificTranslator(BaseTranslator):
         if (
             (source_left and left_entry.count(source_left) != 1)
             or (source_right and right_prefix.count(source_right) != 1)
-            or not left_entry.endswith(source_left)
-            or not right_prefix.startswith(source_right)
+            or (not one_sided and not left_entry.endswith(source_left))
+            or (not one_sided and not right_prefix.startswith(source_right))
         ):
             return None
         if one_sided:
@@ -4410,6 +4411,10 @@ class ScientificTranslator(BaseTranslator):
             metadata = logical_entry[title_start + len(source_title) :].lstrip(
                 " \t\r\n\"'’”)]}》」』】.,;:!?—–-"
             )
+            if formula_context:
+                metadata = self.FORMULA_TOKEN_RE.sub(
+                    lambda m: formula_context.get(m[0], m[0]), metadata
+                ).replace("−", "-")
             if (
                 not looks_like_reference_title_prefix(logical_entry[:title_start])
                 or not self._reference_title_boundary_is_safe(
@@ -4462,6 +4467,7 @@ class ScientificTranslator(BaseTranslator):
         left_entry: str,
         right_prefix: str,
         replacements: list[ExactReplacement] | None,
+        formula_context: dict[str, str] | None = None,
     ) -> tuple[ExactReplacement, ExactReplacement] | None:
         if not replacements or len(replacements) != 1:
             return None
@@ -4480,10 +4486,10 @@ class ScientificTranslator(BaseTranslator):
             )
             if not valid:
                 return None
-            if right_prefix.startswith(replacement.source):
+            if replacement.source in right_prefix:
                 left_source, left_target = "", ""
                 right_source, right_target = replacement.source, replacement.translated
-            elif left_entry.endswith(replacement.source):
+            elif replacement.source in left_entry:
                 left_source, left_target = replacement.source, replacement.translated
                 right_source, right_target = "", ""
             else:
@@ -4497,6 +4503,7 @@ class ScientificTranslator(BaseTranslator):
                     source_right=right_source,
                     target_right=right_target,
                 ),
+                formula_context=formula_context,
             )
         if (
             replacement.source.count(boundary) != 1
@@ -4522,6 +4529,7 @@ class ScientificTranslator(BaseTranslator):
                 "target_left": target_left,
                 "target_right": target_right,
             },
+            formula_context=formula_context,
         )
 
     def _rebalance_reference_continuation(
@@ -4696,6 +4704,7 @@ class ScientificTranslator(BaseTranslator):
         """Translate one certified entry split across columns or pages."""
         if not left_entry.strip() or not right_prefix.strip():
             return None
+        context = json.loads(formula_context) if formula_context else {}
         unsafe_marker = (
             (
                 not formula_context
@@ -4724,6 +4733,7 @@ class ScientificTranslator(BaseTranslator):
                     left_entry,
                     right_prefix,
                     payload,
+                    formula_context=context,
                 )
                 if validated is not None:
                     return self._rebalance_reference_continuation(validated)
@@ -4735,6 +4745,7 @@ class ScientificTranslator(BaseTranslator):
                 left_entry,
                 right_prefix,
                 replacements,
+                formula_context=context,
             )
             if validated is None:
                 continue
@@ -5195,6 +5206,15 @@ class ScientificTranslator(BaseTranslator):
         year = r"(?:19|20)\d{2}[a-z]?"
         number = r"\d{1,7}[A-Za-z]?(?:[-–]\d{1,7})?"
         terminal_year = rf"(?:\({year}\)|{year})\.?\s*"
+        dense_journal = re.fullmatch(
+            rf"(?P<venue>[A-Z][A-Za-z.]{{3,160}})\s*{year},\s*\d{{1,4}}"
+            rf"(?:\(\d{{1,4}}\))?,\s*{number}\.?",
+            remaining,
+        )
+        if dense_journal and cls._reference_venue_name_is_plausible(
+            dense_journal["venue"]
+        ):
+            return True
         chemistry_fields = re.fullmatch(
             rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?)\s+{year},\s*"
             rf"\d{{1,4}}(?:\s*\(\d{{1,4}}\))?,\s*(?:No\.\s*)?"

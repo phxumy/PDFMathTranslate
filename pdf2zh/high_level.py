@@ -494,21 +494,24 @@ def _build_layout_mask(
             )
 
     for detection in detections:
+        if detection.class_name == "publisher_identity":
+            _paint_layout_region(
+                layout_box,
+                confidence_map,
+                detection.bounds,
+                0,
+                detection.confidence,
+                force=True,
+            )
+    # Source font ascenders/descenders overlap adjacent rows. Verified linked
+    # title glyphs take priority over the neighbouring author-row rectangle.
+    for detection in detections:
         if detection.class_name == "publisher_text":
             _paint_layout_region(
                 layout_box,
                 confidence_map,
                 detection.bounds,
                 detection.value,
-                detection.confidence,
-                force=True,
-            )
-        elif detection.class_name == "publisher_identity":
-            _paint_layout_region(
-                layout_box,
-                confidence_map,
-                detection.bounds,
-                0,
                 detection.confidence,
                 force=True,
             )
