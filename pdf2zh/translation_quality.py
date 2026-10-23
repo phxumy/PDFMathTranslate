@@ -7,6 +7,7 @@ import re
 import unicodedata
 from collections import Counter
 
+from pdf2zh.line_breaking import iter_protected_literals
 from pdf2zh.source_segmentation import statistical_abbreviation_spans
 
 _FORMULA_PLACEHOLDER_RE = re.compile(r"\{\{v\d+\}\}|\{v\d+\}", re.IGNORECASE)
@@ -35,6 +36,132 @@ _DOI_RE = re.compile(
 _ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
 _VISIBLE_SEPARATOR_RE = re.compile(r"[^\w]+", re.UNICODE)
 _CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;。！？；\r\n]")
+
+
+def has_changed_author_scope(source: str, target: str) -> bool:
+    """Reject narrowing a statement about article authors to correspondence."""
+    return bool(
+        re.search(
+            r"\bauthors?\s+of\s+(?:this|the)\s+(?:Letter|article|paper)\b", source, re.I
+        )
+        and not re.search(r"\b(?:corresponding|contact)\s+authors?\b", source, re.I)
+        and re.search(r"通[讯信訊]作者", target)
+    )
+
+
+def is_spectroscopy_peak_list(text: str) -> bool:
+    """Recognize numerical NMR peak data without admitting chemical prose.
+
+    A page continuation can begin in the middle of an NMR list. Its multiplicity
+    letters and Hz units are data, not untranslated English. Require several
+    decimal shifts (or an NMR header with protected shifts) plus an NMR
+    unit/integration signal and a closed vocabulary;
+    even a single natural-language or solvent word keeps the normal prose route.
+    """
+    visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
+    visible = _INTERNAL_MARKER_RE.sub(" ", visible)
+    multiple_shifts = len(re.findall(r"\d+\.\d+", visible)) >= 2
+    protected_shifts = (
+        len(_FORMULA_PLACEHOLDER_RE.findall(text)) >= 2
+        and re.search(r"\bNMR\b", visible)
+        and re.search(r"\b(?:MHz|Hz|ppm)\b", visible)
+    )
+    if not (multiple_shifts or protected_shifts):
+        return False
+    if not re.search(r"\b(?:MHz|Hz|ppm)\b|\d+H\b", visible):
+        return False
+    words = re.findall(r"[A-Za-z]+", visible)
+    allowed = {
+        "H",
+        "C",
+        "F",
+        "P",
+        "N",
+        "B",
+        "Si",
+        "Hz",
+        "MHz",
+        "kHz",
+        "ppm",
+        "J",
+        "NMR",
+        "MS",
+        "HRMS",
+        "ESI",
+        "M",
+        "DMSO",
+        "CDCl",
+        "CD",
+        "D",
+        "O",
+        "s",
+        "d",
+        "t",
+        "q",
+        "m",
+        "br",
+        "dd",
+        "dt",
+        "td",
+        "tt",
+        "qd",
+        "dq",
+        "ddd",
+        "ddt",
+        "dtd",
+        "dtt",
+        "tdt",
+        "sept",
+        "quint",
+    }
+    nonwords = re.sub(r"[A-Za-z]+", "", visible)
+    return (
+        bool(words)
+        and all(word in allowed for word in words)
+        and re.search(r"[^\d\s.,;:()\[\]{}°=+−\-–—±/δ]", nonwords) is None
+    )
+
+
+def is_math_expression_only(text: str) -> bool:
+    """Recognize a closed mathematical operator expression around PDF formulas."""
+    if _FORMULA_PLACEHOLDER_RE.search(text) is None:
+        return False
+    visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
+    words = re.findall(r"[A-Za-z]+", visible)
+    operators = {
+        "sin",
+        "cos",
+        "tan",
+        "cot",
+        "sec",
+        "csc",
+        "arcsin",
+        "arccos",
+        "arctan",
+        "sinh",
+        "cosh",
+        "tanh",
+        "log",
+        "ln",
+        "exp",
+        "sqrt",
+        "min",
+        "max",
+        "det",
+        "lim",
+        "Tr",
+        "tr",
+        "Re",
+        "Im",
+        "rank",
+        "diag",
+        "sgn",
+        "arg",
+    }
+    if not words or any(word not in operators for word in words):
+        return False
+    remaining = re.sub(r"[A-Za-z]+", "", visible)
+    return re.search(r"[^\d\s.,;:()\[\]{}=+−\-–—±/×·*^_<>≤≥≈≃≡|]", remaining) is None
 
 
 def has_detached_norm_relation(source: str, target: str) -> bool:
@@ -262,6 +389,18 @@ def has_changed_section_identifier(source: str, target: str) -> bool:
     for match in re.finditer(r"\b(?:sub)?sections?\s+(\d+(?:\.\d+)+)\b", source, re.I):
         identifier = re.escape(match.group(1))
         if re.search(rf"(?<![\d.]){identifier}(?![\d.]|[A-Za-z])", target) is None:
+            return True
+    # A cross-column continuation can translate "Sec. I in Ref. [42]" as
+    # "第 I（见文献[42]）", losing the section noun and opening another bracket.
+    # Reject this precise truncation without requiring one spelling/position
+    # for otherwise valid localized section references.
+    for match in re.finditer(
+        r"\b(?:Sec\.|Section)\s+([IVXLCDM]+|\d+(?:\.\d+)*)\b", source
+    ):
+        if re.search(rf"第\s*{re.escape(match.group(1))}\s*[（(]", target) or re.search(
+            rf"第\s*(?:参考)?文献\s*[\[［]\d+[\]］]\s*第\s*{re.escape(match.group(1))}\s*[节章]",
+            target,
+        ):
             return True
     return False
 
@@ -730,6 +869,16 @@ def _source_reference_groups(
             item_start = separator.end()
             labelled = _SOURCE_CROSS_REFERENCE_RE.match(source, item_start)
             if labelled is not None:
+                if separator.group("separator").strip() == "," and re.search(
+                    r"(?:\bcompar(?:ed|ing)\s+(?:with|to)|\bunlike|\bin\s+contrast\s+to)\s*$",
+                    source[max(0, first.start() - 64) : first.start()],
+                    re.IGNORECASE,
+                ):
+                    # In ``Compared with Fig. 3(a), Figs. 3(b)-(d) ...``
+                    # the comma closes a comparison clause. It is not one
+                    # citation list: Chinese correctly inserts 相比 before
+                    # the second reference. Both units are still validated.
+                    break
                 same_kind = (
                     re.fullmatch(
                         _SOURCE_CROSS_REFERENCE_LABELS[kind] + r"\.?",
@@ -1327,6 +1476,15 @@ def _has_untranslated_mathematical_prose(source: str, target: str) -> bool:
     """
     if not any(_is_cjk_ideograph(char) for char in target):
         return False
+    if re.search(
+        r"\b(?:in|from)\s+(?:fig(?:ure)?s?|tables?|eq(?:uation)?s?)\.?\s+",
+        source,
+        re.I,
+    ) and re.search(
+        r"(?<![A-Za-z])(?:[Ii]n|[Ff]rom)\s*(?:图|表|式|方程|公式)\s*[\d{（(]",
+        target,
+    ):
+        return True
     for word in ("sharp", "sharpness"):
         pattern = rf"(?<![A-Za-z]){word}(?![A-Za-z])"
         if re.search(pattern, source) and re.search(pattern, target):
@@ -1773,6 +1931,10 @@ def _is_preserved_english_identifier(text: str) -> bool:
 
 def _strip_non_prose(text: str) -> str:
     stripped = text
+    # Bare publisher URLs share the protected-literal grammar with rendering,
+    # so their domain words cannot be mistaken for untranslated prose.
+    for literal in reversed(list(iter_protected_literals(stripped))):
+        stripped = stripped[: literal.start] + " " + stripped[literal.end :]
     for pattern in (
         _FENCED_CODE_RE,
         _INLINE_CODE_RE,
@@ -1801,8 +1963,11 @@ def _is_near_source_copy(
 ) -> bool:
     if len(source_words) < 4 or not _has_function_words(source_words, 1):
         return False
-    normalized_source = _normalize_visible_text(source)
-    normalized_target = _normalize_visible_text(target)
+    # Numerical measurements are expected to survive verbatim. Long spectra or
+    # tables can be >90% digits even after every prose label was translated;
+    # judge textual copying using the linguistic content, not that numeric mass.
+    normalized_source = _normalize_visible_text(re.sub(r"\d+", " ", source))
+    normalized_target = _normalize_visible_text(re.sub(r"\d+", " ", target))
     if not normalized_source or not normalized_target:
         return False
     similarity = difflib.SequenceMatcher(

@@ -16,6 +16,18 @@ _TRANSLATABLE_CAPTION_REGION_KINDS = frozenset(
 _RUNNING_HEADER_SOURCE_REGION_KINDS = frozenset({"", "plain text"})
 
 
+def is_quantum_gate_label(text: str) -> bool:
+    """Preserve a standalone standard gate identifier, never surrounding prose."""
+    return bool(
+        re.fullmatch(
+            r"(?:√\s*)?(?:iSWAP|SWAP|CNOT|CX|CY|CZ|CV|CCX|CCZ|QFT|ECP|fSim)"
+            r"(?:†|[1-9]\d?/[1-9]\d?|\^(?:[1-9]\d?/[1-9]\d?|"
+            r"\([1-9]\d?/[1-9]\d?\)|\{[1-9]\d?/[1-9]\d?\}))?",
+            text.strip(),
+        )
+    )
+
+
 @dataclass(frozen=True)
 class SourceSegment:
     index: int
@@ -29,6 +41,7 @@ class SourceSegment:
     break_offsets: tuple[int, ...] = ()
     region_kind: str = ""
     page_height: float = 0.0
+    page_index: int = 0
 
 
 def is_running_header_segment(segment: SourceSegment) -> bool:
@@ -210,7 +223,8 @@ def find_reference_markers(
             "supplement",
         ),
         (
-            r"(?<![\dA-Za-z])[(（]\s*(\d(?:\s*\d){0,2})\s*[)）]" r"(?=\s*[A-Z])",
+            r"(?<![\dA-Za-z])[(（]\s*(\d(?:\s*\d){0,2})\s*[)）]"
+            r"(?=\s*(?:\([a-z]\)\s*)?[A-Z])",
             "parenthetical",
         ),
         (
@@ -218,7 +232,7 @@ def find_reference_markers(
             "closing",
         ),
         (
-            r"(?<!\d)(\d(?:\s*\d){0,2})\s*[.．。](?=\s)",
+            r"(?<![\dA-Za-z])(\d(?:\s*\d){0,2})\s*[.．。](?=\s)",
             "dotted",
         ),
         (
@@ -551,6 +565,19 @@ def looks_like_author_list(text: str) -> bool:
     )
 
 
+def _inverted_reference_authors(text: str) -> bool:
+    """Recognize Surname, Initials lists without swallowing subsequent prose."""
+    surname = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+(?:\s+(?:de|van|von|[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+))*"
+    initials = r"(?:[A-Z]\.(?:-?[A-Z]\.)?\s*){1,5}"
+    name = rf"{surname},\s*{initials}(?:,\s*(?:Jr|Sr)\.)?"
+    return bool(
+        re.fullmatch(
+            rf"{name}(?:(?:\s*[,;]\s*(?:and\s+)?|\s*&\s*){name})*",
+            text.rstrip(". ") + ".",
+        )
+    )
+
+
 def looks_like_reference_author_block(text: str) -> bool:
     """Recognize a complete author prefix before a bibliography work title.
 
@@ -563,13 +590,24 @@ def looks_like_reference_author_block(text: str) -> bool:
 
     compact = _FORMULA_RE.sub("", text)
     compact = re.sub(
-        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[Ss]?\d+[.)．）])\s*",
+        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[（(]\s*[Ss]?\d+\s*[)）]|[Ss]?\d+[.)．）])\s*",
         "",
         compact,
     )
     compact = re.sub(r"\s+", " ", compact).strip()
     compact = compact.rstrip(". ")
+    # ACS and other chemistry journals use Surname, Initials; Surname,
+    # Initials. Semicolons are author separators only in this strict grammar.
+    if _inverted_reference_authors(compact):
+        return True
     if not compact or re.search(r"[:：;；!?！？]", compact):
+        return False
+    if re.search(r"(?:[A-Z]\.)\s+[A-Z]", compact) and re.search(
+        r",\s+[A-Z][A-Za-z\-]+\s+(?:of|for|in|to|at|with)\b", compact
+    ):
+        # A long author list can dominate a coverage score even after a work
+        # title and journal have been appended. Never certify that prose as
+        # the prefix of a later journal-name 'title'.
         return False
     if looks_like_author_list(compact):
         return True
@@ -653,9 +691,17 @@ def looks_like_reference_title_prefix(text: str) -> bool:
     elif not compact.endswith((".", ",")):
         return False
     author = compact.rstrip("., ")
+    author_without_label = re.sub(
+        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[（(]\s*[Ss]?\d+\s*[)）]|[Ss]?\d+[.)．）])\s*",
+        "",
+        author,
+    )
+    if re.search(r"\d", author_without_label):
+        return False
+    if _inverted_reference_authors(author_without_label):
+        return True
     # A period after a surname means a title has already started.  A long
     # byline must not make the author coverage heuristic swallow that title.
-    author_without_label = re.sub(r"^\s*(?:\[\d+\]|\d+[.)])\s*", "", author)
     if re.search(r"\bet\s+al\.\s+\S", author_without_label, re.IGNORECASE):
         return False
     if any(
@@ -688,7 +734,8 @@ def _looks_like_detector_title_byline(segment: SourceSegment) -> bool:
 
     page_height = float(segment.page_height)
     if (
-        page_height <= 0.0
+        segment.page_index != 0
+        or page_height <= 0.0
         or segment.size <= 0.0
         or segment.size > page_height * 0.019
         or segment.y0 < page_height * 0.48

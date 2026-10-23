@@ -45,6 +45,11 @@ _REFERENCE_VOLUME_PAGE_END_RE = re.compile(
     r"(?:[A-Za-z]?\d{2,}(?:\s*[-\u2013\u2014]\s*\d+)?|e\d+)\.?\s*$",
     re.IGNORECASE,
 )
+_REFERENCE_PUBLISHER_YEAR_END_RE = re.compile(
+    r"\([^()\r\n]{0,160}\b(?:IEEE|ACM|Springer|Elsevier|Wiley|Press|Publishing|Publishers?)"
+    r"\b[^()\r\n]{0,160}\b(?:19|20)\d{2}[a-z]?\)\s*[.,;:]?\s*$",
+    re.IGNORECASE,
+)
 _REFERENCE_AUTHOR_NAME_RE = re.compile(
     r"(?<![A-Za-z])(?:[A-Z]\.(?:\s*)?){1,4}"
     r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+|"
@@ -211,6 +216,7 @@ def _has_reference_terminal(text: str) -> bool:
     return bool(
         _REFERENCE_YEAR_END_RE.search(compact)
         or _REFERENCE_VOLUME_PAGE_END_RE.search(compact)
+        or _REFERENCE_PUBLISHER_YEAR_END_RE.search(compact)
     )
 
 
@@ -226,12 +232,27 @@ def _reference_tail(
     if segment.region_kind != "plain text":
         return None
     region = split_numbered_reference_region(segment.text)
-    if region is None or segment.text[region.end :].strip():
-        return None
-    marker = region.markers[-1]
+    if region is None:
+        markers = find_reference_markers(segment.text)
+        if (
+            len(markers) != 1
+            or segment.text[: markers[0].start].strip()
+            or not _has_incomplete_reference_author_structure(
+                segment.text[markers[0].end :]
+            )
+            or reference_entry_score(segment.text) < 3
+        ):
+            return None
+        marker = markers[0]
+        region_end = len(segment.text)
+    else:
+        if segment.text[region.end :].strip():
+            return None
+        marker = region.markers[-1]
+        region_end = region.end
     if marker.number is None:
         return None
-    span = FragmentSpan(segment.ref, marker.start, region.end)
+    span = FragmentSpan(segment.ref, marker.start, region_end)
     candidate = segment.text[span.start : span.end]
     if _has_unsafe_reference_token(
         candidate, allow_formulas=allow_formulas
@@ -403,9 +424,16 @@ def _body_follows_column_figure(
         return False
     caption = min(above, key=lambda item: item.y0)
     em = max(right.size, caption.size, 0.01)
-    return bool(
-        caption.region_kind == "figure_caption"
-        and _column_index(caption) == _column_index(right)
+    if caption.region_kind != "figure_caption":
+        return False
+    spanning_figure = bool(
+        caption.width >= right.page_width * 0.58
+        and caption.x0 <= right.x0 + em
+        and caption.x1 >= right.x1 - em
+        and caption.y0 - right.y1 <= 6 * em
+    )
+    return spanning_figure or bool(
+        _column_index(caption) == _column_index(right)
         and caption.y0 - right.y1 <= 4 * em
         and abs(caption.x0 - right.x0) <= 2 * em
         and min(caption.width, right.width) >= 0.72 * max(caption.width, right.width)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
+from pymupdf import Document
 
 from pdf2zh.high_level import (
     _abandon_matches_stronger_text_region,
@@ -38,6 +39,128 @@ class _FakeLayout:
 
 
 class LayoutOverlapTests(unittest.TestCase):
+    def test_marked_statistical_table_note_survives_combined_figure_container(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text((50, 119), "a", fontsize=7)
+            page.insert_text(
+                (54, 123),
+                "Data represent the geometric mean of three replicates.",
+                fontsize=9,
+            )
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [
+                        _FakeBox(0, (40, 65, 560, 600)),
+                        _FakeBox(1, (49, 50, 300, 65)),
+                    ],
+                    {0: "figure", 1: "table_caption"},
+                ),
+                800,
+                600,
+                page,
+            )
+            self.assertEqual(kinds[int(layout[680, 80])], "table_footnote")
+            self.assertEqual(layout[600, 80], 0)
+
+    def test_unmarked_plot_text_is_not_recovered_as_a_table_note(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text(
+                (50, 123),
+                "Data represent the geometric mean of three replicates.",
+                fontsize=9,
+            )
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [
+                        _FakeBox(0, (40, 65, 560, 600)),
+                        _FakeBox(1, (49, 50, 300, 65)),
+                    ],
+                    {0: "figure", 1: "table_caption"},
+                ),
+                800,
+                600,
+                page,
+            )
+            self.assertNotIn("table_footnote", kinds.values())
+            self.assertEqual(layout[680, 80], 0)
+
+    def test_supplementary_heading_is_recovered_from_abandon(self) -> None:
+        with Document() as document:
+            page = document.new_page(width=612, height=792)
+            page.insert_text((72, 86), "Supplementary Figures", fontsize=14)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [_FakeBox(0, (70, 69, 220, 91), confidence=0.82)],
+                    {0: "abandon"},
+                ),
+                792,
+                612,
+                page,
+            )
+            self.assertEqual(kinds[2], "title")
+            self.assertEqual(layout[710, 100], 2)
+
+    def test_equation_continuation_is_recovered_with_nearby_formula(self) -> None:
+        with Document() as document:
+            page = document.new_page(width=595, height=842)
+            page.insert_text((48, 77), "spectra are given by", fontsize=10)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [
+                        _FakeBox(0, (45, 66, 135, 81), confidence=0.54),
+                        _FakeBox(1, (94, 87, 244, 115), confidence=0.92),
+                    ],
+                    {0: "abandon", 1: "isolate_formula"},
+                ),
+                842,
+                595,
+                page,
+            )
+            self.assertEqual(kinds[2], "plain text")
+            self.assertEqual(layout[766, 60], 2)
+            self.assertEqual(layout[742, 120], 0)
+
+    def test_abandoned_lead_in_requires_a_nearby_formula(self) -> None:
+        with Document() as document:
+            page = document.new_page(width=595, height=842)
+            page.insert_text((48, 77), "spectra are given by", fontsize=10)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [_FakeBox(0, (45, 66, 135, 81), confidence=0.54)],
+                    {0: "abandon"},
+                ),
+                842,
+                595,
+                page,
+            )
+            self.assertEqual(kinds[2], "abandon")
+            self.assertEqual(layout[766, 60], 0)
+
+    def test_supplementary_running_header_and_figure_label_stay_protected(self) -> None:
+        with Document() as document:
+            page = document.new_page(width=612, height=792)
+            page.insert_text((72, 25), "Supplementary Figures", fontsize=10)
+            page.insert_text((72, 86), "Supplementary Figures", fontsize=14)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [
+                        _FakeBox(0, (70, 13, 220, 28), confidence=0.82),
+                        _FakeBox(0, (70, 69, 220, 91), confidence=0.82),
+                        _FakeBox(1, (65, 65, 250, 200), confidence=0.90),
+                    ],
+                    {0: "abandon", 1: "figure"},
+                ),
+                792,
+                612,
+                page,
+            )
+            self.assertEqual(kinds[2], "abandon")
+            self.assertEqual(kinds[3], "abandon")
+            self.assertEqual(layout[770, 100], 0)
+            self.assertEqual(layout[710, 100], 0)
+
     def test_low_confidence_abandon_does_not_erase_plain_text(self) -> None:
         layout = np.ones((6, 6))
         confidence = np.full(layout.shape, -np.inf, dtype=np.float32)

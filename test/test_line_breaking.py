@@ -90,6 +90,19 @@ class RenderAtomTests(unittest.TestCase):
 
         self.assertEqual(source, normalize_protected_literals(source))
 
+    def test_access_date_after_trailing_url_slash_is_not_absorbed(self):
+        url = "https://bluefors.com/products/measurement-infrastructure/high-density-wiring/"
+        for note in (
+            "(accessed: November 20, 2025).",
+            "(ac-cessed: November 20, 2025).",
+            "[40]",
+        ):
+            source = url + " " + note
+            self.assertEqual(normalize_protected_literals(source), source)
+            self.assertEqual(
+                [item.text for item in iter_protected_literals(source)], [url]
+            )
+
     def test_formula_placeholders_are_atomic(self) -> None:
         atoms = list(iter_render_atoms("甲{v12}乙{{ V 3 }}丙"))
 

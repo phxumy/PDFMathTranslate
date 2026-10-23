@@ -129,5 +129,58 @@ def test_numbered_affiliation_anchors_ligatures_and_overprinted_name_accents():
     )
     selected = author_byline_chars(page)
     assert "".join(char.get_text() for char in page if char in selected) == (
-        "Stefania Laza˘r1, A. Wallraﬀ2 and K. Hanke1"
+        "Stefania Laza˘r1, A. Wallraff2 and K. Hanke1"
     )
+
+
+def test_corporate_postal_address_anchors_author_rows_beside_orcid_icons():
+    _, page = page_with_lines(
+        [
+            "What Is the Maximum Density of Microwave Control Lines?",
+            "Nikolas Klemola Tango, Mar Francis De Guzman,",
+            "Ville Nuutinen, Massimo Borrelli and Russell E. Lake",
+            "Bluefors Oy, Arinatie 10, 00370 Helsinki, Finland",
+            "Scaling superconducting computers requires denser wiring.",
+        ],
+        fontname="Times-Roman",
+    )
+    selected = author_byline_chars(page)
+    assert "".join(char.get_text() for char in page if char in selected) == (
+        "Nikolas Klemola Tango, Mar Francis De Guzman,"
+        "Ville Nuutinen, Massimo Borrelli and Russell E. Lake"
+    )
+
+
+def test_marked_first_page_byline_keeps_glyphs_when_addresses_are_in_footer():
+    converter, page = page_with_lines(
+        [
+            "Chiral ground-state currents of interacting photons",
+            "P. Roushan1, C. Neill2, A. Megrant1, Y. Chen1,",
+            "R. Babbush3, R. Barends1 and J. Martinis1,2",
+            "The intriguing many-body phases arise from particle interactions.",
+        ],
+        fontname="Times-Roman",
+    )
+    selected = author_byline_chars(page)
+    assert "".join(ch.get_text() for ch in page if ch in selected) == (
+        "P. Roushan1, C. Neill2, A. Megrant1, Y. Chen1,"
+        "R. Babbush3, R. Barends1 and J. Martinis1,2"
+    )
+    sources = []
+    converter._translate_planned_segments = lambda texts, *a, **kw: (
+        sources.extend(texts) or texts
+    )
+    ops = converter.receive_layout(page)
+    assert not any("Roushan" in source for source in sources)
+    assert any("many-body" in source for source in sources)
+    for char in selected:
+        matrix = " ".join(f"{v:f}" for v in char._pdf2zh_source_text_state.matrix)
+        assert f"{matrix} Tm [<{char.cid:02x}>] TJ" in ops
+
+
+def test_author_like_body_listing_without_markers_is_not_anchored():
+    _, page = page_with_lines(
+        ["A. Smith, B. Jones and C. White", "This is a discussion of related work."],
+        fontname="Times-Roman",
+    )
+    assert not author_byline_chars(page)

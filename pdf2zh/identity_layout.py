@@ -50,12 +50,46 @@ def author_byline_chars(page: LTPage) -> set[LTChar]:
     if page.pageid != 0:
         return set()
     lines = _lines([item for item in page if isinstance(item, LTChar)])
+    # Large publisher bylines may use superscripts nearly as large as body
+    # text. The general line grouper then gives those markers their own row.
+    # Attach only a row made entirely of author markers to its nearby name row.
+    markers = []
+    for index, line in enumerate(lines):
+        value = _spaced_text(line)
+        if value and re.fullmatch(r"[\d*†‡§#,\s]+", value):
+            neighbors = [
+                other
+                for other in lines[max(0, index - 1) : index + 2]
+                if other is not line
+                and re.search(r"[A-Za-z]", _spaced_text(other))
+                and max(ch.size for ch in line) < median(ch.size for ch in other) * 0.86
+                and abs(median(ch.y0 for ch in line) - median(ch.y0 for ch in other))
+                < median(ch.size for ch in other) * 0.8
+            ]
+            if neighbors:
+                target = min(
+                    neighbors,
+                    key=lambda row: abs(
+                        median(ch.y0 for ch in row) - median(ch.y0 for ch in line)
+                    ),
+                )
+                target.extend(line)
+                target.sort(key=lambda ch: ch.x0)
+                markers.append(index)
+    lines = [line for index, line in enumerate(lines) if index not in markers]
     selected: set[LTChar] = set()
     for index, affiliation in enumerate(lines):
         affiliation_text = re.sub(
             r"^\s*\d{1,2}(?=[A-Z])", "", _spaced_text(affiliation)
         )
-        if not looks_like_affiliation(affiliation_text):
+        corporate_address = bool(
+            re.match(
+                r"[A-Z][A-Za-z'’\- ]+\s+(?:Oy|Ltd\.?|Inc\.?|GmbH|LLC),",
+                affiliation_text,
+            )
+            and re.search(r",\s*\d{4,6}\b", affiliation_text)
+        )
+        if not (looks_like_affiliation(affiliation_text) or corporate_address):
             continue
         rows = []
         following = affiliation
@@ -108,6 +142,58 @@ def author_byline_chars(page: LTPage) -> set[LTChar]:
             )
         ):
             selected.update(chars)
+
+    # Some publishers put affiliations in footnotes instead of immediately
+    # below the byline. Require multiple initialled names, author markers and
+    # matching adjacent upper-page rows, never merely a Title Case heading.
+    pending = []
+
+    def flush():
+        if pending:
+            chars = [char for row in pending for char in row]
+            text = " ".join(
+                _byline_classification_text(_spaced_text(row)) for row in pending
+            )
+            if (
+                len(re.findall(r"\b[A-Z]\.", text)) >= 3
+                and len(re.findall(r"[\d*†‡§#]", text)) >= 2
+                and looks_like_author_list(text)
+            ):
+                selected.update(chars)
+        pending.clear()
+
+    for line in lines:
+        size = median(ch.size for ch in line)
+        text = _byline_classification_text(_spaced_text(line))
+        names = re.sub(r"[\d*†‡§#]+", "", text)
+        entries = [
+            part.strip()
+            for part in re.split(r"\s*(?:,|\band\b|&)\s*", names)
+            if part.strip()
+        ]
+        strict_names = bool(entries) and all(
+            2 <= len(entry.split()) <= 5
+            and all(
+                _STRICT_BYLINE_NAME_TOKEN_RE.fullmatch(word) for word in entry.split()
+            )
+            for entry in entries
+        )
+        if (
+            not strict_names
+            or min(ch.y0 for ch in line) < page.height * 0.55
+            or size > page.height * 0.019
+        ):
+            flush()
+            continue
+        if pending and (
+            abs(size - median(ch.size for ch in pending[-1])) > 0.12 * size
+            or not 0.7 * size
+            <= median(ch.y0 for ch in pending[-1]) - median(ch.y0 for ch in line)
+            <= 2.0 * size
+        ):
+            flush()
+        pending.append(line)
+    flush()
     return selected
 
 

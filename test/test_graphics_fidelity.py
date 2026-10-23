@@ -17,7 +17,7 @@ from pdf2zh.converter import PDFConverterEx, TranslateConverter
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 
 
-def preserve_locally(doc):
+def preserve_locally(doc, *, layout_class=0):
     """Run actual extraction and rendering with every text region protected."""
     manager = PDFResourceManager()
     converter = TranslateConverter.__new__(TranslateConverter)
@@ -26,7 +26,9 @@ def preserve_locally(doc):
     converter.vfont = converter.vchar = ""
     converter.noto_name = "noto"
     converter.noto = fitz.Font("helv")
-    converter.layout = {0: np.zeros((200, 240))}
+    converter.layout = {
+        0: np.full((int(doc[0].rect.height), int(doc[0].rect.width)), layout_class)
+    }
     converter._translate_planned_segments = lambda segments, *a, **k: list(segments)
     patches = {}
     interpreter = PDFPageInterpreterEx(manager, converter, patches)
@@ -53,6 +55,97 @@ def text_colors(page):
 
 
 class GraphicsFidelityTests(unittest.TestCase):
+    def test_colored_heading_square_uses_its_source_glyph_and_color(self):
+        with fitz.open() as doc:
+            page = doc.new_page(width=240, height=200)
+            page.insert_font(fontname="deco", fontbuffer=fitz.Font("cjk").buffer)
+            page.insert_text(
+                (20, 60), "■", fontname="deco", fontsize=32, color=(0.7, 0.1, 0.2)
+            )
+            page.insert_text((60, 60), "RESULTS", fontsize=12)
+            before = next(
+                s
+                for b in page.get_text("dict")["blocks"]
+                for line in b.get("lines", [])
+                for s in line["spans"]
+                if s["text"] == "■"
+            )
+            preserve_locally(doc, layout_class=2)
+            after = next(
+                s
+                for b in doc[0].get_text("dict")["blocks"]
+                for line in b.get("lines", [])
+                for s in line["spans"]
+                if s["text"] == "■"
+            )
+            for field in ("color", "font", "size", "bbox"):
+                self.assertEqual(before[field], after[field], field)
+
+    def test_source_paths_keep_escaped_color_space_resource_names(self):
+        with fitz.open() as doc:
+            page = doc.new_page(width=240, height=200)
+            page.draw_rect((10, 10, 20, 20))
+            resources = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])
+            doc.xref_set_key(resources, "ColorSpace", "<< /Fill#20RGB#23 /DeviceRGB >>")
+            doc.update_stream(
+                page.get_contents()[0],
+                b"/Fill#20RGB#23 cs 0.2 0.5 0.8 scn 30 40 150 100 re f",
+            )
+            before = page.get_pixmap(matrix=fitz.Matrix(2, 2)).samples
+            operations = preserve_locally(doc)
+            self.assertIn("/Fill#20RGB#23 cs", operations)
+            self.assertEqual(
+                doc[0].get_pixmap(matrix=fitz.Matrix(2, 2)).samples, before
+            )
+
+    def test_nested_graphics_state_restores_color_spaces_before_scn(self):
+        with fitz.open() as doc:
+            page = doc.new_page(width=240, height=200)
+            page.draw_rect((10, 10, 20, 20))
+            doc.update_stream(
+                page.get_contents()[0],
+                b"/DeviceRGB cs /DeviceCMYK CS "
+                b"q 0 g 0 G q /DeviceCMYK cs /DeviceRGB CS Q Q "
+                b"0.2 0.5 0.8 scn 0.1 0.8 0.2 0.1 SCN "
+                b"3 w 30 40 150 100 re B",
+            )
+            before = page.get_pixmap(matrix=fitz.Matrix(2, 2)).samples
+            operations = preserve_locally(doc)
+            self.assertIn("0.200000 0.500000 0.800000 scn", operations)
+            self.assertIn("0.100000 0.800000 0.200000 0.100000 SCN", operations)
+            self.assertEqual(
+                doc[0].get_pixmap(matrix=fitz.Matrix(2, 2)).samples, before
+            )
+
+    def test_form_inherits_colors_without_leaking_them_back_to_page(self):
+        with fitz.open() as doc:
+            page = doc.new_page(width=240, height=200)
+            page.draw_rect((10, 10, 20, 20))
+            form = doc.get_new_xref()
+            doc.update_object(
+                form,
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 240 200] "
+                "/Resources << >> >>",
+            )
+            doc.update_stream(
+                form,
+                b"0.2 0.5 0.8 scn 0.1 0.8 0.2 0.1 SCN "
+                b"3 w 20 120 80 50 re B 0 g 0 G",
+            )
+            resource = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])
+            doc.xref_set_key(resource, "XObject", f"<< /Inherited {form} 0 R >>")
+            doc.update_stream(
+                page.get_contents()[0],
+                b"/DeviceRGB cs /DeviceCMYK CS /Inherited Do "
+                b"0.8 0.5 0.2 scn 0.8 0.1 0.2 0.1 SCN "
+                b"3 w 120 40 80 50 re B",
+            )
+            before = page.get_pixmap(matrix=fitz.Matrix(2, 2)).samples
+            preserve_locally(doc)
+            self.assertEqual(
+                doc[0].get_pixmap(matrix=fitz.Matrix(2, 2)).samples, before
+            )
+
     def test_mirrored_stretched_and_sheared_symbols_survive_real_pdf_roundtrip(self):
         for matrix in (
             (-13.5889, 0, 0, 23.0399, 80, 120),

@@ -28,6 +28,7 @@ from pdfminer.pdftypes import (
 from pdfminer.psexceptions import PSEOF
 from pdfminer.psparser import (
     PSKeyword,
+    PSLiteral,
     keyword_name,
     literal_name,
 )
@@ -40,6 +41,7 @@ from pdfminer.utils import (
 )
 
 from pdf2zh.codex_errors import CodexPermanentError
+from pdf2zh.source_font import repair_embedded_cff_encoding
 from pdf2zh.translator import TranslationAbortedError
 
 log = logging.getLogger(__name__)
@@ -54,6 +56,16 @@ def safe_float(o: Any) -> Optional[float]:
 
 def _serialize_pdf_operand(value: Any) -> str:
     """Emit PDF arrays with PDF separators instead of Python list commas."""
+    if isinstance(value, PSLiteral):
+        encoded = "".join(
+            (
+                chr(byte)
+                if 33 <= byte <= 126 and chr(byte) not in "()<>[]{}/%#"
+                else f"#{byte:02X}"
+            )
+            for byte in literal_name(value).encode("utf-8")
+        )
+        return "/" + encoded
     if isinstance(value, (list, tuple)):
         return "[" + " ".join(_serialize_pdf_operand(item) for item in value) + "]"
     if isinstance(value, float):
@@ -76,6 +88,16 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
 
     def dup(self) -> "PDFPageInterpreterEx":
         return self.__class__(self.rsrcmgr, self.device, self.obj_patch)
+
+    def get_current_state(self):
+        # pdfminer saves color values but leaves the active color spaces out of
+        # q/Q. Losing them changes how many SC(N)/sc(n) operands we consume,
+        # corrupting subsequent source paths after a nested grayscale glyph.
+        return (*super().get_current_state(), self.scs, self.ncs)
+
+    def set_current_state(self, state):
+        super().set_current_state(state[:3])
+        self.scs, self.ncs = state[3:]
 
     def init_resources(self, resources: Dict[object, object]) -> None:
         # 重载设置 fontid 和 descent
@@ -109,6 +131,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         objid = spec.objid
                     spec = dict_value(spec)
                     self.fontmap[fontid] = self.rsrcmgr.get_font(objid, spec)
+                    repair_embedded_cff_encoding(self.fontmap[fontid], spec)
                     self.fontmap[fontid].descent = 0  # hack fix descent
                     self.fontid[self.fontmap[fontid]] = fontid
             elif k == "ColorSpace":
@@ -137,8 +160,15 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         """Stroke path"""
 
         def is_black(color: Color) -> bool:
-            if isinstance(color, Tuple):
-                return sum(color) == 0
+            if color is None:
+                # PDF's initial stroke color is black; pdfminer represents an
+                # untouched default as None. Publisher fractions often rely on it.
+                return self.scs is None or self.scs.name == "DeviceGray"
+            if isinstance(color, (tuple, list)):
+                if len(color) == 4:
+                    # The all-zero CMYK color is white, not a formula rule.
+                    return tuple(color) == (0, 0, 0, 1)
+                return bool(color) and all(component == 0 for component in color)
             else:
                 return color == 0
 
@@ -279,9 +309,10 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                 resources,
                 [xobj],
                 ctm=ctm,
+                initial_state=self.get_current_state(),
             )
-            self.ncs = interpreter.ncs
-            self.scs = interpreter.scs
+            # Form invocation implicitly saves and restores the caller's
+            # graphics state. Its final color spaces must not leak outward.
             try:  # 有的时候 form 字体加不上这里会烂掉
                 self.device.fontid = interpreter.fontid
                 self.device.fontmap = interpreter.fontmap
@@ -306,12 +337,62 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             except Exception:
                 pass
         elif subtype is LITERAL_IMAGE and "Width" in xobj and "Height" in xobj:
+            if self._extract_fraction_image_rule(xobj):
+                return "n"
             self.device.begin_figure(xobjid, (0, 0, 1, 1), MATRIX_IDENTITY)
             self.device.render_image(xobjid, xobj)
             self.device.end_figure(xobjid)
         else:
             # unsupported xobject type.
             pass
+
+    def _extract_fraction_image_rule(self, xobj) -> bool:
+        """Move a solid one-pixel stencil fraction rule with nearby mathematics."""
+        if not (
+            xobj.get("ImageMask")
+            and xobj.get("Width") == xobj.get("Height") == 1
+            and xobj.get("BitsPerComponent", 1) == 1
+        ):
+            return False
+        a, b, c, d, _, _ = self.ctm
+        width, height = abs(a), abs(d)
+        if (
+            abs(b) > 1e-6
+            or abs(c) > 1e-6
+            or not (1 <= width <= 80 and 0.05 <= height <= 1 and width >= 4 * height)
+        ):
+            return False
+        color = self.graphicstate.ncolor
+        if color not in (None, 0) and not (
+            isinstance(color, (list, tuple))
+            and (
+                tuple(color) == (0, 0, 0, 1) or len(color) in (1, 3) and not any(color)
+            )
+        ):
+            return False
+        data = xobj.get_data()
+        decode = list_value(xobj.get("Decode", [0, 1]))
+        if not data or decode not in ([0, 1], [1, 0]):
+            return False
+        if bool(data[0] & 128) != (decode == [1, 0]):
+            return False
+        start = apply_matrix_pt(self.ctm, (0, 0.5))
+        end = apply_matrix_pt(self.ctm, (1, 0.5))
+        layout = getattr(self.device, "layout", {}).get(self.device.cur_item.pageid)
+        if layout is None:
+            return False
+        h, w = layout.shape
+        if any(
+            layout[int(np.clip(y, 0, h - 1)), int(np.clip(x, 0, w - 1))] <= 1
+            for x, y in (start, end)
+        ):
+            return False
+        state = self.graphicstate.copy()
+        state.linewidth = height
+        self.device.paint_path(
+            state, True, False, False, [("m", 0, 0.5), ("l", 1, 0.5)]
+        )
+        return True
 
     def process_page(self, page: PDFPage) -> None:
         # 重载设置 page 的 obj_patch
@@ -352,6 +433,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         resources: Dict[object, object],
         streams: Sequence[object],
         ctm: Matrix = MATRIX_IDENTITY,
+        initial_state=None,
     ) -> None:
         # 重载返回指令流
         """Render the content streams.
@@ -366,6 +448,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         # )
         self.init_resources(resources)
         self.init_state(ctm)
+        if initial_state is not None:
+            # A Form inherits graphics and text state but uses its own CTM.
+            self.set_current_state((ctm, *initial_state[1:]))
         return self.execute(list_value(streams))
 
     def execute(self, streams: Sequence[object]) -> None:
@@ -394,7 +479,10 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         args = self.pop(nargs)
                         # log.debug("exec: %s %r", name, args)
                         if len(args) == nargs:
-                            func(*args)
+                            replacement = func(*args)
+                            if name == "Do" and replacement == "n":
+                                ops += "n "
+                                continue
                             if not (
                                 name[0] == "T"
                                 or name in ['"', "'", "EI", "MP", "DP", "BMC", "BDC"]

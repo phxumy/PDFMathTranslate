@@ -20,6 +20,10 @@ class CodexOutputError(RuntimeError):
     """The CLI succeeded but returned an invalid JSON/schema payload."""
 
 
+class CodexTranslationValidationError(CodexOutputError):
+    """Bounded content retries failed; no complete translation can be published."""
+
+
 def codex_cli_error(returncode: int, detail: str) -> CodexExecutionError:
     """Classify only a terminal CLI error line, never words in its echoed prompt."""
 

@@ -9,12 +9,12 @@ Names without that evidence deliberately keep their source text.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-from typing import Iterable
 import unicodedata
+from dataclasses import dataclass
+from typing import Iterable
 
-from pymupdf import TEXTFLAGS_DICT, TEXT_PRESERVE_IMAGES
+from pymupdf import TEXT_PRESERVE_IMAGES, TEXTFLAGS_DICT
 
 _LETTER = r"[^\W\d_]"
 _HYPHENS = "-\u2010\u2011"
@@ -34,6 +34,44 @@ _GRAMMAR_WORDS = frozenset(
     "nor of on or our than that the their them then there these they this those "
     "to was we were which who with without you your".split()
 )
+
+
+def coalesce_source_uri_annotations(links):
+    """Combine overlapping duplicate hit areas for one URI on one source row.
+
+    Some publishers emit several nested annotations over a single visible URL
+    row. They are geometry evidence for one row, not repeated source words.
+    This only normalizes the read-only index; PDF annotation actions are never
+    modified, and callers still require exact visible-glyph/URI agreement.
+    """
+    result = []
+    for uri, bounds in links:
+        merged = tuple(bounds)
+        index = 0
+        while index < len(result):
+            other_uri, other = result[index]
+            if uri != other_uri:
+                index += 1
+                continue
+            height = min(merged[3] - merged[1], other[3] - other[1])
+            if (
+                height > 0
+                and abs(merged[1] - other[1]) <= height * 0.08
+                and abs(merged[3] - other[3]) <= height * 0.08
+                and min(merged[2], other[2]) > max(merged[0], other[0])
+            ):
+                merged = (
+                    min(merged[0], other[0]),
+                    min(merged[1], other[1]),
+                    max(merged[2], other[2]),
+                    max(merged[3], other[3]),
+                )
+                result.pop(index)
+                index = 0
+                continue
+            index += 1
+        result.append((uri, merged))
+    return result
 
 
 def _touches_combining_mark(value: str, start: int, end: int) -> bool:

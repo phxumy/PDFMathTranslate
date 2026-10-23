@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from pdf2zh.converter import _restore_wrapped_source_uris
+from pdf2zh.source_spelling import coalesce_source_uri_annotations
 
 
 def make_case():
@@ -42,6 +43,32 @@ def test_annotation_and_two_glyph_rows_restore_wrapped_doi_and_offsets():
     assert segments == ["A reference, " + uri + ". Next reference."]
     assert paragraph.break_offsets == [offset - 1 for offset in offsets]
     assert [(c.get_text(), c.x0, c.x1, c.y0, c.y1, c.matrix) for c in chars] == before
+
+
+def test_nested_same_row_annotations_do_not_duplicate_visible_url_text():
+    uri, source, paragraph, chars, links = make_case()
+    first, second = links
+    overlapping = [
+        (uri, (first[1][0], first[1][1], first[1][0] + 40, first[1][3])),
+        first,
+        second,
+        (uri, (second[1][0], second[1][1], second[1][0] + 20, second[1][3])),
+    ]
+    normalized = coalesce_source_uri_annotations(overlapping)
+    assert normalized == links
+    segments = [source]
+    _restore_wrapped_source_uris(segments, [paragraph], [chars], normalized)
+    assert segments == ["A reference, " + uri + ". Next reference."]
+
+
+def test_coalescing_never_merges_different_uris_or_separate_rows():
+    links = [
+        ("https://example.org/one", (10, 100, 60, 110)),
+        ("https://example.org/two", (10, 100, 60, 110)),
+        ("https://example.org/one", (10, 88, 60, 98)),
+        ("https://example.org/one", (70, 100, 100, 110)),
+    ]
+    assert coalesce_source_uri_annotations(links) == links
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from ollama import ResponseError as OllamaResponseError
 
 from pdf2zh import cache
 from pdf2zh.config import ConfigManager
+from pdf2zh.codex_errors import CodexTranslationValidationError
 from pdf2zh.translator import (
     BaseTranslator,
     CodexTranslator,
@@ -593,9 +594,8 @@ class TestCodexTranslator(unittest.TestCase):
             "_run_batch_translation",
             side_effect=[[source], [source]],
         ):
-            translated = translator.translate_batch([source])
-
-        self.assertEqual(translated, [source])
+            with self.assertRaises(CodexTranslationValidationError):
+                translator.translate_batch([source])
         self.assertIsNone(translator.cache.get(source))
 
     def test_translate_batch_retries_short_english_grammar_residue(self):

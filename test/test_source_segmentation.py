@@ -28,14 +28,34 @@ class ScientificSourceSegmentationTests(unittest.TestCase):
                         [f"Consider {label} {number} here. ", "Next sentence."],
                     )
 
-    def test_length_splitting_does_not_cut_reference_units(self):
+    def test_soft_length_target_preserves_the_complete_reference_sentence(self):
         source = "alpha " * 48 + "Fig. 12(a) controls the visible result."
         for limit in range(290, 301):
             self.translator.MAX_ITEM_CHARS = limit
             with self.subTest(limit=limit):
                 chunks = self.translator._split_long_text(source)
                 self.assertEqual("".join(chunks), source)
-                self.assertTrue(all(len(chunk) <= limit for chunk in chunks))
+                self.assertEqual(chunks, [source])
+                self.assertTrue(
+                    all(
+                        len(chunk) <= self.translator.MAX_BATCH_CHARS
+                        for chunk in chunks
+                    )
+                )
+                self.assertEqual(sum("Fig. 12(a)" in chunk for chunk in chunks), 1)
+
+    def test_hard_request_limit_splits_without_cutting_reference_units(self):
+        source = (
+            "alpha " * 48 + "Fig. 12(a) controls the visible result. " + "beta " * 90
+        )
+        for hard_limit in range(290, 301):
+            self.translator.MAX_ITEM_CHARS = 100
+            self.translator.MAX_BATCH_CHARS = hard_limit
+            with self.subTest(hard_limit=hard_limit):
+                chunks = self.translator._split_long_text(source)
+                self.assertGreater(len(chunks), 1)
+                self.assertEqual("".join(chunks), source)
+                self.assertTrue(all(len(chunk) <= hard_limit for chunk in chunks))
                 self.assertEqual(sum("Fig. 12(a)" in chunk for chunk in chunks), 1)
 
     def test_empty_and_actual_sentence_boundaries_are_preserved(self):
@@ -63,6 +83,7 @@ class ScientificSourceSegmentationTests(unittest.TestCase):
         ):
             for limit in range(5, 29):
                 self.translator.MAX_ITEM_CHARS = limit
+                self.translator.MAX_BATCH_CHARS = limit
                 chunks = self.translator._split_long_text(source)
                 with self.subTest(source=source, limit=limit):
                     self.assertEqual("".join(chunks), source)

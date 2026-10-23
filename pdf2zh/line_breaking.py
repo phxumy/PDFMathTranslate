@@ -43,6 +43,14 @@ _URL_PREFIX_RE = re.compile(
     r"(?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)",
     re.IGNORECASE,
 )
+_BARE_DOMAIN_NAME = (
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|org|net|edu|gov|mil|int|io|ai|info|biz|cn|uk|de|fr|jp|"
+    r"ch|nl|ca|au|eu|us|ac|science|online)"
+)
+_BARE_DOMAIN_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./@-])" + _BARE_DOMAIN_NAME + r"/(?=[A-Za-z0-9_~%])"
+)
 _BROKEN_URL_PREFIX_RE = re.compile(
     r"(?:[A-Za-z][A-Za-z0-9+.-]*\s*:\s*/\s*/\s*|www\s*\.\s*)",
     re.IGNORECASE,
@@ -202,6 +210,15 @@ def _can_join_word_separator(
 def _scan_url(text: str, start: int) -> int | None:
     prefix = _URL_PREFIX_RE.match(text, start)
     if prefix is None:
+        # Publisher running heads often omit the scheme (pubs.acs.org/jmc).
+        # A lowercase DNS host, known TLD and explicit path distinguish these
+        # from scientific ratios, initials, filenames and dotted prose.
+        prefix = _BARE_DOMAIN_PATH_RE.match(text, start)
+    if prefix is None:
+        if not text[:start].strip() and re.fullmatch(
+            _BARE_DOMAIN_NAME, text[start:].strip()
+        ):
+            return start + len(text[start:].rstrip())
         return None
 
     cursor = prefix.end()
@@ -233,6 +250,11 @@ def _is_structural_literal_gap(
         return False
     previous = compact[-1]
     following = text[next_index]
+    # A source space before a parenthesized access date/citation ends the URL,
+    # even when that URL ends in '/'. Do not absorb bibliography prose into the
+    # protected literal; genuine URL parentheses with no space remain intact.
+    if following in "([（［":
+        return False
     structural = "/:_?#@&=%-"
     if previous in structural or following in structural + ".":
         return True
@@ -414,6 +436,13 @@ def iter_protected_literals(text: str) -> Iterator[ProtectedLiteral]:
             cursor = literal.end
             continue
         cursor += 1
+
+
+def is_protected_literal_only(text: str) -> bool:
+    """Whether the entire stripped text is one canonical URL, DOI or email."""
+    stripped = text.strip()
+    literal = protected_literal_at(stripped, 0)
+    return literal is not None and literal.end == len(stripped)
 
 
 def _scan_latin_word(text: str, start: int) -> int:

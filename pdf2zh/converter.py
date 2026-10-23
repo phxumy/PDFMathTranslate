@@ -22,7 +22,7 @@ from tenacity import retry, retry_if_exception, wait_fixed, stop_after_attempt
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.identity_layout import author_byline_chars, orcid_list_chars
-from pdf2zh.codex_errors import CodexPermanentError
+from pdf2zh.codex_errors import CodexPermanentError, CodexTranslationValidationError
 from pdf2zh.source_spelling import normalize_source_wraps
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
@@ -104,7 +104,8 @@ log = logging.getLogger(__name__)
 
 def _retryable_translation_error(error: BaseException) -> bool:
     return isinstance(error, Exception) and not isinstance(
-        error, (CodexPermanentError, TranslationAbortedError)
+        error,
+        (CodexPermanentError, CodexTranslationValidationError, TranslationAbortedError),
     )
 
 
@@ -198,7 +199,7 @@ _STRUCTURAL_ITALIC_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _SUBSECTION_ITALIC_LABEL_RE = re.compile(
-    r"^[A-Z]\.\s*[A-Z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*){0,15}$"
+    r"^(?:[A-Z]|\d+(?:\.\d+){0,4})\.\s*[A-Z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*){0,15}$"
 )
 _RUNIN_ITALIC_HEADING_RE = re.compile(
     r"^(?:\d+\)\s*)?[A-Z][A-Za-z-]*" r"(?:\s+[A-Za-z][A-Za-z-]*){1,16}:$"
@@ -421,6 +422,7 @@ _FORMULA_TRAILING_PROSE_WORDS = frozenset(
         "represents",
         "represented",
         "respectively",
+        "to",
         "where",
         "which",
         "was",
@@ -458,20 +460,34 @@ def _split_trailing_formula_prose_word(
         return chars, "", []
     preceding = chars[split_at - 1]
     preceding_text = preceding.get_text()
-    preceding_is_formula_closer = (
-        preceding_text in _FORMULA_CLOSING
+    # A publisher can leave a grammar connector glued to the closing ket,
+    # e.g. ``|01>—to realize``. The em dash and connector belong to prose;
+    # keep only the closed mathematical expression immutable.
+    prose_dash = (
+        has_prose_context
+        and preceding_text in {"—", "–"}
         and split_at >= 2
+        and chars[split_at - 2].get_text() in _FORMULA_CLOSING | {"⟩", "〉"}
+        and not _MATH_FONT_RE.search(_formula_font_name(preceding))
+    )
+    mathematical_preceding = chars[split_at - 2] if prose_dash else preceding
+    mathematical_split_at = split_at - 1 if prose_dash else split_at
+    preceding_is_formula_closer = (
+        mathematical_preceding.get_text() in _FORMULA_CLOSING | {"⟩", "〉"}
+        and mathematical_split_at >= 2
         and any(
             _MATH_FONT_RE.search(_formula_font_name(char))
             or (
                 char.get_text()
                 and unicodedata.category(char.get_text()[0]) in {"Lm", "Mn", "Sk", "Sm"}
             )
-            for char in chars[max(0, split_at - 4) : split_at - 1]
+            for char in chars[
+                max(0, mathematical_split_at - 4) : mathematical_split_at - 1
+            ]
         )
     )
     lowered_word = word.lower()
-    if lowered_word in {"and", "in"} and not (
+    if lowered_word in {"and", "in", "to"} and not (
         has_prose_context and preceding_is_formula_closer
     ):
         # Do not turn a mixed-font mathematical function such as ``sin`` into
@@ -521,6 +537,12 @@ def _split_trailing_formula_prose_word(
     ):
         return chars, "", []
     spacer = " " if gap > 0.12 * em else ""
+    if prose_dash:
+        return (
+            chars[: split_at - 1],
+            preceding_text + spacer + word,
+            chars[split_at - 1 :],
+        )
     return chars[:split_at], spacer + word, suffix
 
 
@@ -663,6 +685,74 @@ def _release_tex_accented_prose_words(
     an overprinted accent/base pair, and at least two following letters. Math
     accents, isolated variables, code and preserved areas stay as source glyphs.
     """
+    literal_accents = {
+        "´": "\u0301",
+        "`": "\u0300",
+        "¨": "\u0308",
+        "ˆ": "\u0302",
+        "˜": "\u0303",
+        "¯": "\u0304",
+        "ˇ": "\u030c",
+        "˘": "\u0306",
+        "˚": "\u030a",
+        "˙": "\u0307",
+        "¸": "\u0327",
+    }
+    for formula_id, chars in enumerate(formulas):
+        if len(chars) != 1 or chars[0].get_text() not in literal_accents:
+            continue
+        accent = chars[0]
+        paragraph_id = formula_paragraphs[formula_id]
+        paragraph = paragraphs[paragraph_id]
+        marker = f"{{v{formula_id}}}"
+        if paragraph.layout_class <= 1 or segments[paragraph_id].count(marker) != 1:
+            continue
+        left, right = segments[paragraph_id].split(marker)
+        prefix = re.search(r"([A-Za-z]{2,})\s*$", left)
+        suffix = re.match(r"([A-Za-z]+)", right)
+        if not prefix or not suffix or len(prefix[1]) + len(suffix[1]) < 4:
+            continue
+        em = float(paragraph.size)
+        if not _is_non_math_text_font(
+            accent.fontname
+        ) or _is_non_horizontal_text_matrix(accent.matrix):
+            continue
+        bases = [
+            char
+            for char in paragraph_text_chars[paragraph_id]
+            if char.get_text() == suffix[1][0]
+            and char.fontname == accent.fontname
+            and abs(char.x0 - accent.x0) <= 0.35 * em
+            and char.x0 < accent.x1 - 0.15 * em
+            and abs(_char_baseline(char) - _char_baseline(accent)) <= 0.20 * em
+            and 0.9 * em <= char.size <= 1.1 * em
+        ]
+        if len(bases) != 1:
+            continue
+        previous = bases[0]
+        matched = []
+        for letter in reversed(prefix[1]):
+            choices = [
+                char
+                for char in paragraph_text_chars[paragraph_id]
+                if char.get_text() == letter
+                and char.fontname == previous.fontname
+                and abs(_char_baseline(char) - _char_baseline(previous)) <= 0.15 * em
+                and -0.12 * em <= previous.x0 - char.x1 <= 0.16 * em
+            ]
+            if len(choices) != 1:
+                break
+            previous = choices[0]
+            matched.append(previous)
+        if len(matched) != len(prefix[1]):
+            continue
+        combined = unicodedata.normalize(
+            "NFC", suffix[1][0] + literal_accents[accent.get_text()]
+        )
+        segments[paragraph_id] = (
+            left[: prefix.start()] + prefix[1] + combined + right[1:]
+        )
+        paragraph_text_chars[paragraph_id].append(accent)
     accents = {
         "`": "\u0300",
         "'": "\u0301",
@@ -787,6 +877,123 @@ def _release_tex_accented_prose_words(
         paragraph_text_chars[paragraph_id].extend(
             char for char in chars if id(char) not in known
         )
+
+
+def _release_reference_number_labels(
+    segments, formulas, lines, formula_paragraphs, paragraphs, text_chars
+):
+    """Restore numeric citation labels accidentally hidden as inline math."""
+    author = re.compile(
+        r"^\s*[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+,\s*[A-Z](?:\.|[.\-][A-Z])"
+    )
+    expanded = [
+        _FORMULA_MARKER_RE.sub(
+            lambda m: "".join(c.get_text() for c in formulas[int(m.group(1))]), s
+        )
+        for s in segments
+    ]
+    for index, chars in enumerate(formulas):
+        label = "".join(ch.get_text() for ch in chars)
+        if not re.fullmatch(r"\(\d{1,3}\)(?:\([a-z]\))?", label) or lines[index]:
+            continue
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        marker = f"{{v{index}}}"
+        if (
+            paragraph.region_kind != "plain text"
+            or paragraph.layout_class <= 1
+            or segments[paragraph_id].count(marker) != 1
+        ):
+            continue
+        if any(
+            not _is_non_math_text_font(ch.fontname)
+            or _is_non_horizontal_text_matrix(ch.matrix)
+            for ch in chars
+        ):
+            continue
+        left, right = segments[paragraph_id].split(marker)
+        if not left.strip() and not right.strip() and paragraph_id + 1 < len(segments):
+            next_id = paragraph_id + 1
+            following = paragraphs[next_id]
+            if (
+                following.region_kind == "plain text"
+                and author.match(segments[next_id])
+                and abs(following.y - paragraph.y) <= 0.25 * paragraph.size
+                and -0.1 * paragraph.size
+                <= following.x - paragraph.x1
+                <= 1.5 * paragraph.size
+            ):
+                segments[next_id] = label + " " + segments[next_id]
+                segments[paragraph_id] = ""
+                following.x = paragraph.x
+                following.x0 = min(following.x0, paragraph.x0)
+                text_chars[next_id].extend(chars)
+            continue
+        if author.match(right) and reference_entry_score(expanded[paragraph_id]) >= 5:
+            separator = " " if left and not left[-1].isspace() else ""
+            segments[paragraph_id] = left + separator + label + " " + right.lstrip()
+            text_chars[paragraph_id].extend(chars)
+
+
+def _recover_author_information_affiliations(
+    segments, formulas, formula_paragraphs, paragraphs
+):
+    """Translate publisher contact affiliations while keeping each author name.
+
+    These are address lists, proved by institution vocabulary plus postal or
+    contact metadata. No general italic prose or mathematical run is released.
+    """
+    name_pattern = re.compile(
+        r"(?P<name>[A-Z][A-Za-z.'’\-]+(?:\s+[A-Z][A-Za-z.'’\-]+){1,4})"
+        r"\s*[−—–]\s*(?=(?:Department|Institute|State|International|Laboratory|"
+        r"[A-Z][A-Za-z]+\s+(?:Center|Therapeutics|University))\b)"
+    )
+    for paragraph_id, source in enumerate(segments):
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.region_kind != "plain text" or paragraph.layout_class <= 1:
+            continue
+        expanded = source
+        for match in reversed(list(_FORMULA_MARKER_RE.finditer(source))):
+            index = int(match.group(1))
+            chars = formulas[index]
+            if formula_paragraphs[index] != paragraph_id or not chars:
+                continue
+            value = _reconstruct_italic_run(chars)
+            if not re.fullmatch(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9\s,.;:&()/'’@_+−—–\-]+", value):
+                continue
+            if any(_is_non_horizontal_text_matrix(ch.matrix) for ch in chars):
+                continue
+            expanded = expanded[: match.start()] + value + expanded[match.end() :]
+        if (
+            _FORMULA_MARKER_RE.search(expanded)
+            or len(
+                re.findall(
+                    r"\b(?:Department|University|Institute|Laboratory|Hospital|Center|Therapeutics)\b",
+                    expanded,
+                )
+            )
+            < 2
+            or not re.search(r"\b\d{5,6}\b|\bEmail:|orcid\.org/", expanded)
+        ):
+            continue
+        names = list(name_pattern.finditer(expanded))
+        if not names or expanded[: names[0].start()].strip():
+            continue
+        parts = []
+        cursor = 0
+        for match in names:
+            if match.start() > cursor:
+                parts.append(
+                    SegmentPart(ROLE_AFFILIATION, expanded[cursor : match.start()])
+                )
+            parts.append(
+                SegmentPart(ROLE_PRESERVE, expanded[match.start() : match.end()])
+            )
+            cursor = match.end()
+        if expanded[cursor:]:
+            parts.append(SegmentPart(ROLE_AFFILIATION, expanded[cursor:]))
+        segments[paragraph_id] = expanded
+        paragraph.affiliation_parts = tuple(parts)
 
 
 def _release_reference_prose_fragments(
@@ -1316,6 +1523,158 @@ def _release_caption_prose_delimiters(
             segments[paragraph_id] = left + marker + ")" + right
 
 
+def _release_caption_title_words(
+    segments, formulas, formula_paragraphs, paragraphs, text_chars
+):
+    """Expose a publisher's ``Figure 1 | Caption`` separator and first word.
+
+    A vertical bar is a math symbol, so a following bold caption word can be
+    absorbed into its formula run. Only the introductory caption boundary is
+    eligible; absolute values and inline formula bars remain protected.
+    """
+    for index, chars in enumerate(formulas):
+        if not chars:
+            continue
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        if paragraph.region_kind not in {"figure_caption", "table_caption"}:
+            continue
+        marker = f"{{v{index}}}"
+        source = segments[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        left, right = source.split(marker)
+        if not re.fullmatch(
+            r"\s*(?:Figure|Fig\.?|Table)\s+\d+[A-Za-z]?\s*", left, re.I
+        ):
+            continue
+        value = "".join(char.get_text() for char in chars)
+        if not re.fullmatch(r"\|(?:[A-Za-z]+(?:-[A-Za-z]+)*)?", value):
+            continue
+        if not all(
+            getattr(char, "_pdf2zh_layout_class", 0) > 0
+            and _is_non_math_text_font(char.fontname)
+            and not _is_non_horizontal_text_matrix(char.matrix)
+            and 0.88 * paragraph.size <= char.size <= 1.12 * paragraph.size
+            for char in chars
+        ):
+            continue
+        segments[paragraph_id] = left + "| " + value[1:] + right
+        text_chars[paragraph_id].extend(chars)
+
+
+def _split_parenthetical_variable_definitions(
+    segments, formulas, lines, offsets, formula_paragraphs, paragraphs, text_chars
+):
+    """Keep the opening parenthesis of ``(a is the lattice constant)`` in prose.
+
+    The variable itself stays an immutable source-glyph token. When an inline
+    expression and the definition share a run, split their tokens so the model
+    can see which clause the parenthesis encloses.
+    """
+    for index in range(len(formulas)):
+        chars = formulas[index]
+        paragraph_id = formula_paragraphs[index]
+        if len(chars) < 2 or lines[index] or paragraphs[paragraph_id].layout_class <= 1:
+            continue
+        opener, variable = chars[-2:]
+        if (
+            opener.get_text() != "("
+            or re.fullmatch(r"[A-Za-z]", variable.get_text()) is None
+            or not _is_non_math_text_font(opener.fontname)
+            or not _is_non_math_text_font(variable.fontname)
+        ):
+            continue
+        marker = f"{{v{index}}}"
+        source = segments[paragraph_id]
+        if source.count(marker) != 1:
+            continue
+        left, right = source.split(marker)
+        if not re.match(r"\s+(?:is|are|denotes?|represents?)\b", right):
+            continue
+        if ")" not in right or any(
+            getattr(char, "_pdf2zh_layout_class", 0) == 0
+            or _is_non_horizontal_text_matrix(char.matrix)
+            for char in (opener, variable)
+        ):
+            continue
+        if len(chars) == 2:
+            formulas[index] = [variable]
+            offsets[index] += variable.y0 - chars[0].y0
+            replacement = "(" + marker
+        else:
+            if chars[-3].get_text() not in ")]}":
+                continue
+            formulas[index] = chars[:-2]
+            new_index = len(formulas)
+            formulas.append([variable])
+            lines.append([])
+            offsets.append(offsets[index] + variable.y0 - chars[0].y0)
+            formula_paragraphs.append(paragraph_id)
+            replacement = marker + f" ({{v{new_index}}}"
+        segments[paragraph_id] = left + replacement + right
+        text_chars[paragraph_id].append(opener)
+
+
+def _split_inline_formula_items(
+    segments, formulas, lines, offsets, formula_paragraphs, paragraphs, text_chars
+):
+    """Expose a top-level prose comma between two independent inline items.
+
+    An ordinary-font comma followed by a visible word-sized gap separates
+    ``Q_j, n=a†a``. Commas in a bracket, vector, or commutator and formula-font
+    punctuation stay inside the original mathematical atom.
+    """
+    for index in range(len(formulas)):
+        chars = formulas[index]
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        marker = f"{{v{index}}}"
+        if (
+            lines[index]
+            or paragraph.layout_class <= 1
+            or segments[paragraph_id].count(marker) != 1
+        ):
+            continue
+        split = None
+        depth = 0
+        for position, char in enumerate(chars):
+            value = char.get_text()
+            if value in "([{":
+                depth += 1
+            elif value in ")]}":
+                depth = max(0, depth - 1)
+            elif (
+                value == ","
+                and depth == 0
+                and 0 < position < len(chars) - 1
+                and _is_non_math_text_font(char.fontname)
+                and not _MATH_FONT_RE.search(_formula_font_name(char))
+                and chars[position + 1].x0 - char.x1 >= 0.25 * paragraph.size
+                and abs(_char_baseline(chars[position + 1]) - _char_baseline(char))
+                <= 0.25 * paragraph.size
+            ):
+                split = position
+                break
+        if split is None:
+            continue
+        prefix, suffix = chars[:split], chars[split + 1 :]
+        if not any(ch.get_text().isalpha() for ch in prefix) or not any(
+            ch.get_text().isalpha() for ch in suffix
+        ):
+            continue
+        new_index = len(formulas)
+        formulas[index] = prefix
+        formulas.append(suffix)
+        lines.append([])
+        offsets.append(offsets[index] + suffix[0].y0 - chars[0].y0)
+        formula_paragraphs.append(paragraph_id)
+        text_chars[paragraph_id].append(chars[split])
+        segments[paragraph_id] = segments[paragraph_id].replace(
+            marker, marker + f", {{v{new_index}}}", 1
+        )
+
+
 def _release_prose_slash_connectives(
     segments, formulas, formula_paragraphs, paragraphs
 ):
@@ -1384,6 +1743,12 @@ def _split_trailing_prose_punctuation(
             break
         split_at -= 1
     if split_at in {0, len(chars)}:
+        return chars, ""
+    prefix = "".join(char.get_text() for char in chars[:split_at])
+    if any(
+        prefix.count(left) > prefix.count(right)
+        for left, right in (("[", "]"), ("(", ")"), ("{", "}"))
+    ):
         return chars, ""
     return (
         chars[:split_at],
@@ -1501,6 +1866,30 @@ def _touching_text_glyphs(
             not _is_non_horizontal_text_matrix(char.matrix) for char in (left, right)
         )
         and -0.05 * size <= float(right.x0) - float(left.x1) <= max_gap * size
+    )
+
+
+def _attach_overlapping_region_punctuation(
+    previous, current, previous_class, current_class, previous_kind, current_kind
+):
+    if (
+        previous is None
+        or previous_class <= 1
+        or current_class <= 1
+        or previous_class == current_class
+        or previous_kind != "plain text"
+        or current_kind != "plain text"
+        or current.get_text().strip()
+        not in {"", ",", ".", ";", ":", '"', "'", "”", "’"}
+    ):
+        return False
+    em = max(float(previous.size), float(current.size), 1.0)
+    return bool(
+        previous.fontname == current.fontname
+        and abs(previous.size - current.size) <= 0.05 * em
+        and abs(previous.y0 - current.y0) <= 0.10 * em
+        and -0.20 * em <= current.x0 - previous.x1 <= 0.25 * em
+        and not _is_non_horizontal_text_matrix(current.matrix)
     )
 
 
@@ -1861,6 +2250,14 @@ def _should_absorb_trailing_formula_base(
         return False
 
     font_name = _formula_font_name(candidate)
+    if (
+        candidate.get_text() in {"=", "≡", "≈", "≤", "≥", "<", ">", "∝"}
+        and _is_prose_emphasis_font(previous.fontname)
+        and -0.1 * paragraph_size <= gap <= 0.85 * paragraph_size
+        and abs(_char_baseline(previous) - _char_baseline(candidate))
+        < 0.2 * paragraph_size
+    ):
+        return True
     if re.fullmatch(r"AdvP[0-9A-Fa-f]+", font_name, re.IGNORECASE):
         # Vector accents and out-of-order delimiters overlap (or nearly overlap)
         # the ordinary base they visually decorate.
@@ -1871,6 +2268,15 @@ def _should_absorb_trailing_formula_base(
 
     previous_center = (float(previous.y0) + float(previous.y1)) / 2
     candidate_center = (float(candidate.y0) + float(candidate.y1)) / 2
+    if (
+        float(candidate.size) < 0.79 * paragraph_size
+        and _is_non_math_text_font(previous.fontname)
+        and -0.20 * paragraph_size <= gap <= 0.25 * paragraph_size
+        and 0.10 * paragraph_size
+        <= previous_center - candidate_center
+        <= 0.70 * paragraph_size
+    ):
+        return True
     if (
         float(candidate.size) < 0.79 * paragraph_size
         and previous_formula
@@ -2707,6 +3113,15 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     em = max(float(getattr(candidate, "size", 0.0)), float(previous.size), 1.0)
     right_edge = max(float(char.x1) for char in chars)
     gap = float(candidate.x0) - right_edge
+    if (
+        previous_value in {"ˆ", "^", "¯", "~"}
+        and _MATH_FONT_RE.search(_formula_font_name(previous))
+        and len(value) == 1
+        and value.isalpha()
+        and abs(float(candidate.x0) - float(previous.x0)) <= 0.35 * em
+        and abs(_char_baseline(candidate) - _char_baseline(previous)) <= 0.25 * em
+    ):
+        return True
     # TeX text accents are overprinted glyphs: their following base moves back
     # underneath the accent (Cand\`es, H\"older). Preserve both glyphs as one
     # atom instead of charging the accent's nominal advance as a separate word.
@@ -2753,6 +3168,15 @@ def _should_extend_formula_run(chars: list[LTChar], candidate: LTChar) -> bool:
     first = value[0]
     last = previous_value[-1] if previous_value else ""
     formula_text = "".join(char.get_text() for char in chars)
+    if (
+        len(value) == 1
+        and value.isalpha()
+        and any(
+            formula_text.count(left) > formula_text.count(right)
+            for left, right in (("[", "]"), ("(", ")"))
+        )
+    ):
+        return True
     if first in "([（［" and re.fullmatch(r"[\d\s,;\-–—.]+", formula_text) is not None:
         return False
     if last.isalnum() and first in "([（［":
@@ -2918,6 +3342,93 @@ def _mark_prose_words(chars: list[LTChar]) -> None:
                     char._pdf2zh_cm_prose = True
 
 
+def _clipped_figure_word_chars(chars, layout, detections):
+    """Keep a chart word intact when its last glyph falls outside the figure box."""
+    figures = [d.bounds for d in detections if d.class_name == "figure"]
+    if not figures:
+        return set()
+    preserved = set()
+    run = []
+
+    def flush():
+        if len(run) >= 4:
+            classes = [
+                int(
+                    layout[
+                        min(max(int(ch.y0), 0), layout.shape[0] - 1),
+                        min(max(int(ch.x0), 0), layout.shape[1] - 1),
+                    ]
+                )
+                for ch in run
+            ]
+            if set(classes) <= {0, 1} and classes.count(0) >= len(run) * 0.75:
+                if any(
+                    x0 <= run[0].x0 <= x1 and y0 <= run[0].y0 <= y1
+                    for x0, y0, x1, y1 in figures
+                ):
+                    preserved.update(object_id(ch) for ch in run)
+        run.clear()
+
+    for ch in chars:
+        if not ch.get_text().isalpha() or not _is_non_math_text_font(ch.fontname):
+            flush()
+            continue
+        if run and not _touching_text_glyphs(run[-1], ch, max_gap=0.20):
+            flush()
+        run.append(ch)
+    flush()
+    return preserved
+
+
+def _split_running_header_chars(chars, layout, page_height):
+    """Preserve a top-margin word split by the detector's abandoned border.
+
+    Only uppercase words already mostly preserved by the detector qualify.
+    This reunites the first ``A`` of ``ARTICLES`` with its source glyphs,
+    without classifying an ordinary first-page article title as a header.
+    """
+    result = set()
+    run = []
+
+    def flush():
+        if len(run) >= 4:
+            value = "".join(char.get_text() for char in run)
+            classes = [
+                layout[
+                    min(max(0, int(char.y0)), layout.shape[0] - 1),
+                    min(max(0, int(char.x0)), layout.shape[1] - 1),
+                ]
+                for char in run
+            ]
+            if value.isalpha() and value.isupper() and classes.count(0) >= len(run) / 2:
+                result.update(object_id(char) for char in run)
+        run.clear()
+
+    for char in chars:
+        if (
+            char.y0 < page_height * 0.94
+            or char.size > page_height * 0.03
+            or not char.get_text().isalpha()
+            or not char.get_text().isupper()
+            or not _is_non_math_text_font(char.fontname)
+        ):
+            flush()
+            continue
+        if run:
+            previous = run[-1]
+            em = max(float(previous.size), float(char.size), 1.0)
+            if not (
+                char.fontname == previous.fontname
+                and abs(char.size - previous.size) < 0.05 * em
+                and abs(char.y0 - previous.y0) < 0.10 * em
+                and -0.15 * em <= char.x0 - previous.x1 <= 0.20 * em
+            ):
+                flush()
+        run.append(char)
+    flush()
+    return result
+
+
 def _abandoned_reference_entries(lines: list[list[LTChar]]) -> list[list[LTChar]]:
     """Identify complete bibliographic entries inside an abandoned text box.
 
@@ -2971,11 +3482,33 @@ def _abandoned_reference_entries(lines: list[list[LTChar]]) -> list[list[LTChar]
             indices.append(next_index)
             previous = cell
             text += " " + continuation
-        if (
+        complete = (
             "@" not in text
             and re.search(r"\((?:19|20)\d{2}[a-z]?\)", text)
             and reference_entry_score(text) >= 5
-        ):
+        )
+        previous_entry = entries[-1] if entries else []
+        marker = re.match(r"^\[\s*(S\s*)?(\d{1,3})\s*\]", text)
+        previous_marker = re.match(
+            r"^\[\s*(S\s*)?(\d{1,3})\s*\]",
+            _reconstruct_italic_run(previous_entry),
+        )
+        continued_reference = bool(
+            previous_entry
+            and previous_marker
+            and marker
+            and marker[1] == previous_marker[1]
+            and int(marker[2]) == int(previous_marker[2]) + 1
+            and abs(first[0].x0 - previous_entry[0].x0) <= em
+            and 0.7 * em
+            <= _char_baseline(previous_entry[-1]) - _char_baseline(first[0])
+            <= 2.5 * em
+            and abs(max(ch.size for ch in previous_entry) - em) <= 0.15 * em
+            and reference_entry_score(text) >= 3
+            and len(re.findall(r"[A-Za-z]{3,}", text)) >= 5
+            and "@" not in text
+        )
+        if complete or continued_reference:
             entries.append(candidate)
             used.update(indices)
     return entries
@@ -3882,7 +4415,9 @@ def _is_high_confidence_prose_italic(
             not (char.isalpha() or char.isspace() or char in "-‐‑–—'’.")
             for char in text
         )
-        and not (parenthetical_connector or runin_heading or quoted_prose)
+        and not (
+            parenthetical_connector or runin_heading or quoted_prose or subsection_label
+        )
     ):
         return None
     letters = [char for char in text if char.isalpha()]
@@ -4741,7 +5276,31 @@ class TargetVerticalFit:
     contained: bool
 
 
-_MIN_COMPACT_LINE_HEIGHT = 0.95
+_MIN_COMPACT_LINE_HEIGHT = 1.15
+
+
+def _expand_subsection_title_bounds(segments, paragraphs, page_width):
+    """Use the following text column's empty width for a short section title."""
+    for text, heading in zip(segments, paragraphs):
+        if (
+            heading.region_kind != "title"
+            or _SUBSECTION_ITALIC_LABEL_RE.fullmatch(text.strip()) is None
+        ):
+            continue
+        em = heading.size
+        candidates = [
+            p
+            for p in paragraphs
+            if p is not heading
+            and p.region_kind == "plain text"
+            and abs(p.x0 - heading.x0) <= em
+            and -0.2 * em <= heading.y0 - p.y1 <= 4 * em
+            and heading.x1 <= p.x1
+            and p.x1 - p.x0 < page_width * 0.58
+        ]
+        if candidates:
+            following = min(candidates, key=lambda p: abs(heading.y0 - p.y1))
+            heading.x1 = following.x1
 
 
 def _fit_target_vertical_layout(
@@ -4753,9 +5312,9 @@ def _fit_target_vertical_layout(
 ) -> TargetVerticalFit:
     """Choose readable leading, then uniformly shrink an overfull paragraph.
 
-    Historical rendering compacts leading in 0.05 steps down to 0.95.  When
-    that is still too tall, reducing leading further would make adjacent CJK
-    lines collide.  Instead, keep 0.95 leading and uniformly scale the movable
+    CJK glyphs occupy nearly a full em. Leading below 1.15 makes dense lines
+    touch or overlap, especially beside inline superscripts. Keep readable
+    leading and uniformly scale the movable
     text/formula geometry so it remains inside the source paragraph box.
     """
     if (
@@ -4767,12 +5326,15 @@ def _fit_target_vertical_layout(
         return TargetVerticalFit(default_line_height, 1.0, False)
 
     line_height = default_line_height
+    minimum_line_height = min(
+        default_line_height, _MIN_COMPACT_LINE_HEIGHT if line_count > 1 else 0.95
+    )
     while (
         line_count * font_size * line_height > available_height
-        and line_height > _MIN_COMPACT_LINE_HEIGHT
+        and line_height > minimum_line_height
     ):
         line_height = max(
-            _MIN_COMPACT_LINE_HEIGHT,
+            minimum_line_height,
             round(line_height - 0.05, 10),
         )
 
@@ -5031,6 +5593,21 @@ class PDFConverterEx(PDFConverter):
             assert isinstance(text, str), str(type(text))
         except PDFUnicodeNotDefined:
             text = self.handle_undefined_char(font, cid)
+        # Ligatures are one source glyph but ordinary prose characters. Expose
+        # their letters to translation without changing the source CID/width.
+        text = text.translate(
+            str.maketrans(
+                {
+                    "\ufb00": "ff",
+                    "\ufb01": "fi",
+                    "\ufb02": "fl",
+                    "\ufb03": "ffi",
+                    "\ufb04": "ffl",
+                    "\ufb05": "st",
+                    "\ufb06": "st",
+                }
+            )
+        )
         textwidth = font.char_width(cid)
         textdisp = font.char_disp(cid)
         item = LTChar(
@@ -5225,6 +5802,7 @@ def _classify_running_header_regions(
             page_height=page_height,
             break_offsets=tuple(paragraph.break_offsets),
             region_kind=paragraph.region_kind,
+            page_index=paragraph.page_id,
         )
         if is_running_header_segment(source):
             paragraph.region_kind = RUNNING_HEADER_REGION_KIND
@@ -5701,6 +6279,7 @@ class TranslateConverter(PDFConverterEx):
                 page_height=page_height,
                 break_offsets=tuple(paragraph.break_offsets),
                 region_kind=paragraph.region_kind,
+                page_index=paragraph.page_id,
             )
             if segment_index in already_english:
                 plans.append(SegmentPlan(source, (SegmentPart(ROLE_PRESERVE, text),)))
@@ -6331,6 +6910,16 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         # A. 原文档解析
         _mark_prose_words([child for child in ltpage if isinstance(child, LTChar)])
+        split_header_chars = _split_running_header_chars(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            self.layout[ltpage.pageid],
+            float(ltpage.height),
+        )
+        split_header_chars |= _clipped_figure_word_chars(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            self.layout[ltpage.pageid],
+            getattr(self, "layout_detections", {}).get(ltpage.pageid, ()),
+        )
         code_chars = code_block_chars(ltpage)
         identity_chars = orcid_list_chars(ltpage) | author_byline_chars(ltpage)
         recovered_region_classes = _recover_preserved_region_prose(
@@ -6379,7 +6968,7 @@ class TranslateConverter(PDFConverterEx):
                 toc_entry_index = toc_layout.entry_by_char.get(object_id(child))
                 child._pdf2zh_preserved_code = child in code_chars
                 child._pdf2zh_preserved_identity = child in identity_chars
-                if child in code_chars or child in identity_chars:
+                if child in code_chars or child in identity_chars or object_id(child) in split_header_chars or child.get_text() in {"■", "□", "▪", "▫", "●", "○", "◆", "◇"}:
                     cls = 0
                 elif toc_entry_index is not None:
                     cls = toc_class_start + toc_entry_index
@@ -6447,6 +7036,14 @@ class TranslateConverter(PDFConverterEx):
                 elif _should_attach_unlabelled_closing_punctuation(
                     xt, child, xt_cls, actual_cls, logical_region_kind
                 ):
+                    cls = xt_cls
+                elif _attach_overlapping_region_punctuation(
+                    xt, child, int(xt_cls), actual_cls, logical_region_kind, candidate_region_kind
+                ):
+                    # Small overlapping text detections can isolate only the
+                    # final quote/space of a reference row. Keeping that glyph
+                    # with its touching source row avoids splitting one entry
+                    # into title, journal, and year paragraphs.
                     cls = xt_cls
                 # Source list markers end the preceding item's reflow even
                 # when the detector puts the entire list in one region.
@@ -6806,6 +7403,7 @@ class TranslateConverter(PDFConverterEx):
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
         _release_formula_case_explanations(sstk, var, varp, pstk, paragraph_text_chars)
         if not self.vfont and not self.vchar:
+            _release_reference_number_labels(sstk, var, varl, varp, pstk, paragraph_text_chars)
             _release_tex_accented_prose_words(sstk, var, varp, pstk, paragraph_text_chars)
             _release_reference_prose_fragments(sstk, var, varp, pstk, paragraph_text_chars)
             _release_standalone_prose_periods(sstk, var, varp, pstk, paragraph_text_chars)
@@ -6818,6 +7416,14 @@ class TranslateConverter(PDFConverterEx):
                 getattr(self, "source_uri_links", {}).get(ltpage.pageid, ()),
             )
         _release_caption_prose_delimiters(sstk, var, varp, pstk)
+        _release_caption_title_words(sstk, var, varp, pstk, paragraph_text_chars)
+        _split_parenthetical_variable_definitions(
+            sstk, var, varl, varf, varp, pstk, paragraph_text_chars
+        )
+        _split_inline_formula_items(
+            sstk, var, varl, varf, varp, pstk, paragraph_text_chars
+        )
+        _recover_author_information_affiliations(sstk, var, varp, pstk)
         _release_prose_slash_connectives(sstk, var, varp, pstk)
         for paragraph in pstk:
             if paragraph.region_kind == "toc_entry":
@@ -6853,6 +7459,7 @@ class TranslateConverter(PDFConverterEx):
             )
         if not self.vfont:
             _release_standalone_italic_headings(sstk, var, varp, pstk)
+        _expand_subsection_title_bounds(sstk, pstk, float(ltpage.width))
         log.debug("\n==========[VSTACK]==========\n")
         for id, v in enumerate(var):  # 计算公式宽度
             anchor_x, l = _formula_horizontal_geometry(v)

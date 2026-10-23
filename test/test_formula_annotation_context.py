@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from pdf2zh.converter import Paragraph, _collect_formula_annotation_contexts
+from pdf2zh.codex_errors import CodexTranslationValidationError
 from test_cm_prose_and_region_recovery import run
 from test_codex_formula_context import converter_with, paragraph, translator_stub
 
@@ -83,14 +84,12 @@ def test_invalid_annotation_is_retried_and_only_valid_result_cached(invalid):
     )
 
 
-def test_repeated_annotation_failure_warns_preserves_and_does_not_cache(caplog):
+def test_repeated_annotation_failure_stops_and_does_not_cache():
     translator = translator_stub()
     translator._run_annotation_batch = lambda *args, **kwargs: ["关于……的界"]
-    assert translator.translate_formula_annotations(["bound on"], [context()]) == [
-        "bound on"
-    ]
+    with pytest.raises(CodexTranslationValidationError):
+        translator.translate_formula_annotations(["bound on"], [context()])
     assert translator.cache.values == {}
-    assert "preserving source without caching" in caplog.text
 
 
 @pytest.mark.parametrize("target", ["上界：", "上界:"])

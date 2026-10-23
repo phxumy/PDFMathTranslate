@@ -4,20 +4,21 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import sys
 import tempfile
-import logging
 from asyncio import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import Any, BinaryIO, List, Optional, Dict
+from typing import Any, BinaryIO, Dict, List, Optional
 
 import numpy as np
 import requests
 import tqdm
+from babeldoc.assets.assets import get_font_and_metadata
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdfinterp import PDFResourceManager
@@ -25,6 +26,7 @@ from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
 from pymupdf import Document, Font, Matrix
 
+from pdf2zh.config import ConfigManager
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.font_cmap import prepare_pdf_text_font
@@ -35,11 +37,11 @@ from pdf2zh.link_annotations import (
 )
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import prepare_scan_background
-from pdf2zh.source_spelling import collect_source_spelling
+from pdf2zh.source_spelling import (
+    coalesce_source_uri_annotations,
+    collect_source_spelling,
+)
 from pdf2zh.translation_progress import PagePreview, TranslationProgressTracker
-
-from pdf2zh.config import ConfigManager
-from babeldoc.assets.assets import get_font_and_metadata
 
 NOTO_NAME = "noto"
 LATIN_NAME = "pdf2zh_latin"
@@ -168,8 +170,9 @@ def _layout_detections(
     page_layout: Any,
     height: int,
     width: int,
+    source_page: Any = None,
 ) -> list[_LayoutDetection]:
-    return [
+    detections = [
         _LayoutDetection(
             value=index + 2,
             class_name=page_layout.names[int(detection.cls)],
@@ -178,17 +181,162 @@ def _layout_detections(
         )
         for index, detection in enumerate(page_layout.boxes)
     ]
+    if source_page is None:
+        return detections
+    detections = _recover_abandoned_prose(detections, source_page, height, width)
+    return _recover_table_note_lines(detections, source_page, height, width)
+
+
+def _recover_table_note_lines(detections, source_page, height: int, width: int):
+    """Recover source-confirmed statistical footnotes inside a figure container.
+
+    A table and the figure below it can share one detector box. Require a
+    detected table caption, a genuinely raised smaller footnote marker and a
+    complete statistical note; ordinary table cells and plot labels stay intact.
+    """
+    captions = [item for item in detections if item.class_name == "table_caption"]
+    if not captions:
+        return detections
+    recovered = list(detections)
+    scale_x = width / source_page.rect.width
+    scale_y = height / source_page.rect.height
+    for block in source_page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            spans = [span for span in line["spans"] if span.get("text", "").strip()]
+            if len(spans) < 2 or line.get("dir", (1, 0)) != (1, 0):
+                continue
+            marker, body = spans[0], spans[1:]
+            text = "".join(span["text"] for span in body).strip()
+            if not (
+                re.fullmatch(r"[a-z*†‡]", marker["text"].strip())
+                and marker["size"] <= 0.85 * body[0]["size"]
+                and marker["origin"][1] <= body[0]["origin"][1] - body[0]["size"] * 0.15
+                and re.match(
+                    r"(?:Data|Values|Results)\s+(?:represent|are|were)\b", text
+                )
+                and re.search(
+                    r"\b(?:mean|median|replicates?|experiments?|deviation|error)\b",
+                    text,
+                    re.I,
+                )
+                and len(re.findall(r"[A-Za-z]+", text)) >= 6
+            ):
+                continue
+            left, top, right, bottom = line["bbox"]
+            bounds = (
+                max(0, int(left * scale_x) - 1),
+                max(0, int(height - bottom * scale_y) - 1),
+                min(width - 1, int(right * scale_x) + 1),
+                min(height - 1, int(height - top * scale_y) + 1),
+            )
+            x0, y0, x1, y1 = bounds
+            if not any(
+                0 <= caption.bounds[1] - y1 <= height * 0.16
+                and min(x1, caption.bounds[2]) - max(x0, caption.bounds[0])
+                >= (x1 - x0) * 0.8
+                for caption in captions
+            ):
+                continue
+            if any(
+                item.class_name == "table_footnote"
+                and _box_iou(bounds, item.bounds) > 0.5
+                for item in recovered
+            ):
+                continue
+            recovered.append(
+                _LayoutDetection(
+                    max(item.value for item in recovered) + 1,
+                    "table_footnote",
+                    bounds,
+                    1.0,
+                )
+            )
+    return recovered
+
+
+def _recover_abandoned_prose(
+    detections: list[_LayoutDetection],
+    source_page: Any,
+    height: int,
+    width: int,
+) -> list[_LayoutDetection]:
+    """Recover narrowly identifiable prose misclassified as page furniture.
+
+    The layout model can label a supplementary-section heading or the short
+    continuation before a displayed equation as ``abandon``.  Confidence alone
+    cannot distinguish those from real running heads.  Require visible source
+    words below the running-head margin and, for an equation lead-in, a nearby
+    displayed formula in the same column.  Figure/table labels remain protected.
+    """
+    words = source_page.get_text("words")
+    scale_x = width / source_page.rect.width
+    scale_y = height / source_page.rect.height
+    recovered = []
+    for detection in detections:
+        x0, y0, x1, y1 = detection.bounds
+        if detection.class_name != "abandon" or y1 > height * 0.94:
+            recovered.append(detection)
+            continue
+        selected = [
+            word
+            for word in words
+            if x0 <= (word[0] + word[2]) * scale_x / 2 <= x1
+            and y0 <= height - (word[1] + word[3]) * scale_y / 2 <= y1
+        ]
+        text = " ".join(word[4] for word in selected).strip()
+        section_heading = re.fullmatch(
+            r"(?:Supplementary|Supplemental|Supporting)\s+"
+            r"(?:Information|Materials?|Figures?|Tables?|Methods|Notes|"
+            r"Results|Discussion|References)(?:\s+[A-Z]?\d+)?\s*[:.]?",
+            text,
+            re.IGNORECASE,
+        )
+        equation_lead_in = (
+            3 <= len(selected) <= 18
+            and re.search(
+                r"\b(?:is|are|can\s+be|may\s+be)\s+"
+                r"(?:given|defined|written|expressed|obtained)\s+"
+                r"(?:by|as|in\s+the\s+form)\s*[:.]?$",
+                text,
+                re.IGNORECASE,
+            )
+            and any(
+                other.class_name == "isolate_formula"
+                and 0 <= y0 - other.bounds[3] <= height * 0.045
+                and min(x1, other.bounds[2]) > max(x0, other.bounds[0])
+                for other in detections
+            )
+        )
+        overlaps_figure = any(
+            other.class_name in _PRESERVED_LAYOUT_CLASSES
+            and min(x1, other.bounds[2]) > max(x0, other.bounds[0])
+            and min(y1, other.bounds[3]) > max(y0, other.bounds[1])
+            for other in detections
+        )
+        if (section_heading or equation_lead_in) and not overlaps_figure:
+            recovered.append(
+                _LayoutDetection(
+                    detection.value,
+                    "title" if section_heading else "plain text",
+                    detection.bounds,
+                    detection.confidence,
+                )
+            )
+        else:
+            recovered.append(detection)
+    return recovered
 
 
 def _build_layout_mask(
     page_layout: Any,
     height: int,
     width: int,
+    source_page: Any = None,
 ) -> tuple[np.ndarray, dict[int, str]]:
     """Build a mask without letting figure/table boxes erase exact captions."""
     layout_box = np.ones((height, width))
     confidence_map = np.full(layout_box.shape, -np.inf, dtype=np.float32)
-    detections = _layout_detections(page_layout, height, width)
+    detections = _layout_detections(page_layout, height, width, source_page)
     region_types = {detection.value: detection.class_name for detection in detections}
     text_regions: list[tuple[tuple[int, int, int, int], float]] = []
     semantic_text_regions: list[tuple[tuple[int, int, int, int], float]] = []
@@ -310,22 +458,24 @@ def _chatgpt_document_task_id(
 def _collect_source_uri_links(document):
     """Read URI actions directly, including relative URIs reported as Launch."""
     return {
-        page.number: [
-            (
-                document.xref_get_key(link["xref"], "A/URI")[1],
+        page.number: coalesce_source_uri_annotations(
+            [
                 (
-                    link["from"].x0,
-                    page.rect.height - link["from"].y1,
-                    link["from"].x1,
-                    page.rect.height - link["from"].y0,
-                ),
-            )
-            for link in page.get_links()
-            if link.get("xref")
-            and link.get("from")
-            and document.xref_get_key(link["xref"], "A/S") == ("name", "/URI")
-            and document.xref_get_key(link["xref"], "A/URI")[0] == "string"
-        ]
+                    document.xref_get_key(link["xref"], "A/URI")[1],
+                    (
+                        link["from"].x0,
+                        page.rect.height - link["from"].y1,
+                        link["from"].x1,
+                        page.rect.height - link["from"].y0,
+                    ),
+                )
+                for link in page.get_links()
+                if link.get("xref")
+                and link.get("from")
+                and document.xref_get_key(link["xref"], "A/S") == ("name", "/URI")
+                and document.xref_get_key(link["xref"], "A/URI")[0] == "string"
+            ]
+        )
         for page in document
     }
 
@@ -574,11 +724,12 @@ def translate_patch(
                     page_layout,
                     pix.height,
                     pix.width,
+                    doc_zh[page.pageno],
                 )
                 if not hasattr(device, "layout_detections"):
                     device.layout_detections = {}
                 device.layout_detections[page.pageno] = _layout_detections(
-                    page_layout, pix.height, pix.width
+                    page_layout, pix.height, pix.width, doc_zh[page.pageno]
                 )
                 layout_region_types[page.pageno] = page_region_types
                 layout[page.pageno] = box

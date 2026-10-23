@@ -81,6 +81,61 @@ def square(page, *, missing=False, mismatch=False):
 
 
 class SourceStrokeFidelityTests(unittest.TestCase):
+    def test_one_pixel_fraction_stencil_moves_only_inside_text_regions(self):
+        for mode in ("fraction", "blank", "figure", "thick", "white"):
+            with self.subTest(mode=mode), fitz.open() as doc:
+                page = doc.new_page(width=240, height=200)
+                page.draw_line((30, 40), (50, 40))
+                image = doc.get_new_xref()
+                doc.update_object(
+                    image,
+                    "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+                    "/ImageMask true /BitsPerComponent 1 >>",
+                )
+                doc.update_stream(image, b"\x80" if mode == "blank" else b"\x00")
+                resources = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])
+                doc.xref_set_key(resources, "XObject", f"<< /Rule {image} 0 R >>")
+                height = 5 if mode == "thick" else 0.5
+                color = "1 g " if mode == "white" else ""
+                doc.update_stream(
+                    page.get_contents()[0],
+                    (f"{color}q 10 0 0 -{height} 40 120 cm /Rule Do Q").encode(),
+                )
+                converter = extract_strokes(
+                    doc, layout=np.full((200, 240), 0 if mode == "figure" else 2)
+                )
+                self.assertEqual(len(converter.extracted), int(mode == "fraction"))
+                if mode == "fraction":
+                    self.assertEqual(converter.extracted[0][0].linewidth, 0.5)
+
+    def test_black_scn_fraction_rules_are_extracted_but_white_cmyk_is_not(self):
+        for colorspace, components, expected in (
+            (None, "", 1),
+            ("DeviceRGB", "0 0 0", 1),
+            ("DeviceGray", "0", 1),
+            ("DeviceCMYK", "0 0 0 1", 1),
+            ("DeviceCMYK", "0 0 0 0", 0),
+            ("DeviceRGB", "0.1 0.3 0.7", 0),
+        ):
+            with (
+                self.subTest(colorspace=colorspace, components=components),
+                fitz.open() as doc,
+            ):
+                page = doc.new_page(width=240, height=200)
+                page.draw_line((30, 40), (50, 40))
+                doc.update_stream(
+                    page.get_contents()[0],
+                    (
+                        (f"/{colorspace} CS {components} SCN " if colorspace else "")
+                        + "0.5 w "
+                        "30 160 m 50 160 l S"
+                    ).encode(),
+                )
+                converter = extract_strokes(doc)
+                self.assertEqual(len(converter.extracted), expected)
+                if expected:
+                    self.assertEqual(doc[0].get_drawings(), [])
+
     def test_four_separate_proof_box_sides_remain_pixel_identical(self):
         with fitz.open() as doc:
             square(doc.new_page(width=240, height=200))

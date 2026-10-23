@@ -13,8 +13,8 @@ from pdf2zh.line_breaking import iter_line_break_units
 
 class TargetVerticalFitTests(unittest.TestCase):
     def test_overfull_paragraph_scales_font_instead_of_collapsing_leading(self) -> None:
-        # The historical loop stopped at 0.95 here, occupying 38 pt in a
-        # 30 pt source box.  Keep readable leading and scale the entire block.
+        # Dense Chinese paragraphs need more than one em between baselines.
+        # Keep readable leading and scale the entire block.
         fit = _fit_target_vertical_layout(
             line_count=4,
             font_size=10.0,
@@ -22,15 +22,15 @@ class TargetVerticalFitTests(unittest.TestCase):
             default_line_height=1.4,
         )
 
-        self.assertAlmostEqual(0.95, fit.line_height)
-        self.assertAlmostEqual(30.0 / 38.0, fit.render_scale)
+        self.assertAlmostEqual(1.15, fit.line_height)
+        self.assertAlmostEqual(30.0 / 46.0, fit.render_scale)
         self.assertLessEqual(
             4 * 10.0 * fit.render_scale * fit.line_height,
             30.0,
         )
         self.assertTrue(fit.contained)
 
-    def test_existing_stepwise_compaction_is_preserved_when_it_fits(self) -> None:
+    def test_dense_two_line_paragraph_retains_readable_leading(self) -> None:
         fit = _fit_target_vertical_layout(
             line_count=2,
             font_size=10.0,
@@ -38,8 +38,8 @@ class TargetVerticalFitTests(unittest.TestCase):
             default_line_height=1.4,
         )
 
-        self.assertAlmostEqual(1.1, fit.line_height)
-        self.assertEqual(1.0, fit.render_scale)
+        self.assertAlmostEqual(1.15, fit.line_height)
+        self.assertAlmostEqual(22.0 / 23.0, fit.render_scale)
 
     def test_comfortable_paragraph_keeps_default_geometry(self) -> None:
         fit = _fit_target_vertical_layout(

@@ -25,6 +25,27 @@ def segment(text: str, index: int = 0) -> SourceSegment:
 
 
 class TitleBadgeTests(unittest.TestCase):
+    def test_title_case_method_heading_on_later_page_is_not_an_author_byline(self):
+        source = "Mass Spectrometry and Data Analysis"
+        plan = DocumentTranslationPolicy().plan_segment(
+            SourceSegment(
+                index=0,
+                text=source,
+                x0=315.439,
+                x1=471.403,
+                y0=448.441,
+                y1=457.941,
+                size=9.5,
+                page_width=612.0,
+                page_height=800.901,
+                region_kind="title",
+                page_index=15,
+            )
+        )
+        self.assertEqual(
+            [(part.role, part.text) for part in plan.parts], [(ROLE_TRANSLATE, source)]
+        )
+
     def test_publication_badges_are_preserved_separately_from_title(self) -> None:
         source = "ARTICLE OPEN Energy-participation quantization of circuits"
         plan = DocumentTranslationPolicy().plan_segment(

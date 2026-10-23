@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from pdf2zh.reading_flow import (
     FlowSegment,
@@ -8,6 +9,7 @@ from pdf2zh.reading_flow import (
     build_continuation_groups,
     detect_cross_page_edge,
     detect_page_edges,
+    detect_reference_continuation,
 )
 
 
@@ -37,6 +39,72 @@ def segment(
 
 
 class ReadingFlowDetectionTests(unittest.TestCase):
+    def test_standalone_reference_continues_into_conference_publisher_year(self):
+        left = segment(
+            4,
+            1,
+            "[6] M. Martin, C. Hughes, G. Moreno, E. Jones, D. Sickinger, "
+            "S. Narumanchi, and R. Grout, Designing energy-efficient",
+            column=1,
+            y0=75,
+            y1=98,
+        )
+        right = segment(
+            5,
+            0,
+            "quantum computers through prediction and reduction of cooling "
+            "requirements for cryogenic electronics, Presented at IEEE Quantum Week 2020 "
+            "(IEEE, Piscataway, NJ, 2020). [7] A. Smith, Quantum computing, Nature 1, 100 (2021).",
+            column=0,
+            y0=75,
+            y1=743,
+        )
+        group = detect_reference_continuation([left], [right])
+        self.assertIsNotNone(group)
+        self.assertEqual(group.reference_number, 6)
+        self.assertFalse(
+            detect_reference_continuation(
+                [left], [replace(right, text=right.text.replace("[7]", "[9]"))]
+            )
+        )
+
+    def test_columns_resume_below_spanning_figure_caption(self):
+        left = segment(
+            2,
+            4,
+            "Ground-state currents emerge. As the many-body Chern",
+            column=0,
+            y0=42,
+            y1=82,
+        )
+        right = segment(
+            2,
+            5,
+            "number of FQH phases can be extracted from the conductivity tensor.",
+            column=1,
+            y0=73,
+            y1=218,
+        )
+        caption = replace(
+            segment(
+                2,
+                1,
+                "Figure 2. Photon circulation in the device.",
+                column=0,
+                y0=265,
+                y1=302,
+                kind="figure_caption",
+            ),
+            x1=560,
+        )
+        edges = detect_page_edges([caption, left, right])
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].right, right.ref)
+        intervening = segment(
+            2, 9, "Independent section", column=1, y0=235, y1=249, kind="title"
+        )
+        self.assertFalse(detect_page_edges([caption, intervening, left, right]))
+
     def test_yan_page_three_to_four_is_a_continuation(self) -> None:
         previous = [
             segment(

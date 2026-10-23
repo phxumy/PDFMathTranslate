@@ -12,6 +12,7 @@ from pdf2zh.converter import (
 )
 from pdf2zh.translation_policy import DocumentTranslationPolicy
 from pdf2zh.translator import CodexTranslator
+from pdf2zh.codex_errors import CodexTranslationValidationError
 
 
 class MemoryCache:
@@ -72,6 +73,7 @@ def translator_stub() -> CodexTranslator:
     translator.ignore_cache = False
     translator.prompttext = None
     translator.cache = MemoryCache()
+    translator._run_formula_prose_gap_repair = lambda source, context, gaps: None
     return translator
 
 
@@ -395,12 +397,11 @@ class CodexFormulaContextTests(unittest.TestCase):
         source = "The frequency {v0} controls the gate."
         translator._run_batch_translation = lambda texts, **kwargs: [source]
 
-        result = translator.translate_batch_with_formula_contexts(
-            [source],
-            [{"{v0}": "ω_{c}"}],
-        )
-
-        self.assertEqual(result, [source])
+        with self.assertRaises(CodexTranslationValidationError):
+            translator.translate_batch_with_formula_contexts(
+                [source],
+                [{"{v0}": "ω_{c}"}],
+            )
         self.assertEqual(translator.cache.values, {})
 
     def test_failed_context_chunk_retries_as_ordinary_placeholder_text(self) -> None:
@@ -559,12 +560,11 @@ class CodexFormulaContextTests(unittest.TestCase):
         translator._run_formula_context_batch_request = contextual
         translator._run_batch_translation = lambda texts, **kwargs: list(texts)
 
-        result = translator.translate_batch_with_formula_contexts(
-            [source],
-            [context],
-        )
-
-        self.assertEqual(result, [source])
+        with self.assertRaises(CodexTranslationValidationError):
+            translator.translate_batch_with_formula_contexts(
+                [source],
+                [context],
+            )
         self.assertIn(True, contextual_calls)
         self.assertEqual(translator.cache.values, {})
 
