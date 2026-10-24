@@ -1,6 +1,7 @@
 """Local task history. No provider credentials or prompts are stored here."""
 
 from contextvars import ContextVar
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
@@ -129,10 +130,15 @@ class HistoryStore:
             )
             db.execute("CREATE INDEX IF NOT EXISTS task_events ON events(task_id,id)")
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def create(self, task_id, filename, settings, input_at=None):
         data = {
