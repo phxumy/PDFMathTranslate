@@ -178,3 +178,34 @@ def test_corporate_website_title_keeps_the_url_literal():
     assert CodexTranslator._structured_reference_title_spans(entry) == (
         "High-density wiring",
     )
+
+
+def test_parenthetical_author_list_et_al_and_drug_name_are_valid():
+    title = "Discovery of lirafugratinib (RLY-4008), a highly selective irreversible small-molecule inhibitor of FGFR2"
+    entry = f"(22) Smith, A.; Jones, B.; et al. {title}. {{v0}}."
+    tr = CodexTranslator.__new__(CodexTranslator)
+    tr.lang_out = "zh"
+    assert tr._apply_reference_title_replacements(
+        entry,
+        [
+            ExactReplacement(
+                title,
+                "lirafugratinib（RLY-4008）的发现：一种高选择性不可逆FGFR2小分子抑制剂",
+            )
+        ],
+    )[1]
+    assert not tr._apply_reference_title_replacements(
+        entry,
+        [
+            ExactReplacement(
+                title, "lirafugratinib（RLY-4008）的 highly selective 不可逆抑制剂"
+            )
+        ],
+    )[1]
+
+
+def test_receptor_ratio_cannot_become_a_reference_number():
+    from pdf2zh.translation_policy import find_reference_markers
+
+    text = "Selective inhibitors of FGFR 2/3. {v0}. (35) Smith, A. A title. Nature 2020, 1, 22."
+    assert [m.number for m in find_reference_markers(text)] == [35]

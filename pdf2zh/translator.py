@@ -4786,6 +4786,7 @@ class ScientificTranslator(BaseTranslator):
         # These complete container names are ordinary capitalized nouns, with
         # neither an abbreviation dot nor a generic journal-word signal.
         if compact in {
+            "Cancer Discovery",
             "Quantum",
             "PRX Quantum",
             "Biometrika",
@@ -5003,6 +5004,20 @@ class ScientificTranslator(BaseTranslator):
             translated_title,
         ):
             return False
+        target_words = re.findall(r"[A-Za-z]+(?:[-’'][A-Za-z]+)*", translated_title)
+        drug_names = [
+            word
+            for word in target_words
+            if re.fullmatch(r"[a-z]{5,}(?:tinib|mab)", word)
+        ]
+        if len(drug_names) == 1 and re.search(
+            rf"\b{re.escape(drug_names[0])}\b", source_title
+        ):
+            cleaned = re.sub(rf"\b{re.escape(drug_names[0])}\b", "", translated_title)
+            if not has_suspicious_reference_title_residue(
+                source_title.replace(drug_names[0], ""), cleaned
+            ):
+                return False
         return not (
             cls._reference_preserves_lowercase_qubit_family_name(
                 source_title,
@@ -5212,7 +5227,7 @@ class ScientificTranslator(BaseTranslator):
             remaining,
         )
         if dense_journal and cls._reference_venue_name_is_plausible(
-            dense_journal["venue"]
+            re.sub(r"(?<=[a-z])(?=[A-Z])", " ", dense_journal["venue"])
         ):
             return True
         chemistry_fields = re.fullmatch(
@@ -5410,7 +5425,7 @@ class ScientificTranslator(BaseTranslator):
             return True
         if re.match(
             r"^(?:preprint\s+at\b|(?:ph\.?\s*d\.?|doctoral|master(?:'s)?)\s+"
-            r"thesis\b|dissertation\b|zenodo\b|proceedings\s+of\b|in\s+\S)",
+            r"thesis\b|dissertation\b|zenodo\b|proceedings\s+of\b|Tech\.\s+Note\s+available\s+at\b|in\s+\S)",
             remaining,
             re.IGNORECASE,
         ):

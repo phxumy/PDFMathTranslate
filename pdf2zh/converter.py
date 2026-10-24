@@ -935,6 +935,154 @@ def _release_reference_number_labels(
             text_chars[paragraph_id].extend(chars)
 
 
+def _merge_adjacent_reference_tail_lines(
+    segments, formulas, formula_paragraphs, paragraphs, text_chars
+):
+    """Rejoin a bibliography entry split by a detector into adjacent lines."""
+    from pdf2zh.reading_flow import _has_reference_terminal
+    from pdf2zh.translation_policy import find_reference_markers
+
+    expanded = lambda text: _FORMULA_MARKER_RE.sub(
+        lambda m: _reconstruct_italic_run(formulas[int(m[1])]), text
+    )
+    for pid, source in enumerate(segments):
+        before = paragraphs[pid]
+        if (
+            before.region_kind != "plain text"
+            or reference_entry_score(expanded(source)) < 3
+            or _has_reference_terminal(expanded(source))
+        ):
+            continue
+        nxt = next(
+            (j for j in range(pid + 1, len(segments)) if segments[j].strip()), None
+        )
+        if nxt is None:
+            continue
+        following = segments[nxt]
+        after = paragraphs[nxt]
+        markers = find_reference_markers(following)
+        prefix = following[: markers[0].start] if markers else following
+        if (
+            after.region_kind != "plain text"
+            or re.match(r"\s*(?:\[\d+\]|\(\d+\)|\d+[.)])", following)
+            or not _has_reference_terminal(expanded(prefix))
+            or len(prefix) > 700
+            or abs(before.size - after.size) > 0.1 * before.size
+            or not -0.2 * before.size <= before.y0 - after.y1 <= 2 * before.size
+            or not -before.size <= after.x0 - before.x0 <= 3 * before.size
+        ):
+            continue
+        segments[pid] = source.rstrip() + " " + following.lstrip()
+        segments[nxt] = ""
+        before.y0 = min(before.y0, after.y0)
+        before.x1 = max(before.x1, after.x1)
+        before.break_offsets.extend(len(source) + 1 + o for o in after.break_offsets)
+        text_chars[pid].extend(text_chars[nxt])
+        text_chars[nxt] = []
+        for i, owner in enumerate(formula_paragraphs):
+            if owner == nxt:
+                formula_paragraphs[i] = pid
+        return True
+    return False
+
+
+def _release_bold_chemical_names(
+    segments, formulas, formula_paragraphs, paragraphs, text_chars
+):
+    """Recover systematic names in bold compound headings, not spectral data.
+
+    Chemistry publishers style the whole IUPAC name in a bold text font. A
+    closing parenthesis can start a protected run and swallow its suffix. Only
+    the name before its compound-number label (or an entire bold name line)
+    qualifies; mixed-font NMR units and actual equations remain protected.
+    """
+    stems = re.compile(
+        r"amino|methyl|ethyl|chloro|bromo|fluoro|hydroxy|pyrrolo|pyrimidi|pyrazino|carboxylate|thiazol|phenyl|butyl|benz",
+        re.I,
+    )
+    allowed = re.compile(r"[A-Za-z0-9\s(),.\[\]:/'’′″−–\-]+")
+    for pid, source in enumerate(segments):
+        if paragraphs[pid].region_kind not in {"plain text", "title", ""}:
+            continue
+        candidates = {}
+        for match in _FORMULA_MARKER_RE.finditer(source):
+            index = int(match[1])
+            chars = formulas[index]
+            if not chars or formula_paragraphs[index] != pid:
+                continue
+            if any(
+                not _PROSE_BOLD_FONT_RE.search(_font_name(c.fontname))
+                or _is_non_horizontal_text_matrix(c.matrix)
+                for c in chars
+            ):
+                continue
+            value = _reconstruct_italic_run(chars)
+            if allowed.fullmatch(value):
+                candidates[index] = value
+        if not candidates:
+            continue
+        expanded = _FORMULA_MARKER_RE.sub(
+            lambda m: candidates.get(int(m[1]), m[0]), source
+        )
+        label = re.search(r"\(\d{1,3}[a-z]?\)\.", expanded)
+        name = expanded[: label.end()] if label else expanded
+        if (
+            len(stems.findall(name)) < 2
+            or not re.search(r"\d", name)
+            or not allowed.fullmatch(name)
+            or (label is None and not _FORMULA_MARKER_RE.fullmatch(source.strip()))
+        ):
+            continue
+        cursor = 0
+        pieces = []
+        for match in _FORMULA_MARKER_RE.finditer(source):
+            index = int(match[1])
+            before = _FORMULA_MARKER_RE.sub(
+                lambda m: candidates.get(int(m[1]), m[0]), source[: match.start()]
+            )
+            value = candidates.get(index)
+            pieces.append(source[cursor : match.start()])
+            if value is not None and (label is None or len(before) < label.end()):
+                pieces.append(value)
+                text_chars[pid].extend(formulas[index])
+            else:
+                pieces.append(match[0])
+            cursor = match.end()
+        pieces.append(source[cursor:])
+        segments[pid] = "".join(pieces)
+    for pid in range(len(segments) - 1):
+        first, second = segments[pid], segments[pid + 1]
+        before, after = paragraphs[pid], paragraphs[pid + 1]
+        if (
+            not first.rstrip().endswith("-")
+            or len(stems.findall(first)) < 2
+            or not allowed.fullmatch(first)
+            or not re.match(
+                r"(?:pyrrolo|pyrimidi|pyrazino|thiazol|phenyl|benz)", second, re.I
+            )
+            or not re.search(r"\(\d{1,3}[a-z]?\)\.", second[:300])
+            or before.page_id != after.page_id
+            or before.layout_class != after.layout_class
+            or abs(before.size - after.size) > 0.1 * before.size
+            or not -0.2 * before.size <= before.y0 - after.y1 <= before.size
+            or min(before.x1, after.x1) - max(before.x0, after.x0)
+            < 0.8 * min(before.x1 - before.x0, after.x1 - after.x0)
+        ):
+            continue
+        segments[pid + 1] = first.rstrip() + second.lstrip()
+        segments[pid] = ""
+        after.x, after.y = before.x, before.y
+        after.x0 = min(before.x0, after.x0)
+        after.x1 = max(before.x1, after.x1)
+        after.y1 = max(before.y1, after.y1)
+        after.break_offsets = [len(first) + o for o in after.break_offsets]
+        text_chars[pid + 1].extend(text_chars[pid])
+        text_chars[pid] = []
+        for index, owner in enumerate(formula_paragraphs):
+            if owner == pid:
+                formula_paragraphs[index] = pid + 1
+
+
 def _recover_author_information_affiliations(
     segments, formulas, formula_paragraphs, paragraphs
 ):
@@ -973,7 +1121,18 @@ def _recover_author_information_affiliations(
                 )
             )
             < 1
-            or not re.search(r"\b\d{5,6}\b|\bEmail:|orcid\.org/", expanded)
+            or (
+                not re.search(r"\b\d{5,6}\b|\bEmail:|orcid\.org/", expanded)
+                and not (
+                    name_pattern.match(expanded)
+                    and len(
+                        re.findall(
+                            r"\b(?:Institute|Laboratory|University|Academy)\b", expanded
+                        )
+                    )
+                    >= 3
+                )
+            )
         ):
             continue
         names = list(name_pattern.finditer(expanded))
@@ -6525,7 +6684,7 @@ class TranslateConverter(PDFConverterEx):
                 size=paragraph.size,
                 page_width=draft.width,
                 page_height=draft.height,
-                region_kind=paragraph.region_kind,
+                region_kind="affiliation" if paragraph.affiliation_parts else paragraph.region_kind,
                 formula_texts=tuple(draft.formula_texts),
             )
             for index, (text, paragraph) in enumerate(
@@ -7443,6 +7602,8 @@ class TranslateConverter(PDFConverterEx):
         _release_formula_case_explanations(sstk, var, varp, pstk, paragraph_text_chars)
         if not self.vfont and not self.vchar:
             _release_reference_number_labels(sstk, var, varl, varp, pstk, paragraph_text_chars)
+            while _merge_adjacent_reference_tail_lines(sstk,var,varp,pstk,paragraph_text_chars):
+                pass
             _release_tex_accented_prose_words(sstk, var, varp, pstk, paragraph_text_chars)
             _release_reference_prose_fragments(sstk, var, varp, pstk, paragraph_text_chars)
             _release_standalone_prose_periods(sstk, var, varp, pstk, paragraph_text_chars)
@@ -7456,6 +7617,7 @@ class TranslateConverter(PDFConverterEx):
             )
         _release_caption_prose_delimiters(sstk, var, varp, pstk)
         _release_caption_title_words(sstk, var, varp, pstk, paragraph_text_chars)
+        _release_bold_chemical_names(sstk, var, varp, pstk, paragraph_text_chars)
         _split_parenthetical_variable_definitions(
             sstk, var, varl, varf, varp, pstk, paragraph_text_chars
         )

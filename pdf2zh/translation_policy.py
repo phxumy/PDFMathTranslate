@@ -247,7 +247,7 @@ def find_reference_markers(
             "closing",
         ),
         (
-            r"(?<![\dA-Za-z])(\d(?:\s*\d){0,2})\s*[.．。](?=\s)",
+            r"(?<![\dA-Za-z/])(\d(?:\s*\d){0,2})\s*[.．。](?=\s)",
             "dotted",
         ),
         (
@@ -582,6 +582,7 @@ def looks_like_author_list(text: str) -> bool:
 
 def _inverted_reference_authors(text: str) -> bool:
     """Recognize Surname, Initials lists without swallowing subsequent prose."""
+    text = re.sub(r"(?:[,;]\s*)?\bet\s+al\.?\s*$", "", text).rstrip(" ;,")
     surname = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+(?:\s+(?:de|van|von|[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+))*"
     initials = r"(?:[A-Z]\.(?:-?[A-Z]\.)?\s*){1,5}"
     name = rf"{surname},\s*{initials}(?:,\s*(?:Jr|Sr)\.)?"
