@@ -985,7 +985,7 @@ def translate_queue_stream(
                     gr.update(visible=True),
                     gr.update(visible=True),
                     gr.update(visible=True),
-                    gr.update(visible=False),
+                    gr.update(value=_preview_payload({}), visible=True),
                     f"**复用已完成文件** · {index + 1}/{len(files)}",
                     state,
                     downloads(),

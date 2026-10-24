@@ -111,6 +111,14 @@ def test_files_run_serially_in_upload_order_and_keep_all_downloads(ui):
     ui["update_manager"].end_translation.assert_called_once()
 
 
+def test_reused_queue_clears_previous_partial_page_overlays(ui):
+    list(stream(ui))
+    updates = list(stream(ui))
+    reused = [value for value in updates if "复用已完成文件" in value[7]]
+    assert len(reused) == 3
+    assert all(value[6] == {"value": {}, "visible": True} for value in reused)
+
+
 def test_failure_preserves_completed_files_and_retry_starts_at_failed_file(ui):
     normal = ui["translate_file_stream"]
 
