@@ -27,15 +27,24 @@ def queue_signature(files, settings):
     ).hexdigest()
 
 
-def queue_summary(names, statuses):
+def queue_summary(names, statuses, durations=None):
     completed = sum(status == "已完成" for status in statuses)
     rows = [
         f"**PDF 队列** · 已完成 {completed}/{len(names)} 个文件",
         "",
-        "| 顺序 | PDF | 状态 |",
-        "| --- | --- | --- |",
+        "| 顺序 | PDF | 状态 |" + (" 翻译耗时 |" if durations is not None else ""),
+        "| --- | --- | --- |" + (" --- |" if durations is not None else ""),
     ]
     for index, (name, status) in enumerate(zip(names, statuses, strict=True), 1):
         label = html.escape(name).replace("|", "&#124;").replace("\n", " ")
-        rows.append(f"| {index} | <code>{label}</code> | {status} |")
+        duration = durations[index - 1] if durations is not None else None
+        elapsed = (
+            "—"
+            if duration is None
+            else f"{int(duration)//60} 分 {int(duration)%60:02d} 秒"
+        )
+        rows.append(
+            f"| {index} | <code>{label}</code> | {status} |"
+            + (f" {elapsed} |" if durations is not None else "")
+        )
     return "\n".join(rows)

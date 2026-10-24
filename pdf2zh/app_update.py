@@ -140,6 +140,13 @@ class UpdateManager:
         with self._lock:
             self._translations = max(0, self._translations - 1)
 
+    def maintain_storage(self, action):
+        """Serialize deletion with translation and installation startup."""
+        with self._lock:
+            if self._translations or self._installing:
+                raise UpdateError("翻译或更新正在进行，请结束后再清理本地文件或缓存。")
+            return action()
+
     def status(self) -> str:
         with self._lock:
             return self._status

@@ -4,6 +4,9 @@ import os
 import shutil
 import uuid
 import time
+import json
+import html as html_utils
+from urllib.parse import quote
 from dataclasses import replace
 from queue import Empty, Queue
 from threading import Event, Thread
@@ -23,7 +26,10 @@ from pdf2zh.high_level import translate
 from pdf2zh.doclayout import ModelInstance
 from pdf2zh.config import ConfigManager
 from pdf2zh.translation_queue import queue_files, queue_signature, queue_summary
-from pdf2zh.app_update import APP_VERSION, REPOSITORY_URL, update_manager
+from pdf2zh.translation_history import HistoryStore, TaskRecorder, current_task, now
+from pdf2zh.cache import cache_information, clear_translation_cache
+from pdf2zh import history_ui
+from pdf2zh.app_update import APP_VERSION, REPOSITORY_URL, update_manager, UpdateError
 from pdf2zh.codex_account import (
     get_codex_status,
     start_codex_login,
@@ -295,6 +301,7 @@ def translate_file(
     *envs,
     progress_callback=None,
     preview_callback=None,
+    source_callback=None,
     _session_id=None,
     _cancellation_event=None,
 ):
@@ -366,6 +373,11 @@ def translate_file(
     file_raw = output / f"{filename}.pdf"
     file_mono = output / f"{filename}-mono.pdf"
     file_dual = output / f"{filename}-dual.pdf"
+    recorder = current_task.get()
+    if recorder:
+        recorder.source(file_raw)
+    if source_callback:
+        source_callback(str(file_raw))
 
     if page_range != "Others":
         selected_page = page_map[page_range]
@@ -492,6 +504,20 @@ def _duration(seconds):
     return f"{minutes} 分 {seconds:02d} 秒"
 
 
+def _preview_payload(pages):
+    urls = {}
+    for number, path in pages.items():
+        cached = demo.move_resource_to_block_cache(path)
+        urls[str(number)] = "/gradio_api/file=" + quote(
+            str(cached).replace("\\", "/"), safe="/:"
+        )
+    return (
+        '<span data-preview="'
+        + html_utils.escape(json.dumps({"pages": urls}), quote=True)
+        + '"></span>'
+    )
+
+
 def _translation_status(event):
     phases = {
         "preparing": "正在准备文档与模型",
@@ -562,6 +588,7 @@ def translate_file_stream(
     last_progress = None
     last_progress_at = started
     latest_status = "**正在准备翻译** · 剩余时间估算中"
+    recorder = None
     if use_babeldoc:
         latest_status += " · BabelDOC 模式将在完成后显示完整 PDF"
     try:
@@ -582,7 +609,37 @@ def translate_file_stream(
             events.put(("preview", (event.page_number, str(path))))
 
         def run():
+            nonlocal recorder
+            token = None
             try:
+                recorder = TaskRecorder(
+                    session_id,
+                    Path(file_input).name if file_input else "链接 PDF",
+                    {
+                        "service": service,
+                        "language_from": lang_from,
+                        "language_to": lang_to,
+                        "pages": page_input if page_range == "Others" else page_range,
+                        "ignore_cache": bool(ignore_cache),
+                        "engine": "BabelDOC" if use_babeldoc else "standard",
+                    },
+                    input_at=state.get("input_at"),
+                )
+                token = current_task.set(recorder)
+                if not use_babeldoc:
+                    cache_check = cache_information()
+                    recorder.store.update(recorder.id, cache_check=cache_check)
+                    recorder.store.event(
+                        recorder.id,
+                        "cache_check",
+                        "翻译缓存自检："
+                        + ("正常" if cache_check["healthy"] else "异常"),
+                    )
+
+                def report_progress(event):
+                    recorder.progress(event)
+                    events.put(("progress", event))
+
                 result = translate_file(
                     file_type,
                     file_input,
@@ -604,15 +661,34 @@ def translate_file_stream(
                     chatgpt_effort,
                     lambda *a, **kw: None,
                     *envs,
-                    progress_callback=lambda event: events.put(("progress", event)),
+                    progress_callback=report_progress,
                     preview_callback=save_preview,
+                    source_callback=(
+                        (lambda path: events.put(("source", path)))
+                        if file_type != "File"
+                        else None
+                    ),
                     _session_id=session_id,
                     _cancellation_event=cancellation_event,
                 )
+                recorder.finish("completed", [result[0], result[2]])
+                state["last_elapsed_seconds"] = time.monotonic() - started
                 events.put(("result", result))
             except BaseException as exc:
+                if recorder:
+                    try:
+                        recorder.finish(
+                            "cancelled" if cancellation_event.is_set() else "failed",
+                            error=exc,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Unable to save translation failure to local history."
+                        )
                 events.put(("error", exc))
             finally:
+                if token is not None:
+                    current_task.reset(token)
                 cancellation_event_map.pop(session_id, None)
 
         worker = Thread(target=run, name="pdf2zh-ui-translation", daemon=True)
@@ -624,7 +700,7 @@ def translate_file_stream(
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
-            gr.update(value=[], visible=False),
+            gr.update(value=_preview_payload({}), visible=True),
             latest_status,
             state,
         )
@@ -656,32 +732,43 @@ def translate_file_stream(
                     )
                 yield (*[gr.update() for _ in range(7)], message, state)
                 continue
-            if kind == "progress":
+            if kind == "source":
+                yield (
+                    gr.update(),
+                    gr.update(value=value, visible=True),
+                    *[gr.update() for _ in range(5)],
+                    latest_status,
+                    state,
+                )
+            elif kind == "progress":
                 last_progress, last_progress_at = value, time.monotonic()
                 latest_status = _translation_status(value)
                 yield (*[gr.update() for _ in range(7)], latest_status, state)
             elif kind == "preview":
                 number, path = value
-                pages[number] = (path, f"原文第 {number} 页 · 已翻译")
+                pages[number] = path
                 if not events.empty() and time.monotonic() - last_preview_at < 0.4:
                     continue
                 last_preview_at = time.monotonic()
-                gallery = [pages[number] for number in sorted(pages)]
                 yield (
                     gr.update(),
-                    gr.update(visible=False),
+                    gr.update(visible=True),
                     *[gr.update() for _ in range(4)],
-                    gr.update(value=gallery, visible=True),
+                    gr.update(value=_preview_payload(pages), visible=True),
                     latest_status,
                     state,
                 )
             elif kind == "result":
                 finished = True
                 result = list(value)
-                result[1] = gr.update(value=result[1], visible=True)
+                result[1] = (
+                    gr.update(value=result[1], visible=True)
+                    if use_babeldoc
+                    else gr.update(visible=True)
+                )
                 yield (
                     *result,
-                    gr.update(visible=False),
+                    gr.update(value=_preview_payload(pages), visible=True),
                     f"**翻译完成** · 共用时 {_duration(time.monotonic() - started)} · 可查看或下载完整 PDF",
                     state,
                 )
@@ -690,11 +777,11 @@ def translate_file_stream(
                 message = str(value) or "翻译已取消"
                 yield (
                     gr.update(),
-                    gr.update(visible=not bool(pages)),
+                    gr.update(visible=True),
                     *[gr.update() for _ in range(4)],
                     gr.update(
-                        value=[pages[number] for number in sorted(pages)],
-                        visible=bool(pages),
+                        value=_preview_payload(pages),
+                        visible=True,
                     ),
                     f"**翻译已停止** · {message} · 已显示的完成页仍可查看",
                     state,
@@ -726,12 +813,14 @@ def translate_file_stream(
                 shutil.rmtree(target, ignore_errors=True)
 
 
-def preview_uploaded_queue(value):
+def preview_uploaded_queue(value, state=None):
+    if state is not None:
+        state["input_at"] = now()
     files = queue_files(value)
     names = [Path(path).name for path in files]
-    return (
+    result = (
         gr.update(value=files[0] if files else None, visible=True),
-        gr.update(value=[], visible=False),
+        gr.update(value=_preview_payload({}), visible=True),
         (
             f"已载入 {len(files)} 个 PDF，按列表顺序逐个翻译。"
             if files
@@ -739,6 +828,42 @@ def preview_uploaded_queue(value):
         ),
         queue_summary(names, ["待翻译"] * len(files)) if files else "",
     )
+    return (*result, state) if state is not None else result
+
+
+def show_history():
+    if flag_demo:
+        raise gr.Error("公开演示不提供本地历史记录。")
+    choices, message = history_ui.refresh_history()
+    return (
+        gr.update(visible=True),
+        gr.update(choices=choices, value=choices[0][1] if choices else None),
+        message,
+    )
+
+
+def delete_history_files(task_id, kinds, confirmed):
+    if flag_demo:
+        raise gr.Error("公开演示不提供本地文件管理。")
+    try:
+        return history_ui.delete_task_files(task_id, kinds, confirmed)
+    except (ValueError, OSError, UpdateError) as exc:
+        raise gr.Error(str(exc)) from exc
+
+
+def clear_history_cache(confirmed):
+    if flag_demo:
+        raise gr.Error("公开演示不提供本地缓存管理。")
+    try:
+        return history_ui.delete_cache(confirmed)
+    except (ValueError, OSError, UpdateError) as exc:
+        raise gr.Error(str(exc)) from exc
+
+
+def read_history_detail(task_id):
+    if flag_demo:
+        raise gr.Error("公开演示不提供本地历史记录。")
+    return history_ui.history_detail(task_id)
 
 
 def translate_queue_stream(
@@ -814,6 +939,13 @@ def translate_queue_stream(
         for i in range(len(files))
     ]
     statuses = ["已完成" if record else "待翻译" for record in records]
+    saved_durations = state.get("queue_durations") or []
+    durations = [
+        saved_durations[i] if record and i < len(saved_durations) else None
+        for i, record in enumerate(records)
+    ]
+    state["queue_durations"] = durations
+    queue_started = time.monotonic()
     state["queue_signature"] = signature
     state["queue_results"] = records
     queue_id = uuid.uuid4()
@@ -834,7 +966,7 @@ def translate_queue_stream(
             message,
             state,
             downloads(),
-            queue_summary(names, statuses),
+            queue_summary(names, statuses, durations),
         )
 
     current = None
@@ -857,7 +989,7 @@ def translate_queue_stream(
                     f"**复用已完成文件** · {index + 1}/{len(files)}",
                     state,
                     downloads(),
-                    queue_summary(names, statuses),
+                    queue_summary(names, statuses, durations),
                 )
                 continue
             statuses[index] = "翻译中"
@@ -895,9 +1027,10 @@ def translate_queue_stream(
                         raise gr.Error("译文文件未保存完整，队列已停止。")
                     records[index] = paths
                     statuses[index] = "已完成"
+                    durations[index] = state.get("last_elapsed_seconds")
                     completed = True
                 values[7] = f"**文件 {index + 1}/{len(files)}** · {values[7]}"
-                yield (*values, downloads(), queue_summary(names, statuses))
+                yield (*values, downloads(), queue_summary(names, statuses, durations))
             current.close()
             current = None
             if not completed:
@@ -911,7 +1044,7 @@ def translate_queue_stream(
             )
         else:
             yield status_update(
-                f"**队列翻译完成** · 已完成 {len(files)}/{len(files)} 个 PDF"
+                f"**队列翻译完成** · 已完成 {len(files)}/{len(files)} 个 PDF · 本次队列用时 {_duration(time.monotonic()-queue_started)}"
             )
     except Exception as error:
         if statuses[index] != "已完成":
@@ -1449,9 +1582,11 @@ cancellation_event_map = {}
 with gr.Blocks(
     title="PDFMathTranslate - PDF Translation with preserved formats",
     theme=app_theme,
-    css=custom_css,
+    css=custom_css + "\n#live-page-updates {display:none !important;}",
+    js=Path(__file__).with_name("live_preview.js").read_text(encoding="utf-8"),
     head=demo_recaptcha if flag_demo else "",
 ) as demo:
+    state = gr.State({"session_id": None})
     if desktop_mode:
         gr.HTML(desktop_header_html)
     else:
@@ -1840,28 +1975,99 @@ with gr.Blocks(
         with gr.Column(scale=2, elem_id="preview-panel" if desktop_mode else None):
             gr.Markdown("## 翻译预览")
             translation_status = gr.Markdown(
-                "上传 PDF 后可查看原文；翻译期间会逐页显示已完成的结果。"
+                "上传 PDF 后可浏览全部原文；译好的页面会实时替换对应原文页。"
             )
             queue_status = gr.Markdown("", elem_id="queue-status")
-            live_preview = gr.Gallery(
-                label="已翻译页面（按原文页码）",
-                visible=False,
-                columns=1,
-                object_fit="contain",
-                height=1100 if desktop_mode else 1600,
-                allow_preview=True,
-            )
+            history_button = gr.Button("翻译日志与本地文件管理", visible=not flag_demo)
+            live_preview = gr.HTML(value="", elem_id="live-page-updates")
             preview = PDF(
                 label="Document Preview",
+                elem_id="document-preview",
                 visible=True,
                 height=1200 if desktop_mode else 2000,
             )
 
+    with gr.Column(visible=False, elem_id="translation-history") as history_panel:
+        history_summary = gr.Markdown()
+        gr.Markdown(
+            "从 .6 开始记录任务。旧版记录不强制导入。请先妥善保存需要的译文，再清理软件本地文件或翻译缓存。"
+        )
+        history_choice = gr.Dropdown(label="选择翻译记录", choices=[], interactive=True)
+        history_description = gr.Markdown("请选择一条记录。")
+        history_downloads = gr.File(
+            label="原文与译文下载", file_count="multiple", interactive=False
+        )
+        history_logs = gr.Textbox(
+            label="翻译日志（本地时间）", lines=12, interactive=False
+        )
+        history_export = gr.File(label="导出日志 JSON", interactive=False)
+        history_types = gr.CheckboxGroup(
+            choices=list(history_ui.FILE_LABELS.values()),
+            value=["译文", "双语 PDF"],
+            label="要清理的本地文件",
+        )
+        history_confirm = gr.Checkbox(
+            label="我已保存需要的译文，确认清理所选软件本地文件／缓存", value=False
+        )
+        with gr.Row():
+            history_delete = gr.Button("删除所选文件", variant="stop")
+            history_clear = gr.Button("清空翻译缓存")
+            history_refresh = gr.Button("刷新记录")
+        history_action = gr.Markdown()
+
+    history_button.click(
+        show_history,
+        outputs=[history_panel, history_choice, history_summary],
+        api_name=False,
+    ).then(
+        read_history_detail,
+        inputs=history_choice,
+        outputs=[history_description, history_downloads, history_logs, history_export],
+        api_name=False,
+    ).then(
+        lambda: None,
+        js="()=>document.getElementById('translation-history')?.scrollIntoView({block:'start',behavior:'smooth'})",
+        api_name=False,
+    )
+    history_refresh.click(
+        show_history,
+        outputs=[history_panel, history_choice, history_summary],
+        api_name=False,
+    ).then(
+        read_history_detail,
+        inputs=history_choice,
+        outputs=[history_description, history_downloads, history_logs, history_export],
+        api_name=False,
+    )
+    history_choice.change(
+        read_history_detail,
+        inputs=history_choice,
+        outputs=[history_description, history_downloads, history_logs, history_export],
+        api_name=False,
+    )
+    history_delete.click(
+        delete_history_files,
+        inputs=[history_choice, history_types, history_confirm],
+        outputs=history_action,
+        api_name=False,
+    ).then(
+        read_history_detail,
+        inputs=history_choice,
+        outputs=[history_description, history_downloads, history_logs, history_export],
+        api_name=False,
+    )
+    history_clear.click(
+        clear_history_cache,
+        inputs=history_confirm,
+        outputs=history_action,
+        api_name=False,
+    )
+
     # Event handlers
     file_input.change(
         preview_uploaded_queue,
-        inputs=file_input,
-        outputs=[preview, live_preview, translation_status, queue_status],
+        inputs=[file_input, state],
+        outputs=[preview, live_preview, translation_status, queue_status, state],
         js=(
             f"""
             (a,b)=>{{
@@ -1879,9 +2085,12 @@ with gr.Blocks(
         ),
     )
 
-    state = gr.State({"session_id": None})
-
     translate_btn.click(
+        lambda: [gr.update(interactive=False)] * 3,
+        outputs=[file_input, link_input, file_type],
+        queue=False,
+        api_name=False,
+    ).then(
         translate_queue_stream,
         inputs=[
             file_type,
@@ -1923,7 +2132,12 @@ with gr.Blocks(
         api_name="translate_file_stream",
         concurrency_limit=1,
         show_progress="minimal",
-    ).then(lambda: None, js="()=>{grecaptcha.reset()}" if flag_demo else "")
+    ).then(
+        lambda: [gr.update(interactive=True)] * 3,
+        outputs=[file_input, link_input, file_type],
+        api_name=False,
+        js="()=>{grecaptcha.reset()}" if flag_demo else None,
+    )
 
     demo.load(
         on_select_service,

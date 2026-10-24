@@ -3,6 +3,7 @@ import os
 import json
 from peewee import Model, SqliteDatabase, AutoField, CharField, TextField, SQL
 from typing import Optional
+from pdf2zh.translation_history import cache_event
 
 # we don't init the database here
 db = SqliteDatabase(None)
@@ -71,11 +72,16 @@ class TranslationCache:
     # Since peewee and the underlying sqlite are thread-safe,
     # get and set operations don't need locks.
     def get(self, original_text: str) -> Optional[str]:
-        result = _TranslationCache.get_or_none(
-            translate_engine=self.translate_engine,
-            translate_engine_params=self.translate_engine_params,
-            original_text=original_text,
-        )
+        try:
+            result = _TranslationCache.get_or_none(
+                translate_engine=self.translate_engine,
+                translate_engine_params=self.translate_engine_params,
+                original_text=original_text,
+            )
+        except Exception:
+            cache_event("errors")
+            raise
+        cache_event("hits" if result else "misses")
         return result.translation if result else None
 
     def set(self, original_text: str, translation: str):
@@ -86,7 +92,9 @@ class TranslationCache:
                 original_text=original_text,
                 translation=translation,
             )
+            cache_event("writes")
         except Exception as e:
+            cache_event("errors")
             logger.debug(f"Error setting cache: {e}")
 
 
@@ -139,3 +147,23 @@ def clean_test_db(test_db):
 
 
 init_db()
+
+
+def cache_information():
+    database = _TranslationCache._meta.database
+    path = database.database
+    health = database.execute_sql("PRAGMA quick_check").fetchone()[0]
+    return {
+        "entries": _TranslationCache.select().count(),
+        "healthy": health == "ok",
+        "bytes": os.path.getsize(path) if path and os.path.isfile(path) else 0,
+    }
+
+
+def clear_translation_cache():
+    database = _TranslationCache._meta.database
+    with database.atomic():
+        count = _TranslationCache.delete().execute()
+    database.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+    database.execute_sql("VACUUM")
+    return count

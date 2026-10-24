@@ -66,8 +66,13 @@ def ui(tmp_path, monkeypatch):
         service_map={"Codex": backend},
         update_manager=Mock(),
         translate_file=Mock(),
+        TaskRecorder=Mock(),
+        cache_information=lambda: {"healthy": True, "entries": 0, "bytes": 0},
+        current_task=Mock(),
+        _preview_payload=lambda pages: dict(pages),
         stop_translate_file=Mock(),
         desktop_mode=True,
+        logger=Mock(),
         poll_codex_login=Mock(),
         start_codex_login=Mock(),
     )
@@ -127,16 +132,15 @@ def test_page_preview_arrives_before_final_output(ui):
         progress = next(iterator)
         assert "1/2" in progress[7]
         preview = next(iterator)
-        assert preview[1]["visible"] is False
+        assert preview[1]["visible"] is True
         assert preview[6]["visible"] is True
-        path, caption = preview[6]["value"][0]
+        path = preview[6]["value"][1]
         assert Path(path).read_bytes() == b"png bytes"
-        assert "1" in caption
         ui["update_manager"].end_translation.assert_not_called()
         proceed.set()
         final = next(iterator)
-        assert final[1] == {"value": "mono.pdf", "visible": True}
-        assert final[6]["visible"] is False
+        assert final[1] == {"visible": True}
+        assert final[6]["visible"] is True
         with pytest.raises(StopIteration):
             next(iterator)
         ui["update_manager"].end_translation.assert_called_once()
@@ -152,6 +156,17 @@ def test_stream_failure_releases_update_guard_and_exposes_message(ui):
     failed = next(iterator)
     assert "account unavailable" in failed[7]
     with pytest.raises(RuntimeError, match="account unavailable"):
+        next(iterator)
+    ui["update_manager"].end_translation.assert_called_once()
+
+
+def test_history_write_failure_does_not_leave_ui_waiting_forever(ui):
+    ui["translate_file"].side_effect = RuntimeError("provider unavailable")
+    ui["TaskRecorder"].return_value.finish.side_effect = OSError("history full")
+    iterator = stream(ui)
+    next(iterator)
+    assert "provider unavailable" in next(iterator)[7]
+    with pytest.raises(RuntimeError, match="provider unavailable"):
         next(iterator)
     ui["update_manager"].end_translation.assert_called_once()
 

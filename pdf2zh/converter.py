@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextvars import copy_context
 import logging
 import math
 import re
@@ -6310,7 +6311,8 @@ class TranslateConverter(PDFConverterEx):
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.thread
         ) as executor:
-            results = list(executor.map(worker, sstk))
+            futures = [executor.submit(copy_context().run, worker, item) for item in sstk]
+            results = [future.result() for future in futures]
         if len(results) != len(sstk):
             raise ValueError(
                 f"translate returned {len(results)} items for {len(sstk)} source items"

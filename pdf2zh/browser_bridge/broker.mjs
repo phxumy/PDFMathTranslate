@@ -75,8 +75,18 @@ export async function startWorkerServer(directory, run, { version = 'test', idle
       send(response, { ok: true, version, busy }); return;
     }
     if (request.method === 'POST' && request.url === '/shutdown') {
+      // Drain the request before closing its connection. On Windows, closing
+      // with unread POST bytes can reset the socket before the reply is read.
+      let received = 0;
+      for await (const chunk of request) {
+        received += chunk.length;
+        if (received > 1024) { send(response, { ok: false }, 400); return; }
+      }
+      if (!busy) {
+        response.setHeader('connection', 'close');
+        response.once('finish', () => server.close());
+      }
       send(response, { ok: !busy, busy });
-      if (!busy) setImmediate(() => server.close());
       return;
     }
     if (request.method !== 'POST' || request.url !== '/operation' || request.headers['content-type'] !== 'application/json') {

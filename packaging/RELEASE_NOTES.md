@@ -1,3 +1,17 @@
+## v1.9.11-codex.6 — 翻译历史、本地文件管理与持续预览
+
+翻译完成后保留每篇耗时及本次队列用时。翻译过程中继续使用原有翻页按钮浏览全部原文，已译好的页实时替换对应页面，未完成的页继续显示原文。
+
+- 新增“翻译日志与本地文件管理”：保存输入、开始、进度、完成、停止和报错事件，记录出错时页码及缓存命中、写入与异常情况。记录跨重启保留，并可导出 JSON。
+- 成功记录展示从 PDF 元数据、文件名及正文识别的题名、作者、期刊和年份；无法识别的字段明确标注，不猜测出版信息。可下载原文、译文和双语 PDF；文件不存在时显示“已删除”。
+- 可删除所选任务的本地文件、清空标准翻译缓存。清理前提醒保存译文并要求勾选确认，翻译或更新进行时禁止清理。历史记录保留，旧版本记录不强制迁移。BabelDOC 自有缓存不纳入标准缓存管理。
+- 修复真实完整论文中发现的图表黑块、嵌入字体连字、公式下标及分数线、图注/小节/封面漏译、化合物名半译、跨栏题名及网址断裂等问题。翻译完整性校验失败会中止任务，PDF Form 内的失败也不会再被当作成功。
+- 修复浏览器连接组件在 Windows 关闭时可能提前重置连接的问题。内置 Codex CLI 保持 0.163.0；模型和推理强度继续由用户选择。
+
+发行前检查覆盖六个完整翻译任务、66 页原文及对应双语页，另包含自动回归和界面操作验证。原文、用户已有译文和账号配置保持不变，私人论文与缓存不进入发行包。
+
+This release adds persistent local translation history, elapsed times, downloads and guarded storage cleanup. The original PDF navigation stays available during progressive page replacement. It also repairs PDF graphics, text/chemical-name recovery, mathematical layout and bibliography continuations, and stops incomplete translations instead of silently preserving failed source paragraphs.
+
 ## v1.9.11-codex.5.4 — 更新 Codex CLI 与多 PDF 顺序队列
 
 内置 Codex CLI 从 `0.145.0` 更新至官方稳定版 `0.163.0`，解决旧 CLI 调用 `gpt-6-luna` 时返回 HTTP 400 的兼容问题。保持 `CODEX_BIN=codex` 即使用新版本，模型 ID 和推理强度仍由用户明确选择。

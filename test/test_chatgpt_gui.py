@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import uuid
 
 import pytest
+from pdf2zh.translation_history import current_task
 
 
 @pytest.fixture
@@ -43,6 +44,7 @@ def gui():
         envs={"CHATGPT_MODEL": "", "CHATGPT_EFFORT": "", "CHATGPT_TIMEOUT": "900"},
     )
     namespace = {
+        "current_task": current_task,
         "gr": SimpleNamespace(
             update=lambda **kwargs: kwargs, Error=GuiError, Progress=Mock
         ),

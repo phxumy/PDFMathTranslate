@@ -6,6 +6,7 @@ from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 import uuid
+import time
 
 import pytest
 
@@ -24,6 +25,9 @@ def ui(tmp_path):
     ]
     ns = dict(
         Path=Path,
+        time=time,
+        _duration=lambda seconds: f"{int(seconds)} 秒",
+        _preview_payload=lambda pages: dict(pages),
         Event=Event,
         uuid=uuid,
         queue_files=queue_files,

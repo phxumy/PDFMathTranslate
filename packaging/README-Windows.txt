@@ -12,6 +12,13 @@ INSTALL AND START
    Completed translation and bilingual downloads remain available after a
    later failure or Stop. Retry the same queue/settings in this session to
    skip completed outputs; Ignore cache requests a new run.
+5. Original navigation remains available during translation. Completed pages
+   replace their original page in the preview; elapsed times remain after completion.
+6. Translation history stores task events, errors, progress and cache statistics.
+   Download originals/results or export a log. Missing local files show as deleted.
+   Save needed translations before confirming local-file or standard-cache cleanup.
+   Cleanup is disabled during translation/update. Legacy history is not imported;
+   BabelDOC's own cache is outside this standard-cache manager.
 
 UPDATES
 Use Check for updates in the application, then explicitly click Download and

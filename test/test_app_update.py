@@ -102,6 +102,7 @@ def test_external_redirect_is_rejected_before_request():
 def test_check_never_downloads_or_launches_installer():
     manager = UpdateManager()
     with (
+        patch("pdf2zh.app_update.APP_VERSION", "v1.9.11-codex.5.4"),
         patch(
             "pdf2zh.app_update._verified_response",
             return_value=Response(data=release_data()),

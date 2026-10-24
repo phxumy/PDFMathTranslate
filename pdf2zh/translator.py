@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextvars import copy_context
 import html
 import hashlib
 import json
@@ -1281,7 +1282,9 @@ class ScientificTranslator(BaseTranslator):
             while next_index < len(batches) or pending:
                 self._check_cancellation()
                 while next_index < len(batches) and len(pending) < self.max_concurrency:
-                    pending[executor.submit(run, batches[next_index])] = next_index
+                    pending[
+                        executor.submit(copy_context().run, run, batches[next_index])
+                    ] = next_index
                     next_index += 1
                 done, _ = concurrent.futures.wait(
                     pending,
