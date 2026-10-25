@@ -14,7 +14,7 @@
 
 - Windows 10/11 x64；
 - 建议安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；
-- 无需安装 Python，也无需单独安装 Codex CLI；`.6` 发布包已带经过哈希校验的官方稳定版 Codex CLI 0.163.0。
+- 无需安装 Python，也无需单独安装 Codex CLI；`.6.1` 发布包已带经过哈希校验的官方稳定版 Codex CLI 0.163.0。
 
 如果以后想改用系统里更新的 Codex CLI，可以参考 [OpenAI 官方 Codex CLI 页面](https://developers.openai.com/codex/cli)。OpenAI 当前提供的 Windows 安装命令是：
 
@@ -75,6 +75,7 @@ Microsoft Defender。
 
 ### 4. 常见启动问题
 
+- `.6` 打开“翻译日志与本地文件管理”后提示 `Parameter interrupted is not a valid keyword argument`：升级到 `.6.1`。这是自动滚动回调与新版 Edge / WebView2 的兼容问题，不代表翻译中断，无需清空缓存。
 - `codex executable not found`：检查安装目录中是否存在 `codex-cli\x86_64-pc-windows-msvc\bin\codex.exe`；若目录缺失，请重新运行安装程序修复。
 - Codex 未登录：在软件内点击“登录 Codex”；“刷新登录状态”会读取官方 CLI 的登录结果。
 - 窗口无法建立：安装 WebView2 Runtime 后重试。

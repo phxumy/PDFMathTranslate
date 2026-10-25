@@ -2025,8 +2025,15 @@ with gr.Blocks(
         outputs=[history_description, history_downloads, history_logs, history_export],
         api_name=False,
     ).then(
-        lambda: None,
-        js="()=>document.getElementById('translation-history')?.scrollIntoView({block:'start',behavior:'smooth'})",
+        fn=None,
+        inputs=[],
+        outputs=[],
+        # Newer browsers return a ScrollResult promise; keep it out of event data.
+        js="""() => {
+            document.getElementById('translation-history')?.scrollIntoView({block:'start',behavior:'smooth'});
+            return [];
+        }""",
+        queue=False,
         api_name=False,
     )
     history_refresh.click(

@@ -3,7 +3,7 @@
   #error ReleaseRoot must name the clean application staging directory
 #endif
 #ifndef ReleaseTag
-  #define ReleaseTag "v1.9.11-codex.6"
+  #define ReleaseTag "v1.9.11-codex.6.1"
 #endif
 #ifndef FileVersion
   #error FileVersion must be supplied by script/build-windows-installer.ps1

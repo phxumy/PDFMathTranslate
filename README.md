@@ -58,6 +58,11 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.6.1
+
+- Fix the `Parameter interrupted is not a valid keyword argument` error when opening translation history and local file management in newer Edge / WebView2 versions. Automatic scrolling now runs entirely in the frontend without passing browser scroll results to a backend callback.
+- Upgrade from `.6` through **关于与更新**, or install the new EXE over the existing application. Account settings, history, translation cache and saved PDFs are retained.
+
 ### New in v1.9.11-codex.5.4
 
 - Bundle official stable Codex CLI 0.163.0 so the default executable supports current models such as `gpt-6-luna`. The CLI archive is pinned by SHA-256 in the release workflow.

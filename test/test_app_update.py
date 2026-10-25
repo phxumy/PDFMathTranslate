@@ -63,19 +63,21 @@ def test_version_order_is_numeric_and_rejects_other_projects():
         version_key("v1.9.11-codex.5.1.2")
 
 
-def test_patch_release_is_detected_from_a_base_release_without_downloading():
+@pytest.mark.parametrize("base", ["v1.9.11-codex.5", "v1.9.11-codex.6"])
+def test_patch_release_is_detected_from_a_base_release_without_downloading(base):
     manager = UpdateManager()
+    latest = base + ".1"
     with (
-        patch("pdf2zh.app_update.APP_VERSION", "v1.9.11-codex.5"),
+        patch("pdf2zh.app_update.APP_VERSION", base),
         patch(
             "pdf2zh.app_update._verified_response",
-            return_value=Response(data=release_data("v1.9.11-codex.5.1")),
+            return_value=Response(data=release_data(latest)),
         ) as get,
         patch("pdf2zh.app_update.subprocess.Popen") as popen,
     ):
         result = manager.check()
     assert result["available"] is True
-    assert result["latest_version"] == "v1.9.11-codex.5.1"
+    assert result["latest_version"] == latest
     get.assert_called_once()
     popen.assert_not_called()
 

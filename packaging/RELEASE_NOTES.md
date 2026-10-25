@@ -1,3 +1,13 @@
+## v1.9.11-codex.6.1 — 修复打开翻译日志时的兼容性报错
+
+修复 `.6` 点击“翻译日志与本地文件管理”后出现 ``Parameter `interrupted` is not a valid keyword argument`` 的问题。
+
+- 新版 Edge / WebView2 的自动滚动操作会返回包含 `interrupted` 的滚动结果。旧回调将它误传给后台接口，导致历史面板加载后弹出错误。
+- 自动滚动改为纯前端事件，明确返回空参数列表，兼容旧版和新版浏览器返回值。这里的 `interrupted` 是滚动状态，不代表翻译任务中断。
+- 可从 `.6` 通过“关于与更新”升级，也可下载 EXE 覆盖安装；保留账号、设置、历史记录、翻译缓存和已有译文。翻译引擎及内置 Codex CLI 版本保持不变。
+
+This hotfix prevents the history panel's scroll result from being submitted as backend parameters in newer Edge / WebView2 versions. Opening translation history and local file management now scrolls to the panel without the spurious `interrupted` error.
+
 ## v1.9.11-codex.6 — 翻译历史、本地文件管理与持续预览
 
 翻译完成后保留每篇耗时及本次队列用时。翻译过程中继续使用原有翻页按钮浏览全部原文，已译好的页实时替换对应页面，未完成的页继续显示原文。
