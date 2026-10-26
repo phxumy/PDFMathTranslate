@@ -34,10 +34,27 @@ _DEFINED_TABLE_ABBREVIATION = re.compile(
     r"(?:not\s+(?:determined|detected|available|applicable)|no\s+data)\b)",
     re.IGNORECASE,
 )
+_BIBLIOGRAPHIC_PARENTHETICAL = re.compile(
+    r"\([^()\r\n]{0,900}\b(?:18|19|20)\d{2}\b[^()\r\n]{0,100}\)"
+)
+_CITED_AUTHOR = re.compile(
+    r"\b[A-Z][A-Za-z'’\-]+,\s*(?:[A-Z]\.\s*){1,4}|\b[A-Z][A-Za-z'’\-]+\s+et\s+al\."
+)
 
 
 def scientific_reference_spans(text: str) -> tuple[tuple[int, int], ...]:
-    return tuple(match.span() for match in _ABBREVIATED_REFERENCE.finditer(text))
+    # An inline book/article citation is one contextual unit. Splitting at an
+    # author's initials or a semicolon makes a surname/publisher look like an
+    # untranslated prose fragment, although those names must be preserved.
+    citations = tuple(
+        match.span()
+        for match in _BIBLIOGRAPHIC_PARENTHETICAL.finditer(text)
+        if _CITED_AUTHOR.search(match.group())
+    )
+    return (
+        tuple(match.span() for match in _ABBREVIATED_REFERENCE.finditer(text))
+        + citations
+    )
 
 
 def statistical_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:

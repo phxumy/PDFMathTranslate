@@ -20,6 +20,21 @@ class ScientificSourceSegmentationTests(unittest.TestCase):
                 ["MW—molecular weight; ", f"{abbreviation} —{definition}."],
             )
 
+    def test_inline_book_citation_keeps_authors_title_and_publisher_in_context(self):
+        citation = "(Armarego, W.L.F.; Chai, C.L.L. Purification of Laboratory Chemicals, sixth ed.; Butterworth-Heinemann, 2009)"
+        source = (
+            "Solvents were dried by conventional methods "
+            + citation
+            + ". HPLC-grade solvents were used."
+        )
+        chunks = self.translator._split_formula_context_text(source)
+        self.assertEqual(
+            chunks,
+            [source[: source.index(". HPLC") + 2], "HPLC-grade solvents were used."],
+        )
+        self.assertEqual("".join(chunks), source)
+        self.assertTrue(any(citation in chunk for chunk in chunks))
+
     def test_abbreviations_and_formula_placeholders_remain_in_their_sentence(self):
         for label in ("Fig.", "Figs.", "Eq.", "Eqs.", "Sec.", "Refs."):
             for number in (

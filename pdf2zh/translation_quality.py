@@ -205,7 +205,18 @@ def is_assay_measurement_label(text: str) -> bool:
     """
     visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
     words = re.findall(r"[A-Za-zμµ][A-Za-z0-9μµ]*(?:[-_][A-Za-z0-9]+)*", visible)
-    anchors = {"ADP-Glo", "CellTiter-Glo", "IC", "IC50", "EC", "EC50", "CL"}
+    anchors = {
+        "ADP-Glo",
+        "CellTiter-Glo",
+        "Caco-2",
+        "CTG",
+        "IC",
+        "IC50",
+        "EC",
+        "EC50",
+        "CL",
+        "Cl",
+    }
     if not anchors.intersection(words):
         return False
     allowed = anchors | {
@@ -217,6 +228,16 @@ def is_assay_measurement_label(text: str) -> bool:
         "MSI-H",
         "ADME",
         "PK",
+        "H",
+        "Mu",
+        "R",
+        "D",
+        "Hep",
+        "LM",
+        "WB",
+        "GSH",
+        "PPB",
+        "ER",
         "mL",
         "L",
         "min",

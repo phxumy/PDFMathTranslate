@@ -13,6 +13,9 @@ from test_codex_formula_context import translator_stub
         "CL (mL/min/kg{v42}",
         "HCT116 CTG IC50 (MSI, μM)",
         "SW620 CTG IC50 (MSS, μM)",
+        "H, Mu, R, D, Hep Cl{v73}",
+        "Caco-2 {v71}",
+        "HCT116 CTG (MSI, {v64}",
     ],
 )
 def test_assay_symbols_keep_identity_units_and_values_without_model_calls(source):
