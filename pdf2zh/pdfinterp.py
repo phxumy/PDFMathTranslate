@@ -229,15 +229,33 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
     def do_f(self) -> None:
         """Fill path using nonzero winding number rule"""
         # self.device.paint_path(self.graphicstate, False, True, False, self.curpath)
+        self._pending_orcid_badge_marker = ""
+        marker = getattr(self.device, "mark_orcid_badge_path", None)
+        if callable(marker):
+            points = [
+                apply_matrix_pt(self.ctm, item[i : i + 2])
+                for item in self.curpath
+                for i in range(1, len(item) - 1, 2)
+            ]
+            if points:
+                self._pending_orcid_badge_marker = marker(
+                    (
+                        min(p[0] for p in points),
+                        min(p[1] for p in points),
+                        max(p[0] for p in points),
+                        max(p[1] for p in points),
+                    )
+                )
         self.curpath = []
 
     def do_F(self) -> None:
         """Fill path using nonzero winding number rule (obsolete)"""
+        self.do_f()
 
     def do_f_a(self) -> None:
         """Fill path using even-odd rule"""
         # self.device.paint_path(self.graphicstate, False, True, True, self.curpath)
-        self.curpath = []
+        self.do_f()
 
     def do_B(self) -> None:
         """Fill and stroke path using nonzero winding number rule"""
@@ -511,6 +529,11 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                             ):
                                 ops += self._pending_uri_underline_marker + "\n"
                                 self._pending_uri_underline_marker = ""
+                            if name in {"f", "f*", "F"} and getattr(
+                                self, "_pending_orcid_badge_marker", ""
+                            ):
+                                ops += self._pending_orcid_badge_marker + "\n"
+                                self._pending_orcid_badge_marker = ""
                             ops += f"{p} {name} "
                 elif settings.STRICT:
                     error_msg = "Unknown operator: %r" % name

@@ -1329,6 +1329,14 @@ class ScientificTranslator(BaseTranslator):
             "not a field called 'direct biology'. "
             "Keep glossary abbreviation labels such as 'n.d.' intact while translating "
             "their definitions: 'n.d.—not determined' means 'n.d.—未测定', not 'no date'. "
+            "Retain chromatographic column product names such as Lux Cellulose-4, "
+            "CHIRALPAK, and Xbridge Phenyl OBD in their original Latin spelling; "
+            "Lux here is a brand, not the illumination unit. "
+            "In protein assays, intact mass spectrometry means intact-protein mass "
+            "spectrometry (完整蛋白质谱), not '完整质量质谱'. Preserve the direction "
+            "of reagent addition: initiating a reaction by addition of substrate "
+            "mixture means adding that substrate mixture to the existing reaction, "
+            "not adding other reactants into the substrate mixture. "
             "Keep section labels complete: for Chinese output, 'Sec. I in Ref. [42]' "
             "means '文献[42]第I节', not a bare '第I' followed by another parenthesis. "
             "In quantum-state contexts, population means state occupation "
@@ -1876,16 +1884,23 @@ class ScientificTranslator(BaseTranslator):
 
     @staticmethod
     def _reference_semantic_context(texts: list[str]) -> str:
+        contexts = []
         if any(
             re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", text, re.I)
             for text in texts
         ):
-            return (
+            contexts.append(
                 "Terminology context: near-term processors describes a time horizon, "
                 "meaning processors available now or in the near future; it does not "
                 "describe physical proximity or short transmission range.\n\n"
             )
-        return ""
+        if any(re.search(r"\bdirect[- ]to[- ]biology\b", text, re.I) for text in texts):
+            contexts.append(
+                "Terminology context: direct-to-biology (D2B) is a workflow that "
+                "screens reaction mixtures directly in biological assays. Use "
+                "直接生物测试 in Chinese, not 直接生物学 or 直接进入生物学.\n\n"
+            )
+        return "".join(contexts)
 
     def _build_reference_title_prompt(self, entries: list[str]) -> str:
         indexed_entries = [
@@ -5019,7 +5034,9 @@ class ScientificTranslator(BaseTranslator):
                 return True
             source_title = ratio.sub("", source_title)
             translated_title = ratio.sub("", translated_title)
-        if has_suspicious_physics_translation(source_title, translated_title):
+        if has_suspicious_physics_translation(
+            source_title, translated_title
+        ) or has_suspicious_biomedical_translation(source_title, translated_title):
             return True
         # "Low-rank" is one source word to the general English detector, so
         # the partial translation "低-rank" otherwise escapes its exact-word
@@ -5252,10 +5269,11 @@ class ScientificTranslator(BaseTranslator):
             return True
         year = r"(?:19|20)\d{2}[a-z]?"
         number = r"\d{1,7}[A-Za-z]?(?:[-–]\d{1,7})?"
+        issue = r"\d{1,4}(?:[_\s-]*(?:[Ss]uppl(?:ement)?|[Pp]art|[Pp]t)\.?[_\s-]*\d*)?"
         terminal_year = rf"(?:\({year}\)|{year})\.?\s*"
         dense_journal = re.fullmatch(
             rf"(?P<venue>[A-Z][A-Za-z.]{{3,160}})\s*{year},\s*\d{{1,4}}"
-            rf"(?:\(\d{{1,4}}\))?,\s*{number}\.?",
+            rf"(?:\s*\({issue}\))?,\s*{number}\.?",
             remaining,
         )
         if dense_journal and cls._reference_venue_name_is_plausible(
@@ -5264,7 +5282,7 @@ class ScientificTranslator(BaseTranslator):
             return True
         chemistry_fields = re.fullmatch(
             rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?)\s+{year},\s*"
-            rf"\d{{1,4}}(?:\s*\(\d{{1,4}}\))?,\s*(?:No\.\s*)?"
+            rf"\d{{1,4}}(?:\s*\({issue}\))?,\s*(?:No\.\s*)?"
             rf"{number}\.?\s*(?:DOI:\s*10\.\d{{4,9}}/\S+\.?)?\s*",
             remaining,
         )
@@ -5742,8 +5760,8 @@ class ScientificTranslator(BaseTranslator):
     ) -> list[str]:
         """Translate only exact cited-work title substrings in reference entries.
 
-        Entries are never sent through ``_split_long_text``. A malformed, ambiguous,
-        or failed structured response leaves the corresponding source entry unchanged.
+        Entries are never sent through ``_split_long_text``. Ambiguous metadata
+        remains unchanged, but an explicit known title must translate successfully.
         """
         if cache_contexts is None:
             cache_contexts = [""] * len(entries)
@@ -5803,7 +5821,12 @@ class ScientificTranslator(BaseTranslator):
                         cache_contexts[entry_idx]
                     ),
                 )
-                if not is_valid and replacements:
+                known_titles = (
+                    self._quoted_reference_title_spans(entry)
+                    or self._styled_reference_title_spans(entry)
+                    or self._structured_reference_title_spans(entry)
+                )
+                if not is_valid and (replacements or known_titles):
                     replacements = self._run_reference_title_batch([entry])[0]
                     translated_entry, is_valid = (
                         self._apply_reference_title_replacements(
@@ -5814,6 +5837,8 @@ class ScientificTranslator(BaseTranslator):
                             ),
                         )
                     )
+                if not is_valid and known_titles:
+                    raise self._incomplete_translation_error(entry, entry_idx)
                 results[entry_idx] = translated_entry
                 if is_valid:
                     self.cache.set(

@@ -186,6 +186,9 @@ def _layout_detections(
     detections = _recover_publisher_contact_lines(
         detections, source_page, height, width
     )
+    detections = _recover_supporting_information_link_rows(
+        detections, source_page, height, width
+    )
     detections = _recover_caption_line_bounds(detections, source_page, height, width)
     detections = _recover_abandoned_prose(detections, source_page, height, width)
     detections = _recover_table_note_lines(detections, source_page, height, width)
@@ -216,6 +219,62 @@ def _recover_publisher_contact_lines(detections, page, height, width):
                     "publisher_text",
                     bounds,
                     1.0,
+                )
+            )
+    return recovered
+
+
+def _recover_supporting_information_link_rows(detections, page, height, width):
+    """Translate the availability sentence while retaining its linked URL row."""
+    if not callable(getattr(page, "get_links", None)):
+        return detections
+    uris = {
+        link["uri"].split("?", 1)[0].split("#", 1)[0]
+        for link in page.get_links()
+        if link.get("uri")
+    }
+    if not uris:
+        return detections
+    lines = [
+        line
+        for block in page.get_text("dict")["blocks"]
+        for line in block.get("lines", [])
+    ]
+    text_of = lambda line: "".join(
+        span.get("text", "") for span in line["spans"]
+    ).strip()
+    recovered = list(detections)
+    sx, sy = width / page.rect.width, height / page.rect.height
+    for prefix in lines:
+        if not re.fullmatch(
+            r"The Supporting Information is available free of charge at:?",
+            text_of(prefix),
+        ):
+            continue
+        x0, y0, x1, y1 = prefix["bbox"]
+        following = [
+            line
+            for line in lines
+            if text_of(line).rstrip(".").split("?", 1)[0].split("#", 1)[0] in uris
+            and 0 <= line["bbox"][1] - y1 <= 2 * (y1 - y0)
+            and abs(line["bbox"][0] - x0) <= y1 - y0
+        ]
+        if len(following) != 1:
+            continue
+        for line, kind in (
+            (prefix, "publisher_text"),
+            (following[0], "publisher_identity"),
+        ):
+            left, top, right, bottom = line["bbox"]
+            bounds = (
+                max(0, int(left * sx) - 1),
+                max(0, int(height - bottom * sy) - 1),
+                min(width - 1, int(right * sx) + 1),
+                min(height - 1, int(height - top * sy) + 1),
+            )
+            recovered.append(
+                _LayoutDetection(
+                    max((d.value for d in recovered), default=1) + 1, kind, bounds, 1.0
                 )
             )
     return recovered
@@ -644,6 +703,42 @@ def _chatgpt_document_task_id(
     ).hexdigest()
 
 
+def _collect_orcid_badge_bounds(page):
+    """Identify only small ORCID-green artwork inside an actual ORCID link."""
+    links = [
+        link["from"]
+        for link in page.get_links()
+        if link.get("from") is not None
+        and re.match(r"https?://orcid\.org/", link.get("uri") or "", re.I)
+    ]
+    if not links:
+        return ()
+    result = []
+    for drawing in page.get_drawings():
+        rect, color = drawing["rect"], drawing.get("fill")
+        if (
+            color
+            and len(color) == 3
+            and max(
+                abs(c - expected) for c, expected in zip(color, (0.651, 0.808, 0.224))
+            )
+            < 0.06
+            and 4 <= rect.width <= 10
+            and 4 <= rect.height <= 10
+            and 0.75 <= rect.width / rect.height <= 1.25
+            and any(link.contains(rect) for link in links)
+        ):
+            result.append(
+                (
+                    rect.x0,
+                    page.rect.height - rect.y1,
+                    rect.x1,
+                    page.rect.height - rect.y0,
+                )
+            )
+    return tuple(result)
+
+
 def _collect_source_uri_links(document):
     """Read URI actions directly, including relative URIs reported as Launch."""
     return {
@@ -845,6 +940,7 @@ def translate_patch(
     device.source_spelling = collect_source_spelling(doc_zh)
     device.source_uri_links = _collect_source_uri_links(doc_zh)
     device.source_closed_box_strokes = {}
+    device.source_orcid_badges = {}
     device.cancellation_event = cancellation_event
     device.translator.cancellation_event = cancellation_event
 
@@ -924,6 +1020,9 @@ def translate_patch(
                 layout[page.pageno] = box
                 device.source_closed_box_strokes[page.pageno] = (
                     _collect_closed_box_strokes(doc_zh[page.pageno])
+                )
+                device.source_orcid_badges[page.pageno] = _collect_orcid_badge_bounds(
+                    doc_zh[page.pageno]
                 )
                 # 新建一个 xref 存放新指令流
                 page.page_xref = doc_zh.get_new_xref()

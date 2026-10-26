@@ -274,6 +274,18 @@ def find_reference_markers(
         # placeholders attached to a word prevents author bylines such as
         # ``A. Smith{v1}, B. Jones{v2}`` from being split as references.
         prefix = text[: match.start()]
+        # A font-isolated journal volume after "2019," is not the next
+        # reference number, even when that volume happens to equal it.
+        resolved_prefix = _FORMULA_RE.sub(
+            lambda item: (
+                formula_texts[int(_compact_digits(item[1]))]
+                if int(_compact_digits(item[1])) < len(formula_texts)
+                else item[0]
+            ),
+            prefix,
+        )
+        if re.search(r"(?<!\d)(?:19|20)\d{2}[a-z]?\s*,\s*$", resolved_prefix, re.I):
+            continue
         if (
             re.search(
                 r"[0-9A-Za-zÀ-ÖØ-öø-ÿ'’\-]\s*$",
@@ -583,7 +595,7 @@ def looks_like_author_list(text: str) -> bool:
 def _inverted_reference_authors(text: str) -> bool:
     """Recognize Surname, Initials lists without swallowing subsequent prose."""
     text = re.sub(r"(?:[,;]\s*)?\bet\s+al\.?\s*$", "", text).rstrip(" ;,")
-    surname = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+(?:\s+(?:de|van|von|[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+))*"
+    surname = r"(?:(?:de|del|da|dos|van|von)(?=[A-ZÀ-ÖØ-Þ])|d['’](?=[A-ZÀ-ÖØ-Þ]))?[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+(?:\s+(?:de|van|von|[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+))*"
     initials = r"(?:[A-Z]\.(?:-?[A-Z]\.)?\s*){1,5}"
     name = rf"{surname},\s*{initials}(?:,\s*(?:Jr|Sr)\.)?"
     return bool(

@@ -5,6 +5,7 @@ import unittest
 
 from pdf2zh.translation_policy import ExactReplacement
 from pdf2zh.translator import CodexTranslator
+from pdf2zh.codex_errors import CodexTranslationValidationError
 
 
 class MemoryCache:
@@ -27,6 +28,15 @@ def translator_stub() -> CodexTranslator:
 
 
 class CodexReferenceTranslationTests(unittest.TestCase):
+    def assertRejectedReference(self, translator, entry, **kwargs):
+        # Ambiguous spans may preserve metadata; explicit titles now fail closed.
+        # In either case an unsafe replacement must never become the output.
+        try:
+            result = translator.translate_reference_entries([entry], **kwargs)
+        except CodexTranslationValidationError:
+            return
+        self.assertEqual(result, [entry])
+
     def test_long_abbreviated_spectroscopy_venue_preserves_title_boundary(self):
         for title, translated_title in (
             ("Composite pulses", "复合脉冲"),
@@ -487,7 +497,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         translator._run_reference_title_batch = partial
 
-        self.assertEqual(translator.translate_reference_entries([entry]), [entry])
+        self.assertRejectedReference(translator, entry)
         self.assertEqual(calls, 2)
         self.assertEqual(translator.cache.values, {})
 
@@ -504,9 +514,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         translator._run_reference_title_batch = unchanged
 
-        result = translator.translate_reference_entries([entry])[0]
-
-        self.assertEqual(result, entry)
+        self.assertRejectedReference(translator, entry)
         self.assertEqual(calls, 2)
         self.assertEqual(translator.cache.values, {})
 
@@ -523,9 +531,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         translator._run_reference_title_batch = partial
 
-        result = translator.translate_reference_entries([entry])[0]
-
-        self.assertEqual(result, entry)
+        self.assertRejectedReference(translator, entry)
         self.assertEqual(calls, 2)
         self.assertEqual(translator.cache.values, {})
 
@@ -542,7 +548,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         translator._run_reference_title_batch = partial
 
-        self.assertEqual(translator.translate_reference_entries([entry]), [entry])
+        self.assertRejectedReference(translator, entry)
         self.assertEqual(calls, 2)
         self.assertEqual(translator.cache.values, {})
 
@@ -566,10 +572,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
                 translator._run_reference_title_batch = truncated
 
-                self.assertEqual(
-                    translator.translate_reference_entries([entry]),
-                    [entry],
-                )
+                self.assertRejectedReference(translator, entry)
                 self.assertEqual(calls, 2)
                 self.assertEqual(translator.cache.values, {})
 
@@ -610,10 +613,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
                 translator = translator_stub()
                 translator._run_reference_title_batch = lambda entries: [replacements]
 
-                self.assertEqual(
-                    translator.translate_reference_entries([entry]),
-                    [entry],
-                )
+                self.assertRejectedReference(translator, entry)
                 self.assertEqual(translator.cache.values, {})
 
         translator = translator_stub()
@@ -890,11 +890,8 @@ class CodexReferenceTranslationTests(unittest.TestCase):
                 translator._run_reference_title_batch = lambda entries: [
                     [ExactReplacement("A first sentence", "前半句")]
                 ]
-                self.assertEqual(
-                    translator.translate_reference_entries(
-                        [entry], cache_contexts=["{v1}=x+y"]
-                    ),
-                    [entry],
+                self.assertRejectedReference(
+                    translator, entry, cache_contexts=["{v1}=x+y"]
                 )
                 self.assertEqual(translator.cache.values, {})
 
@@ -1050,7 +1047,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
             [ExactReplacement("Physical Review Letters", "物理评论快报")]
         ]
 
-        self.assertEqual(translator.translate_reference_entries([entry]), [entry])
+        self.assertRejectedReference(translator, entry)
 
     def test_no_title_and_unsafe_placeholders_preserve_entries(self) -> None:
         translator = translator_stub()
@@ -1113,9 +1110,9 @@ class CodexReferenceTranslationTests(unittest.TestCase):
 
         translator._run_reference_title_batch = empty_batch
 
-        self.assertEqual(translator.translate_reference_entries([entry]), [entry])
-        self.assertEqual(translator.translate_reference_entries([entry]), [entry])
-        self.assertEqual(call_count, 2)
+        self.assertRejectedReference(translator, entry)
+        self.assertRejectedReference(translator, entry)
+        self.assertEqual(call_count, 4)
         self.assertEqual(translator.cache.values, {})
 
     def test_legacy_noop_cache_entry_is_ignored(self) -> None:

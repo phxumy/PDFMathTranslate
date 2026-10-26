@@ -39,6 +39,33 @@ class _FakeLayout:
 
 
 class LayoutOverlapTests(unittest.TestCase):
+    def test_supporting_information_link_uses_original_url_glyphs(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text(
+                (50, 70),
+                "The Supporting Information is available free of charge at",
+                fontsize=8,
+            )
+            url = "https://example.org/doi/10.1234/article"
+            page.insert_text((50, 84), url + ".", fontsize=8)
+            page.insert_link(
+                {
+                    "kind": 2,
+                    "from": page.search_for(url)[0],
+                    "uri": url + "?goto=supporting-info",
+                }
+            )
+            page = document.reload_page(page)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout([_FakeBox(0, (48, 59, 300, 87))], {0: "plain text"}),
+                800,
+                600,
+                page,
+            )
+            self.assertEqual(kinds[int(layout[735, 55])], "publisher_text")
+            self.assertEqual(layout[720, 55], 0)
+
     def test_plain_text_detection_cannot_leave_first_letter_of_contact_line_behind(
         self,
     ):

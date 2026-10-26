@@ -1,4 +1,4 @@
-## v1.9.11-codex.6.2 — 修复图表标题切分、科学标签误判与译文细节
+## v1.9.11-codex.6.2 — 修复全文翻译中断与科学文献排版
 
 修复部分药物化学论文翻译到表格页时出现“译文完整性校验失败”的问题：版面识别框截断了表题首尾单词，留下极短的独立残片，导致重试仍无法得到有效译文。
 
@@ -7,14 +7,20 @@
 - 恢复特定 STIX 字体被错误映射为替换字符的横线，避免正文及缩写释义中出现乱码。
 - 修复 `k_inact`、`ADP-Glo IC50` 等带单位、公式占位符的动力学和检测标签被误判为英文漏译；标签中的数值、单位保持不变，普通正文继续执行完整性检查。
 - 数字公式按完整数字匹配，避免把下标 `2` 与化合物编号 `26`、`29` 混在一起计数而拒绝正确译文；真正重复展开公式仍会被拦截。
+- 区分括号内直接给出的拟合方程与方程编号引用。段落缩小时保留独立行首公式占用的宽度，避免核磁数据与后续单位重叠。
 - 保持 `n.d.—not determined` 等缩写与释义一起翻译，校正无配体蛋白、直接生物测试等语境明确的术语。旧缓存中的相应误译会重新校验。
 - 正文括号中的完整文献引用保持同一翻译上下文，避免作者姓名或出版社被切成单独的“未译英文”片段而反复重试。
+- 修复参考文献编号后作者重音字形导致的编号序列中断，以及带小写前缀姓氏的题名边界识别；继续只翻译文献题名。
+- 区分期刊卷号与参考文献编号，恢复跨页增刊条目及被公式标记吞入的副标题冠词。`dMMR/MSI-H` 等原文缩写可正确保留；已明确的题名重试后仍未译出时直接停止，不再静默保留英文。
 - 支持通栏表格脚注下方的双栏正文衔接，避免跨栏名词短语被割裂。修复正文中的小写 `nature` 被误识别为期刊名的问题。
 - 恢复出版社完整联系信息提示行，使其与前面的作者名单分开翻译，避免首字母残留或正文提示被并入姓名。
+- 作者信息按每位作者独立排版并翻译单位地址，保留姓名、邮箱与 ORCID；补充信息链接保留原始字号与链接文字。修复跨页“Supporting Information”短语的断裂。
+- 作者信息重排后，原位置的 ORCID 装饰图标不再覆盖其他文字。
+- 保留色谱柱商品名，校正完整蛋白质谱术语，并检查实验步骤中底物加样方向。
 
 可通过“关于与更新”或下载 EXE 覆盖安装。账号、设置、历史和已有译文沿用；私人论文、译文与缓存不进入发行包。
 
-This release repairs clipped figure/table/scheme captions, source-confirmed caption footnotes, a broken STIX text mapping, kinetic-symbol validation, scientific abbreviation definitions, biomedical terminology and reading order below spanning tables. Translation completeness checks remain enabled.
+This release repairs caption and bibliography segmentation, scientific formula/label validation, font decoding, author-address layout, preserved-prefix collisions, terminology and reading-order issues. Translation completeness checks remain enabled.
 
 ## v1.9.11-codex.6.1 — 修复打开翻译日志时的兼容性报错
 

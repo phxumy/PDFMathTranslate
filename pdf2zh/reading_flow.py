@@ -45,7 +45,7 @@ _REFERENCE_YEAR_END_RE = re.compile(
     re.IGNORECASE,
 )
 _REFERENCE_VOLUME_PAGE_END_RE = re.compile(
-    r"\b\d{1,4}(?:\s*\(\d{1,4}\))?\s*[,;:]\s*"
+    r"\b\d{1,4}(?:\s*\(\d{1,4}(?:[_\s-]*(?:Suppl(?:ement)?|Part|Pt)\.?[_\s-]*\d*)?\))?\s*[,;:]\s*"
     r"(?:[A-Za-z]?\d{2,}(?:\s*[-\u2013\u2014]\s*\d+)?|e\d+)\.?\s*$",
     re.IGNORECASE,
 )
@@ -479,6 +479,12 @@ def _compatible_boundary(
     if not (_looks_like_body_prose(left) and _looks_like_body_prose(right)):
         return False, ()
     continuation_start = _continuation_start_reason(right.text)
+    if (
+        continuation_start is None
+        and re.search(r"\b(?:Supporting|Supplementary|Supplemental)\s*$", left.text)
+        and re.match(r"\s*(?:Information|Materials?)\b", right.text)
+    ):
+        continuation_start = "split-supplementary-material-label"
     if continuation_start is None and _left_has_dangling_continuation_cue(left.text):
         continuation_start = "capitalized-after-dangling-cue"
     if (

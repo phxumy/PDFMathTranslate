@@ -39,6 +39,56 @@ def segment(
 
 
 class ReadingFlowDetectionTests(unittest.TestCase):
+    def test_author_only_page_tail_continues_into_supplement_issue_metadata(self):
+        left = segment(
+            17,
+            0,
+            "(25) Rao, Y.; Picco, G.; Smith, A.; Jones, B.;",
+            column=1,
+            y0=49,
+            y1=110,
+        )
+        right = segment(
+            18,
+            0,
+            "Brown, C. Abstract 6393: Target engagement of a helicase inhibitor. Cancer Res. 2025, 85 (8_Supplement_1), 6393. (26) Smith, A. A new scientific title. Nature 2025, 10, 20-30.",
+            column=0,
+            y0=400,
+            y1=744,
+        )
+        group = detect_reference_continuation([left], [right])
+        self.assertIsNotNone(group)
+        self.assertEqual(group.reference_number, 25)
+        self.assertEqual(
+            right.text[group.next_marker_start : group.next_marker_start + 4], "(26)"
+        )
+
+    def test_supporting_information_title_continues_across_a_page_break(self):
+        left = segment(
+            12,
+            0,
+            "The protocols are provided in the Supporting",
+            column=1,
+            y0=49,
+            y1=170,
+        )
+        right = segment(
+            13,
+            0,
+            "Information. All compounds were purified by HPLC.",
+            column=0,
+            y0=570,
+            y1=610,
+        )
+        edge = detect_cross_page_edge([left], [right])
+        self.assertIsNotNone(edge)
+        self.assertIn("split-supplementary-material-label", edge.reasons)
+        self.assertIsNone(
+            detect_cross_page_edge(
+                [left], [replace(right, text="Independent methods were used.")]
+            )
+        )
+
     def test_columns_resume_below_spanning_table_note(self):
         left = segment(
             8,

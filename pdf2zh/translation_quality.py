@@ -58,14 +58,34 @@ def has_suspicious_biomedical_translation(source: str, target: str) -> bool:
         and re.search(r"(?:脱|脫|去)辅基|(?:脱|脫|去)輔基", target)
     ):
         return True
+    if (
+        re.search(r"\b(?:WRN|proteins?)\b", source, re.I)
+        and re.search(r"\bintact\s+(?:protein\s+)?mass\s+spectrometry\b", source, re.I)
+        and re.search(r"完整(?:质量质谱|質量質譜)", target)
+    ):
+        return True
+    if re.search(
+        r"\binitiated\s+by\s+the\s+addition\s+of\s+"
+        r"(?:\d+\s*(?:\{v\d+\}|[×x])?\s*)?substrate\s+mixture\b",
+        source,
+        re.I,
+    ) and re.search(r"向[^。；;]{0,60}底物混合(?:物|液)(?:中)?加入(?:反应|反應)(?:物|组分|組分)", target):
+        return True
     if re.search(
         r"\bn\.\s*d\.\s*[-–—:=]\s*not\s+(?:determined|detected)\b", source, re.I
     ):
         if re.search(r"日期(?:不详|不詳|未知|不明)|无日期|無日期", target):
             return True
+    if re.search(r"\bcolumn\b", source, re.I) and re.search(r"\bLux\b", source):
+        product = re.search(r"\bCellulose-\d+\b", source)
+        if product and (
+            re.search(r"\bLux\b", target, re.I) is None
+            or re.search(re.escape(product[0]), target, re.I) is None
+        ):
+            return True
     return bool(
         re.search(r"\bdirect[-‐‑ ]to[-‐‑ ]biology\b", source, re.I)
-        and re.search(r"直接生物[学學]", target)
+        and re.search(r"直接(?:进入|進入)?生物[学學]", target)
     )
 
 
@@ -820,6 +840,26 @@ def normalize_scientific_cross_reference_placement(
     """
 
     masked_source = _mask_cross_reference_opaque_text(source)
+    # "equation (Y = Bottom + ... , where Y ...)" introduces the expression
+    # itself, not an equation number. A split-font Y= may be one opaque token.
+    # Require several formula tokens, visible algebra, and a variable-definition
+    # clause; a closed "equation ({v0})" reference must still be checked.
+    definition = re.compile(
+        r"\b(?P<label>equation)\s*[(（]\s*(?:\{\{v\d+\}\}|\{v\d+\})"
+        r"(?P<expression>[^.!?;\r\n]{1,400}?)\bwhere\b",
+        re.I,
+    )
+    for match in definition.finditer(masked_source):
+        expression = match.group("expression")
+        if (
+            not expression.lstrip().startswith((")", "）", "]", "］"))
+            and len(_FORMULA_PLACEHOLDER_RE.findall(expression)) >= 2
+            and re.search(r"[=+/*^]", expression)
+        ):
+            start, end = match.span("label")
+            masked_source = (
+                masked_source[:start] + " " * (end - start) + masked_source[end:]
+            )
     normalized = target
     consumed_groups: dict[tuple, int] = {}
     for start, end, kind, identifiers, separators in _source_reference_groups(
@@ -1779,7 +1819,13 @@ def has_suspicious_reference_title_residue(source: str, target: str) -> bool:
                 1,
             )
         )
-        if not named_entity:
+        scientific_acronyms = all(
+            re.fullmatch(r"[a-z]{0,2}[A-Z]{2,}(?:-[A-Z]+)?", word)
+            for word in source_clause
+        ) and source_clause == tuple(
+            match.group(0) for match in target_matches[block.b : block.b + block.size]
+        )
+        if not (named_entity or scientific_acronyms):
             return True
     return False
 

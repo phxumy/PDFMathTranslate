@@ -5,6 +5,7 @@ import unittest
 
 from pdf2zh.translation_policy import ExactReplacement
 from pdf2zh.translator import CodexTranslator
+from pdf2zh.codex_errors import CodexTranslationValidationError
 
 
 class MemoryCache:
@@ -112,9 +113,8 @@ class CodexReferenceCacheTests(unittest.TestCase):
                 translator = translator_stub()
                 translator.cache.set(translator._reference_cache_key(entry), cached)
                 translator._run_reference_title_batch = lambda entries: [[]]
-                self.assertEqual(
-                    translator.translate_reference_entries([entry]), [entry]
-                )
+                with self.assertRaises(CodexTranslationValidationError):
+                    translator.translate_reference_entries([entry])
 
     def test_legacy_numeric_partial_title_is_not_reused(self):
         title = "A scalable framework, 3D integration and its applications"
@@ -221,9 +221,8 @@ class CodexReferenceCacheTests(unittest.TestCase):
                     translator._reference_replacements_cache_key(entry), cached
                 )
                 translator._run_reference_title_batch = lambda entries: [[]]
-                self.assertEqual(
-                    translator.translate_reference_entries([entry]), [entry]
-                )
+                with self.assertRaises(CodexTranslationValidationError):
+                    translator.translate_reference_entries([entry])
 
     def test_existing_structured_record_is_revalidated_after_quality_rules_change(self):
         source = "AI Feynman 2.0: A method for symbolic regression"
@@ -239,9 +238,8 @@ class CodexReferenceCacheTests(unittest.TestCase):
                     payload(source, unsafe),
                 )
                 translator._run_reference_title_batch = lambda entries: [[]]
-                self.assertEqual(
-                    translator.translate_reference_entries([entry]), [entry]
-                )
+                with self.assertRaises(CodexTranslationValidationError):
+                    translator.translate_reference_entries([entry])
 
 
 if __name__ == "__main__":

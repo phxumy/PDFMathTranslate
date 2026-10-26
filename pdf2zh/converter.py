@@ -883,18 +883,63 @@ def _release_tex_accented_prose_words(
 def _release_reference_number_labels(
     segments, formulas, lines, formula_paragraphs, paragraphs, text_chars
 ):
-    """Restore numeric citation labels accidentally hidden as inline math."""
+    """Restore citation labels and subtitle articles hidden as inline math."""
     author = re.compile(
         r"^\s*[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+,\s*[A-Z](?:\.|[.\-][A-Z])"
     )
-    expanded = [
-        _FORMULA_MARKER_RE.sub(
-            lambda m: "".join(c.get_text() for c in formulas[int(m.group(1))]), s
+
+    def expand(value):
+        return unicodedata.normalize(
+            "NFC",
+            _FORMULA_MARKER_RE.sub(
+                lambda m: "".join(c.get_text() for c in formulas[int(m.group(1))]),
+                value,
+            ),
         )
-        for s in segments
-    ]
+
+    expanded = [expand(s) for s in segments]
     for index, chars in enumerate(formulas):
         label = "".join(ch.get_text() for ch in chars)
+        article = re.fullmatch(r"\):\s*(A|An|The)", label)
+        if article and not lines[index]:
+            paragraph_id = formula_paragraphs[index]
+            paragraph = paragraphs[paragraph_id]
+            marker = f"{{v{index}}}"
+            if (
+                paragraph.region_kind == "plain text"
+                and paragraph.layout_class > 1
+                and segments[paragraph_id].count(marker) == 1
+                and reference_entry_score(expanded[paragraph_id]) >= 5
+                and all(
+                    _is_non_math_text_font(char.fontname)
+                    for char in chars[-len(article[1]) :]
+                )
+            ):
+                left, right = segments[paragraph_id].split(marker)
+                if re.match(r"\s+[A-Z][A-Za-z-]{2,}\b", right):
+                    formulas[index] = chars[: -len(article[1])]
+                    segments[paragraph_id] = (
+                        left + marker + article[1] + " " + right.lstrip()
+                    )
+                    text_chars[paragraph_id].extend(chars[-len(article[1]) :])
+        if chars and re.search(r"\d[.,;]\s*\($", label) and not lines[index]:
+            paragraph_id = formula_paragraphs[index]
+            paragraph = paragraphs[paragraph_id]
+            marker = f"{{v{index}}}"
+            if (
+                paragraph.region_kind == "plain text"
+                and paragraph.layout_class > 1
+                and segments[paragraph_id].count(marker) == 1
+                and _is_non_math_text_font(chars[-1].fontname)
+                and reference_entry_score(expanded[paragraph_id]) >= 5
+            ):
+                left, right = segments[paragraph_id].split(marker)
+                if re.match(r"\s*\d{1,3}\)\s+[A-Z]", right):
+                    # The preceding venue/page glyph island swallowed only the
+                    # next label's opener, e.g. "),6393.(" + "26) ...".
+                    formulas[index] = chars[:-1]
+                    segments[paragraph_id] = left + marker + " (" + right.lstrip()
+                    text_chars[paragraph_id].append(chars[-1])
         if not re.fullmatch(r"\(\d{1,3}\)(?:\([a-z]\))?", label) or lines[index]:
             continue
         paragraph_id = formula_paragraphs[index]
@@ -918,7 +963,7 @@ def _release_reference_number_labels(
             following = paragraphs[next_id]
             if (
                 following.region_kind == "plain text"
-                and author.match(segments[next_id])
+                and author.match(expand(segments[next_id]))
                 and abs(following.y - paragraph.y) <= 0.25 * paragraph.size
                 and -0.1 * paragraph.size
                 <= following.x - paragraph.x1
@@ -930,7 +975,10 @@ def _release_reference_number_labels(
                 following.x0 = min(following.x0, paragraph.x0)
                 text_chars[next_id].extend(chars)
             continue
-        if author.match(right) and reference_entry_score(expanded[paragraph_id]) >= 5:
+        if (
+            author.match(expand(right))
+            and reference_entry_score(expanded[paragraph_id]) >= 5
+        ):
             separator = " " if left and not left[-1].isspace() else ""
             segments[paragraph_id] = left + separator + label + " " + right.lstrip()
             text_chars[paragraph_id].extend(chars)
@@ -1095,13 +1143,16 @@ def _recover_author_information_affiliations(
     name_pattern = re.compile(
         r"(?P<name>[A-Z][A-Za-z.'’\-]+(?:\s+[A-Z][A-Za-z.'’\-]+){1,4})"
         r"\s*[−—–]\s*(?=(?:Department|Institute|State|International|Laboratory|"
-        r"[A-Z][A-Za-z]+\s+(?:Center|Therapeutics|University))\b)"
+        r"[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]*){0,2}\s+"
+        r"(?:Center|Therapeutics|University|GmbH|Ltd|Inc|Limited))\b)"
     )
     for paragraph_id, source in enumerate(segments):
         paragraph = paragraphs[paragraph_id]
         if paragraph.region_kind != "plain text" or paragraph.layout_class <= 1:
             continue
         expanded = source
+        expanded_ranges = []
+        expanded_breaks = list(paragraph.break_offsets)
         for match in reversed(list(_FORMULA_MARKER_RE.finditer(source))):
             index = int(match.group(1))
             chars = formulas[index]
@@ -1112,12 +1163,22 @@ def _recover_author_information_affiliations(
                 continue
             if any(_is_non_horizontal_text_matrix(ch.matrix) for ch in chars):
                 continue
+            delta = len(value) - (match.end() - match.start())
+            expanded_ranges = [
+                (a + delta, b + delta) if a >= match.end() else (a, b)
+                for a, b in expanded_ranges
+            ]
+            expanded_ranges.append((match.start(), match.start() + len(value)))
+            expanded_breaks = [
+                offset + delta if offset >= match.end() else offset
+                for offset in expanded_breaks
+            ]
             expanded = expanded[: match.start()] + value + expanded[match.end() :]
         if (
             _FORMULA_MARKER_RE.search(expanded)
             or len(
                 re.findall(
-                    r"\b(?:Department|University|Institute|Laboratory|Hospital|Center|Therapeutics)\b",
+                    r"\b(?:Department|University|Institute|Laboratory|Hospital|Center|Therapeutics|GmbH|Ltd|Inc)\b",
                     expanded,
                 )
             )
@@ -1136,7 +1197,36 @@ def _recover_author_information_affiliations(
             )
         ):
             continue
-        names = list(name_pattern.finditer(expanded))
+        names = []
+        for match in name_pattern.finditer(expanded):
+            start = match.start()
+            # Country/address words expanded from an italic source run are not
+            # part of the following Roman author name ("Germany Florian ...").
+            for a, b in expanded_ranges:
+                if a <= start < b <= match.end("name"):
+                    start = b
+                    break
+            # Present-address tails can be Roman too. Only an actual source
+            # line break after a country label establishes the new name.
+            for boundary in expanded_breaks:
+                if start < boundary < match.end("name") and re.fullmatch(
+                    r"\s*(?:UK|U\.K\.|United States|United Kingdom|Germany|China)\s*",
+                    expanded[start:boundary],
+                ):
+                    start = boundary
+            country = re.match(r"(?:UK|U\.K\.)\s+", expanded[start:])
+            if country and re.search(
+                r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2},\s*$",
+                expanded[max(0, start - 30) : start],
+            ):
+                start += country.end()
+            while start < match.end("name") and (
+                expanded[start].isspace() or expanded[start] in ",.;"
+            ):
+                start += 1
+            precise = name_pattern.match(expanded, start)
+            if precise and precise.end() == match.end():
+                names.append(precise)
         if not names:
             if (
                 re.search(r"\b\d{5,6}\b", expanded)
@@ -1156,12 +1246,17 @@ def _recover_author_information_affiliations(
                     SegmentPart(ROLE_AFFILIATION, expanded[cursor : match.start()])
                 )
             parts.append(
-                SegmentPart(ROLE_PRESERVE, expanded[match.start() : match.end()])
+                SegmentPart(
+                    ROLE_PRESERVE,
+                    expanded[match.start() : match.end()],
+                    break_before=bool(parts),
+                )
             )
             cursor = match.end()
         if expanded[cursor:]:
             parts.append(SegmentPart(ROLE_AFFILIATION, expanded[cursor:]))
         segments[paragraph_id] = expanded
+        paragraph.break_offsets = expanded_breaks
         paragraph.affiliation_parts = tuple(parts)
 
 
@@ -1805,6 +1900,29 @@ def _restore_caption_footnote_anchors(
                 break
         if has_note and not target.rstrip().endswith(token):
             targets[paragraph_id] = target.replace(token, "", 1).rstrip() + token
+
+
+def _paragraph_first_line_origin(index, sources, paragraphs):
+    """Do not shrink a source indent occupied by a separately preserved formula."""
+    paragraph = paragraphs[index]
+    em = paragraph.size
+    if paragraph.layout_class <= 0 or paragraph.x <= paragraph.x0 or em <= 0:
+        return paragraph.x0
+    for prefix_index, prefix in enumerate(paragraphs):
+        if prefix_index == index or not re.fullmatch(
+            r"(?:\s*\{v\d+\})+\s*", sources[prefix_index]
+        ):
+            continue
+        if (
+            prefix.page_id == paragraph.page_id
+            and prefix.layout_class == paragraph.layout_class
+            and abs(prefix.y - paragraph.y) <= 0.15 * em
+            and prefix.y1 - prefix.y0 <= 1.5 * em
+            and paragraph.x0 - 0.1 * em <= prefix.x0 < prefix.x1
+            and -0.1 * em <= paragraph.x - prefix.x1 <= em
+        ):
+            return paragraph.x
+    return paragraph.x0
 
 
 def _split_parenthetical_variable_definitions(
@@ -5791,7 +5909,17 @@ class PDFConverterEx(PDFConverter):
         changed = getattr(self, "_reflowed_uri_prose", None)
         if changed is None:
             changed = self._reflowed_uri_prose = []
+        authors = getattr(self, "_reflowed_author_addresses", None)
+        if authors is None:
+            authors = self._reflowed_author_addresses = []
         for source, target, paragraph in zip(sources, targets, paragraphs):
+            if source != target and getattr(paragraph, "affiliation_parts", ()):
+                authors.append(
+                    (
+                        int(page_id),
+                        (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
+                    )
+                )
             if (
                 source != target
                 and paragraph.brk
@@ -5804,6 +5932,19 @@ class PDFConverterEx(PDFConverter):
                         (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
                     )
                 )
+
+    def mark_orcid_badge_path(self, bounds):
+        page_id = int(self.cur_item.pageid)
+        x0, y0, x1, y1 = bounds
+        for a, b, c, d in getattr(self, "source_orcid_badges", {}).get(page_id, ()):
+            if a - 0.05 <= x0 <= x1 <= c + 0.05 and b - 0.05 <= y0 <= y1 <= d + 0.05:
+                records = getattr(self, "_orcid_badge_records", None)
+                if records is None:
+                    records = self._orcid_badge_records = []
+                marker = f"%PDF2ZH_ORCID_BADGE_{len(records)}%"
+                records.append((page_id, (a, b, c, d)))
+                return marker
+        return ""
 
     def resolve_uri_underline_markers(self, operations: str) -> str:
         """Remove stale decorations only after their ordinary prose changed."""
@@ -5821,7 +5962,25 @@ class PDFConverterEx(PDFConverter):
                     return "n"
             return "S"
 
-        return re.sub(r"%PDF2ZH_URI_UNDERLINE_(\d+)%\s*S\b", resolve, operations)
+        operations = re.sub(r"%PDF2ZH_URI_UNDERLINE_(\d+)%\s*S\b", resolve, operations)
+        badges = getattr(self, "_orcid_badge_records", ())
+
+        def resolve_badge(match):
+            page_id, (x0, y0, x1, y1) = badges[int(match[1])]
+            for changed_page, (a, b, c, d) in getattr(
+                self, "_reflowed_author_addresses", ()
+            ):
+                if (
+                    changed_page == page_id
+                    and a - 0.1 <= x0 <= x1 <= c + 0.1
+                    and b - 1 <= y0 <= y1 <= d + 1
+                ):
+                    return "n"
+            return match[2]
+
+        return re.sub(
+            r"%PDF2ZH_ORCID_BADGE_(\d+)%\s*(f\*?|F)(?=\s|$)", resolve_badge, operations
+        )
 
     def begin_page(self, page, ctm) -> None:
         # 重载替换 cropbox
@@ -8303,12 +8462,18 @@ class TranslateConverter(PDFConverterEx):
                     render_scale,
                 )
 
+            first_line_origin = _paragraph_first_line_origin(id, source_sstk, pstk)
+
+            def render_x(vals):
+                origin = first_line_origin if vals["lidx"] == 0 else x0
+                return origin + (vals["x"] - origin) * render_scale
+
             for vals in ops_vals:
                 if vals["type"] == OpType.TEXT:
                     ops_list.append(_with_source_fill_color(_gen_target_text_op(
                         vals["font"],
                         vals["size"] * render_scale,
-                        x0 + (vals["x"] - x0) * render_scale,
+                        render_x(vals),
                         vals["dy"] * render_scale
                         + y
                         - vals["lidx"] * size * render_scale * line_height,
@@ -8323,14 +8488,14 @@ class TranslateConverter(PDFConverterEx):
                 elif vals["type"] == OpType.SCANNED_FRAGMENT:
                     ops_list.append(scan_background.fragment_ops(
                         vals["bounds"],
-                        x0 + (vals["x"] - x0) * render_scale,
+                        render_x(vals),
                         vals["dy"] * render_scale + y
                         - vals["lidx"] * size * render_scale * line_height,
                         render_scale,
                     ))
                 elif vals["type"] == OpType.LINE:
                     ops_list.append(gen_op_line(
-                        x0 + (vals["x"] - x0) * render_scale,
+                        render_x(vals),
                         vals["dy"] * render_scale
                         + y
                         - vals["lidx"] * size * render_scale * line_height,
