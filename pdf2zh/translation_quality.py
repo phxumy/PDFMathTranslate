@@ -195,6 +195,54 @@ def is_math_expression_only(text: str) -> bool:
     return re.search(r"[^\d\s.,;:()\[\]{}=+−\-–—±/×·*^_<>≤≥≈≃≡|]", remaining) is None
 
 
+def is_assay_measurement_label(text: str) -> bool:
+    """Recognize complete assay/PK symbol labels without accepting prose.
+
+    Mixed-case registered assay names, cell-line identifiers and SI units are
+    not untranslated words. Require an assay or measurement anchor and a closed
+    vocabulary; labels containing e.g. 'mutant', 'inhibition' or 'solubility'
+    remain translatable.
+    """
+    visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
+    words = re.findall(r"[A-Za-zμµ][A-Za-z0-9μµ]*(?:[-_][A-Za-z0-9]+)*", visible)
+    anchors = {"ADP-Glo", "CellTiter-Glo", "IC", "IC50", "EC", "EC50", "CL"}
+    if not anchors.intersection(words):
+        return False
+    allowed = anchors | {
+        "WRN",
+        "BLM",
+        "CTG",
+        "MSI",
+        "MSS",
+        "MSI-H",
+        "ADME",
+        "PK",
+        "mL",
+        "L",
+        "min",
+        "kg",
+        "s",
+        "h",
+        "M",
+        "mM",
+        "μM",
+        "µM",
+        "nM",
+        "pM",
+    }
+    if any(
+        word not in allowed
+        and re.fullmatch(
+            r"(?:[A-Z]{2,6}\d{1,5}[A-Z]?|p\d{1,3}|[A-Z]\d{1,4}[A-Z])", word
+        )
+        is None
+        for word in words
+    ):
+        return False
+    remaining = re.sub(r"[A-Za-zμµ][A-Za-z0-9μµ]*(?:[-_][A-Za-z0-9]+)*", "", visible)
+    return re.search(r"[^\d\s.,;:()\[\]{}=+−\-–—±/×·*^_<>≤≥%]", remaining) is None
+
+
 def has_detached_norm_relation(source: str, target: str) -> bool:
     """Reject an isolated norm fragment after a translated sentence boundary.
 

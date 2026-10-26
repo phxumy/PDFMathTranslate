@@ -54,6 +54,7 @@ from pdf2zh.translation_quality import (
     has_changed_author_scope,
     is_spectroscopy_peak_list,
     is_math_expression_only,
+    is_assay_measurement_label,
     has_detached_norm_relation,
     has_suspicious_english_residue,
     has_suspicious_reference_title_residue,
@@ -1965,6 +1966,7 @@ class ScientificTranslator(BaseTranslator):
             or is_spectroscopy_peak_list(text)
             or is_quantum_gate_label(text)
             or is_math_expression_only(text)
+            or is_assay_measurement_label(text)
         )
 
     def _load_json_output(self, output_path: str) -> dict:
@@ -4031,7 +4033,11 @@ class ScientificTranslator(BaseTranslator):
             normalized = normalized_cross_references
         if not self._validate_formula_translation(source, normalized):
             return None
-        if is_spectroscopy_peak_list(source) or is_math_expression_only(source):
+        if (
+            is_spectroscopy_peak_list(source)
+            or is_math_expression_only(source)
+            or is_assay_measurement_label(source)
+        ):
             # A long chemistry paragraph may yield a data-only chunk after
             # sentence splitting. Accept it only when every nonspace character
             # is unchanged; numerical data must never be translated or edited.
