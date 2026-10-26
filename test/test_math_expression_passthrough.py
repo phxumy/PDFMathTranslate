@@ -5,7 +5,16 @@ from pdf2zh.translation_quality import is_math_expression_only
 
 
 @pytest.mark.parametrize(
-    "source", ["cos {v26}", "(sin {v1} + cos {v2})/2", "exp(-{v0})", "log {v4}."]
+    "source",
+    [
+        "cos {v26}",
+        "(sin {v1} + cos {v2})/2",
+        "exp(-{v0})",
+        "log {v4}.",
+        "k_inact (1/s)",
+        "k_inact/{v16}",
+        "k_inact/K_i (1/M·s)",
+    ],
 )
 def test_pure_math_operators_are_not_mistaken_for_untranslated_prose(source):
     translator = translator_stub()
@@ -28,6 +37,10 @@ def test_pure_math_operators_are_not_mistaken_for_untranslated_prose(source):
         "cos",
         "min {v0} and max {v1}",
         "余弦 cos {v0}",
+        "k_inact increases with temperature",
+        "k_inact—an inactivation rate constant",
+        "k_inact (inactivation constant)",
+        "value_increases",
     ],
 )
 def test_mathematical_word_does_not_exempt_ordinary_prose(source):

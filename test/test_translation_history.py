@@ -7,11 +7,34 @@ import pymupdf
 from pdf2zh.translation_history import (
     HistoryStore,
     TaskRecorder,
+    article_metadata,
     current_task,
     safe_error,
 )
 from pdf2zh.translation_progress import TranslationProgress
 from pdf2zh.app_update import UpdateManager, UpdateError
+
+
+def test_lowercase_nature_in_body_does_not_override_journal_header(tmp_path):
+    path = tmp_path / "Article.pdf"
+    with pymupdf.open() as doc:
+        first = doc.new_page()
+        first.insert_text(
+            (50, 300), "nature of developing potent and selective ligands"
+        )
+        second = doc.new_page()
+        second.insert_text((50, 30), "Journal of Medicinal Chemistry")
+        doc.save(path)
+    assert article_metadata(path)["journal"] == "Journal of Medicinal Chemistry"
+
+
+@pytest.mark.parametrize("journal", ["Nature", "Nature Medicine", "NATURE PHYSICS"])
+def test_nature_journal_headers_are_still_recognized(tmp_path, journal):
+    path = tmp_path / "Article.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page().insert_text((50, 30), journal)
+        doc.save(path)
+    assert article_metadata(path)["journal"] == journal
 
 
 def test_history_survives_restart_and_missing_outputs_remain_in_record(tmp_path):

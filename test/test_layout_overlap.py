@@ -39,6 +39,85 @@ class _FakeLayout:
 
 
 class LayoutOverlapTests(unittest.TestCase):
+    def test_clipped_caption_edges_include_whole_words_and_superscript(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            caption = "Table 4. SAR Exploration of the Methylene Linker Substituent"
+            page.insert_text((50, 70), caption, fontsize=10)
+            right = page.search_for("Substituent")[0].x1
+            page.insert_text((right, 66), "a", fontsize=6)
+            page.insert_text((50, 98), "WRN ADP-Glo IC50", fontsize=10)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout(
+                    [
+                        _FakeBox(0, (63, 59, int(right) - 3, 72)),
+                        _FakeBox(1, (45, 74, 550, 500)),
+                    ],
+                    {0: "figure_caption", 1: "table"},
+                ),
+                800,
+                600,
+                page,
+            )
+            self.assertEqual(kinds[2], "table_caption")
+            for word in page.get_text("words"):
+                if word[1] < 74:
+                    for x in (word[0] + 1, word[2] - 1):
+                        y = 800 - (word[1] + word[3]) / 2
+                        self.assertEqual(layout[int(y), int(x)], 2, word[4])
+            self.assertEqual(layout[705, 80], 0)
+
+    def test_caption_expansion_does_not_absorb_adjacent_body_or_column(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text((50, 70), "Figure 2. Inhibitor structures.", fontsize=10)
+            page.insert_text((340, 70), "An unrelated body paragraph.", fontsize=10)
+            page.insert_text((50, 90), "The subsequent body paragraph.", fontsize=10)
+            layout, kinds = _build_layout_mask(
+                _FakeLayout([_FakeBox(0, (70, 59, 165, 73))], {0: "figure_caption"}),
+                800,
+                600,
+                page,
+            )
+            self.assertEqual(layout[735, 52], 2)
+            self.assertEqual(layout[735, 345], 1)
+            self.assertEqual(layout[715, 55], 1)
+
+    def test_caption_expansion_requires_source_numbered_caption(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text(
+                (50, 70), "Table values appear in the main text.", fontsize=10
+            )
+            layout, _ = _build_layout_mask(
+                _FakeLayout([_FakeBox(0, (70, 59, 165, 73))], {0: "figure_caption"}),
+                800,
+                600,
+                page,
+            )
+            self.assertEqual(layout[735, 52], 1)
+
+    def test_multiline_scheme_caption_recovers_each_clipped_line(self):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text(
+                (50, 70),
+                "Scheme 1. Enantioselective synthesis of the\n"
+                "covalent inhibitor and its substituted analogues.",
+                fontsize=10,
+            )
+            layout, kinds = _build_layout_mask(
+                _FakeLayout([_FakeBox(0, (70, 59, 225, 89))], {0: "figure_caption"}),
+                800,
+                600,
+                page,
+            )
+            for word in page.get_text("words"):
+                for x in (word[0] + 1, word[2] - 1):
+                    y = 800 - (word[1] + word[3]) / 2
+                    self.assertEqual(layout[int(y), int(x)], 2, word[4])
+            self.assertEqual(kinds[2], "figure_caption")
+
     def test_marked_statistical_table_note_survives_combined_figure_container(self):
         with Document() as document:
             page = document.new_page(width=600, height=800)

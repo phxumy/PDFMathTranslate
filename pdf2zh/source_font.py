@@ -1,4 +1,4 @@
-"""Recover source Type1C encodings omitted from the PDF font dictionary."""
+"""Recover source font text from authoritative embedded encoding evidence."""
 
 from io import BytesIO
 
@@ -6,6 +6,36 @@ from fontTools.cffLib import CFFFontSet
 from pdfminer.encodingdb import name2unicode
 from pdfminer.pdftypes import dict_value, stream_value
 from pdfminer.psparser import literal_name
+
+
+def repair_stix_replacement_mapping(font, spec) -> None:
+    """Expose one known STIX horizontal glyph hidden by a broken ToUnicode.
+
+    Some publisher PDFs map ``uniE0D5`` in STIXNonUnicode-Regular to U+FFFD,
+    even though their explicit Encoding still identifies the source glyph.
+    STIX calls it a single long chemical bond (Unicode L2/09-208, p. 20).
+    Use an em dash as its readable text surrogate, including when the publisher
+    uses this glyph for prose punctuation. This is not a canonical Unicode
+    equivalence. Protected chemical drawings still render the original CID,
+    width and font program; no PDF font resource is rewritten.
+
+    Only the replacement-character mapping is repaired. Valid Unicode values,
+    other fonts, and every other private-use glyph remain authoritative.
+    """
+    if literal_name(spec.get("Subtype")) != "Type1":
+        return
+    name = literal_name(spec.get("BaseFont"))
+    if name.split("+")[-1] != "STIXNonUnicode-Regular":
+        return
+    if "Encoding" not in spec or "ToUnicode" not in spec:
+        return
+    mapping = getattr(getattr(font, "unicode_map", None), "cid2unichr", None)
+    encoding = getattr(font, "cid2unicode", {})
+    if not isinstance(mapping, dict):
+        return
+    for cid, text in mapping.items():
+        if text == "\ufffd" and encoding.get(cid) == "\ue0d5":
+            mapping[cid] = "\u2014"
 
 
 def repair_embedded_cff_encoding(font, spec) -> None:

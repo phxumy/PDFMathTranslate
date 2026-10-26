@@ -1,3 +1,18 @@
+## v1.9.11-codex.6.2 — 修复图表标题切分、科学标签误判与译文细节
+
+修复部分药物化学论文翻译到表格页时出现“译文完整性校验失败”的问题：版面识别框截断了表题首尾单词，留下极短的独立残片，导致重试仍无法得到有效译文。
+
+- 根据 PDF 原始文字行恢复有编号的图题、表题与合成路线标题边界，完整翻译标题并保留脚注；不再把 `Table` 或末尾单词切开单独翻译。
+- 对有原文脚注证据的标题，将末尾上标保持在完整译文之后；保留化学结构、公式和原始数据的绘制方式。
+- 恢复特定 STIX 字体被错误映射为替换字符的横线，避免正文及缩写释义中出现乱码。
+- 修复 `k_inact` 及带单位、公式占位符的动力学标签被误判为英文漏译；普通正文继续执行完整性检查。
+- 保持 `n.d.—not determined` 等缩写与释义一起翻译，校正无配体蛋白、直接生物测试等语境明确的术语。旧缓存中的相应误译会重新校验。
+- 支持通栏表格脚注下方的双栏正文衔接，避免跨栏名词短语被割裂。修复正文中的小写 `nature` 被误识别为期刊名的问题。
+
+可通过“关于与更新”或下载 EXE 覆盖安装。账号、设置、历史和已有译文沿用；私人论文、译文与缓存不进入发行包。
+
+This release repairs clipped figure/table/scheme captions, source-confirmed caption footnotes, a broken STIX text mapping, kinetic-symbol validation, scientific abbreviation definitions, biomedical terminology and reading order below spanning tables. Translation completeness checks remain enabled.
+
 ## v1.9.11-codex.6.1 — 修复打开翻译日志时的兼容性报错
 
 修复 `.6` 点击“翻译日志与本地文件管理”后出现 ``Parameter `interrupted` is not a valid keyword argument`` 的问题。

@@ -183,9 +183,63 @@ def _layout_detections(
     ]
     if source_page is None:
         return detections
+    detections = _recover_caption_line_bounds(detections, source_page, height, width)
     detections = _recover_abandoned_prose(detections, source_page, height, width)
     detections = _recover_table_note_lines(detections, source_page, height, width)
     return _recover_publisher_cover_lines(detections, source_page, height, width)
+
+
+def _recover_caption_line_bounds(detections, page, height, width):
+    """Extend clipped caption detections to complete, source-confirmed lines.
+
+    A detector rectangle can end inside a word. Classifying its edge glyphs as
+    unrelated text then sends fragments such as ``Ta`` / ``ble 4 ... t`` to the
+    translator. Require an explicit numbered caption in the source block and
+    substantial overlap with the detected caption; never expand to nearby body
+    text, another column, or labels inside the figure/table.
+    """
+    sx, sy = width / page.rect.width, height / page.rect.height
+    blocks = []
+    for block in page.get_text("dict")["blocks"]:
+        lines = block.get("lines", [])
+        if not lines:
+            continue
+        first = "".join(s.get("text", "") for s in lines[0]["spans"]).strip()
+        label = re.match(r"^(Table|Figure|Fig\.|Scheme)\s+[A-Z]?\d+[.:]?\s", first)
+        if label:
+            blocks.append((label[1], lines))
+    recovered = []
+    for detection in detections:
+        if detection.class_name not in {"figure_caption", "table_caption"}:
+            recovered.append(detection)
+            continue
+        x0, y0, x1, y1 = detection.bounds
+        bounds = detection.bounds
+        kind = detection.class_name
+        for label, lines in blocks:
+            for line in lines:
+                if line.get("dir", (1, 0)) != (1, 0):
+                    continue
+                left, top, right, bottom = line["bbox"]
+                left, right = left * sx, right * sx
+                low, high = height - bottom * sy, height - top * sy
+                if not (
+                    min(x1, right) - max(x0, left) >= 0.5 * (right - left)
+                    and min(y1, high) - max(y0, low) >= 0.5 * min(y1 - y0, high - low)
+                    and max(x0 - left, right - x1) <= width * 0.25
+                ):
+                    continue
+                bounds = (
+                    max(0, min(bounds[0], int(left) - 1)),
+                    max(0, min(bounds[1], int(low) - 1)),
+                    min(width - 1, max(bounds[2], int(right) + 1)),
+                    min(height - 1, max(bounds[3], int(high) + 1)),
+                )
+                kind = "table_caption" if label == "Table" else "figure_caption"
+        recovered.append(
+            _LayoutDetection(detection.value, kind, bounds, detection.confidence)
+        )
+    return recovered
 
 
 def _recover_publisher_cover_lines(detections, page, height, width):

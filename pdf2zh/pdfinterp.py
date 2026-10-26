@@ -41,7 +41,10 @@ from pdfminer.utils import (
 )
 
 from pdf2zh.codex_errors import CodexExecutionError, CodexOutputError, CodexTimeoutError
-from pdf2zh.source_font import repair_embedded_cff_encoding
+from pdf2zh.source_font import (
+    repair_embedded_cff_encoding,
+    repair_stix_replacement_mapping,
+)
 from pdf2zh.translator import TranslationAbortedError
 
 log = logging.getLogger(__name__)
@@ -132,6 +135,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                     spec = dict_value(spec)
                     self.fontmap[fontid] = self.rsrcmgr.get_font(objid, spec)
                     repair_embedded_cff_encoding(self.fontmap[fontid], spec)
+                    repair_stix_replacement_mapping(self.fontmap[fontid], spec)
                     self.fontmap[fontid].descent = 0  # hack fix descent
                     self.fontid[self.fontmap[fontid]] = fontid
             elif k == "ColorSpace":

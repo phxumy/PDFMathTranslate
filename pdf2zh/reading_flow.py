@@ -430,7 +430,7 @@ def _repeated_term_after_dangling_modifier(left: str, right: str) -> bool:
 def _body_follows_column_figure(
     right: FlowSegment, segments: Sequence[FlowSegment]
 ) -> bool:
-    """Prove that a low column start is directly below a figure caption."""
+    """Prove a low column start follows a figure caption or a full-width table note."""
     above = [
         item
         for item in segments
@@ -445,7 +445,15 @@ def _body_follows_column_figure(
         return False
     caption = min(above, key=lambda item: item.y0)
     em = max(right.size, caption.size, 0.01)
-    if caption.region_kind != "figure_caption":
+    if caption.region_kind not in {"figure_caption", "table_footnote"}:
+        return False
+    if caption.region_kind == "table_footnote" and not any(
+        item.region_kind == "table_caption"
+        and item.ref.page_id == caption.ref.page_id
+        and item.y0 > caption.y1
+        and abs(item.x0 - caption.x0) <= 2 * em
+        for item in segments
+    ):
         return False
     spanning_figure = bool(
         caption.width >= right.page_width * 0.58

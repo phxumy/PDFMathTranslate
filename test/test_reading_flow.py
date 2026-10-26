@@ -39,6 +39,45 @@ def segment(
 
 
 class ReadingFlowDetectionTests(unittest.TestCase):
+    def test_columns_resume_below_spanning_table_note(self):
+        left = segment(
+            8,
+            0,
+            "We optimized the fluorination pattern of the phenyl",
+            column=0,
+            y0=49,
+            y1=179,
+        )
+        right = segment(
+            8, 1, "ring, leading to a potent compound.", column=1, y0=140, y1=179
+        )
+        caption = segment(
+            8,
+            3,
+            "Table 4. Linker optimization",
+            column=0,
+            y0=733,
+            y1=744,
+            kind="table_caption",
+        )
+        note = replace(
+            segment(
+                8,
+                4,
+                "Molecular weight and solubility definitions.",
+                column=0,
+                y0=194,
+                y1=214,
+                kind="table_footnote",
+            ),
+            x1=560,
+        )
+        edges = detect_page_edges([left, right, caption, note])
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].left, left.ref)
+        self.assertEqual(edges[0].right, right.ref)
+        self.assertFalse(detect_page_edges([left, right, note]))
+
     def test_standalone_reference_continues_into_conference_publisher_year(self):
         left = segment(
             4,

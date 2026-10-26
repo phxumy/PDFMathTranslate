@@ -9,6 +9,17 @@ class ScientificSourceSegmentationTests(unittest.TestCase):
     def setUp(self):
         self.translator = CodexTranslator.__new__(CodexTranslator)
 
+    def test_table_abbreviation_stays_with_its_definition(self):
+        for abbreviation, definition in (
+            ("n.d.", "not determined"),
+            ("n.a.", "not applicable"),
+        ):
+            source = f"MW—molecular weight; {abbreviation} —{definition}."
+            self.assertEqual(
+                self.translator._split_formula_context_text(source),
+                ["MW—molecular weight; ", f"{abbreviation} —{definition}."],
+            )
+
     def test_abbreviations_and_formula_placeholders_remain_in_their_sentence(self):
         for label in ("Fig.", "Figs.", "Eq.", "Eqs.", "Sec.", "Refs."):
             for number in (

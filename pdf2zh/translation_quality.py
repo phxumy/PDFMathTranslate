@@ -49,6 +49,26 @@ def has_changed_author_scope(source: str, target: str) -> bool:
     )
 
 
+def has_suspicious_biomedical_translation(source: str, target: str) -> bool:
+    """Reject two context-supported terminology errors, not synonym choices."""
+    if (
+        re.search(r"\b(?:WRN|helicase)\b", source, re.I)
+        and re.search(r"\bapo(?:protein|\s+protein)\b", source, re.I)
+        and not re.search(r"\b(?:cofactor|prosthetic|heme|haem)\b", source, re.I)
+        and re.search(r"(?:脱|脫|去)辅基|(?:脱|脫|去)輔基", target)
+    ):
+        return True
+    if re.search(
+        r"\bn\.\s*d\.\s*[-–—:=]\s*not\s+(?:determined|detected)\b", source, re.I
+    ):
+        if re.search(r"日期(?:不详|不詳|未知|不明)|无日期|無日期", target):
+            return True
+    return bool(
+        re.search(r"\bdirect[-‐‑ ]to[-‐‑ ]biology\b", source, re.I)
+        and re.search(r"直接生物[学學]", target)
+    )
+
+
 def is_spectroscopy_peak_list(text: str) -> bool:
     """Recognize numerical NMR peak data without admitting chemical prose.
 
@@ -124,6 +144,17 @@ def is_spectroscopy_peak_list(text: str) -> bool:
 
 def is_math_expression_only(text: str) -> bool:
     """Recognize a closed mathematical operator expression around PDF formulas."""
+    # A table may spell a subscript with an actual underscore in an ordinary
+    # font (k_inact), then switch fonts for Ki and the units. This complete
+    # symbol-only grammar also handles labels without any formula placeholder;
+    # prose following the symbol must still be translated.
+    symbol = r"[A-Za-zα-ωΑ-Ω]_(?:[A-Za-z]{1,12}|\d{1,3}|\{[A-Za-z0-9]{1,12}\})"
+    atom = rf"(?:{symbol}|\{{\{{v\d+\}}\}}|\{{v\d+\}})"
+    units = r"(?:\s*\(\s*(?:1/)?(?:[munpμ]?M[·*]?)?s(?:\^?-1)?\s*\))?"
+    if re.search(symbol, text) and re.fullmatch(
+        rf"\s*{atom}(?:\s*[/·*]\s*{atom})*{units}\s*", text
+    ):
+        return True
     if _FORMULA_PLACEHOLDER_RE.search(text) is None:
         return False
     visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)

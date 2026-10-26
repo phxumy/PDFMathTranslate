@@ -29,6 +29,11 @@ _CONTINUING_STATISTICAL_ABBREVIATION = re.compile(
     r"\b(?:w\.\s*h\.\s*p\.|i\.\s*i\.\s*d\.)"
     rf"(?=\s*,?\s+(?:{_FORMULA}|[a-z]|[A-Z]{{2,}}\s*{_FORMULA}))",
 )
+_DEFINED_TABLE_ABBREVIATION = re.compile(
+    r"\b(?:n\.d\.|n\.a\.)(?=\s*[-–—:=]\s*"
+    r"(?:not\s+(?:determined|detected|available|applicable)|no\s+data)\b)",
+    re.IGNORECASE,
+)
 
 
 def scientific_reference_spans(text: str) -> tuple[tuple[int, int], ...]:
@@ -49,9 +54,11 @@ def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
     or explanation. Internal spacing in PDF extraction must not create a false
     sentence boundary either (``w. r. t.``).
     """
-    return tuple(
-        match.span() for match in _CONTINUING_ABBREVIATION.finditer(text)
-    ) + statistical_abbreviation_spans(text)
+    return (
+        tuple(match.span() for match in _CONTINUING_ABBREVIATION.finditer(text))
+        + statistical_abbreviation_spans(text)
+        + tuple(match.span() for match in _DEFINED_TABLE_ABBREVIATION.finditer(text))
+    )
 
 
 def scientific_sentence_parts(text: str) -> list[str]:

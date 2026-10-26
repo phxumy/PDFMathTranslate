@@ -1732,6 +1732,81 @@ def _release_caption_title_words(
         text_chars[paragraph_id].extend(chars)
 
 
+def _restore_caption_footnote_anchors(
+    sources, targets, paragraphs, formulas, formula_paragraphs, text_chars
+):
+    """Keep a source-confirmed title footnote after the complete translation.
+
+    Require a raised, smaller source glyph and a matching footnote below the
+    caption at its left margin. This avoids treating a variable exponent or a
+    compound suffix as a caption note. Only move the opaque token, never its
+    original PDF glyph or other formula tokens.
+    """
+    for paragraph_id, (source, target, paragraph) in enumerate(
+        zip(sources, targets, paragraphs)
+    ):
+        if paragraph.region_kind not in {"table_caption", "figure_caption"}:
+            continue
+        if not re.match(r"^(?:Table|Figure|Fig\.|Scheme)\s+\d+", source.strip()):
+            continue
+        match = re.search(r"(\{v(\d+)\})\s*$", source)
+        if match is None or target.count(match[1]) != 1:
+            continue
+        token, formula_id = match[1], int(match[2])
+        if (
+            formula_id >= len(formulas)
+            or formula_paragraphs[formula_id] != paragraph_id
+        ):
+            continue
+        chars = formulas[formula_id]
+        if len(chars) != 1 or re.fullmatch(r"[a-z*†‡]", chars[0].get_text()) is None:
+            continue
+        mark = chars[0]
+        if not (
+            _is_non_math_text_font(mark.fontname)
+            and not _is_non_horizontal_text_matrix(mark.matrix)
+            and mark.size <= paragraph.size * 0.8
+        ):
+            continue
+        preceding = [
+            char
+            for char in text_chars[paragraph_id]
+            if -0.08 * paragraph.size <= mark.x0 - char.x1 <= paragraph.size * 0.5
+            and 0.15 * paragraph.size
+            <= _char_baseline(mark) - _char_baseline(char)
+            <= paragraph.size
+            and char.size >= paragraph.size * 0.85
+        ]
+        if not preceding:
+            continue
+        # A one-letter mathematical base must remain attached to its exponent.
+        prefix = source[: match.start()].rstrip()
+        if re.search(r"(?:^|\s)[A-Za-z]$", prefix):
+            continue
+        has_note = False
+        for note_id, note_chars in enumerate(formulas):
+            if note_id == formula_id or len(note_chars) != 1:
+                continue
+            note = note_chars[0]
+            note_paragraph_id = formula_paragraphs[note_id]
+            if note_paragraph_id == paragraph_id or note.get_text() != mark.get_text():
+                continue
+            note_paragraph = paragraphs[note_paragraph_id]
+            if (
+                note_paragraph.page_id == paragraph.page_id
+                and note_paragraph.region_kind
+                in {"table_footnote", "table_cell", "figure_caption", "table_caption"}
+                and sources[note_paragraph_id].lstrip().startswith(f"{{v{note_id}}}")
+                and abs(note.x0 - paragraph.x0) <= paragraph.size
+                and note.y0 < paragraph.y0
+                and note.size <= paragraph.size * 0.8
+            ):
+                has_note = True
+                break
+        if has_note and not target.rstrip().endswith(token):
+            targets[paragraph_id] = target.replace(token, "", 1).rstrip() + token
+
+
 def _split_parenthetical_variable_definitions(
     segments, formulas, lines, offsets, formula_paragraphs, paragraphs, text_chars
 ):
@@ -7772,6 +7847,9 @@ class TranslateConverter(PDFConverterEx):
             news = self._restore_fragment_overrides(news, replacement_map)
         if len(source_sstk) != len(news):
             raise ValueError("continuation translation changed segment count")
+        _restore_caption_footnote_anchors(
+            source_sstk, news, pstk, var, varp, paragraph_text_chars
+        )
         self._record_reflowed_uri_prose(ltpage.pageid, source_sstk, news, pstk)
 
         ############################################################

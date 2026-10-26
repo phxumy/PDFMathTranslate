@@ -4,6 +4,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from pdfminer.psparser import LIT
+from pdfminer.pdffont import PDFType1Font
+from pdfminer.pdfinterp import PDFResourceManager
+from pdfminer.pdftypes import PDFStream
 
 from pdf2zh.converter import (
     _abandoned_reference_entries,
@@ -21,8 +24,71 @@ from pdf2zh.converter import (
     _should_extend_formula_run,
     _should_absorb_trailing_formula_base,
 )
-from pdf2zh.source_font import repair_embedded_cff_encoding
+from pdf2zh.source_font import (
+    repair_embedded_cff_encoding,
+    repair_stix_replacement_mapping,
+)
 from test_italic_translation import FakeItalicChar, fake_run, paragraph
+
+
+def _stix_font_spec(name="ABCDEF+STIXNonUnicode-Regular"):
+    return {
+        "Subtype": LIT("Type1"),
+        "BaseFont": LIT(name),
+        "FirstChar": 1,
+        "Widths": [1000, 1000, 1000, 1000],
+        "Encoding": {
+            "BaseEncoding": LIT("WinAnsiEncoding"),
+            "Differences": [
+                1,
+                LIT("uniE0D5"),
+                LIT("uniE0D6"),
+                LIT("A"),
+                LIT("uniE0D5"),
+            ],
+        },
+        "ToUnicode": PDFStream(
+            {},
+            b"begincmap\n1 begincodespacerange\n<00><FF>\nendcodespacerange\n"
+            b"4 beginbfchar\n<01><FFFD>\n<02><FFFD>\n<03><0041>\n<04><002D>\n"
+            b"endbfchar\nendcmap\n",
+        ),
+    }
+
+
+def test_stix_broken_tounicode_recovers_known_dash_without_changing_source_glyph():
+    spec = _stix_font_spec()
+    font = PDFType1Font(PDFResourceManager(), spec)
+    assert font.to_unichr(1) == "\ufffd"
+    before = (font.char_width(1), font.char_disp(1), list(font.decode(b"\x01")))
+    repair_stix_replacement_mapping(font, spec)
+    assert font.to_unichr(1) == "—"
+    assert (font.char_width(1), font.char_disp(1), list(font.decode(b"\x01"))) == before
+    assert font.cid2unicode[1] == "\ue0d5"
+    assert font.to_unichr(2) == "\ufffd"  # a different chemical-bond glyph
+    assert font.to_unichr(3) == "A"
+    assert font.to_unichr(4) == "-"  # explicit valid mapping wins
+    repair_stix_replacement_mapping(font, spec)
+    assert font.to_unichr(1) == "—"
+
+
+@pytest.mark.parametrize(
+    "name", ["OtherFont", "STIXTwoMath-Regular", "STIXNonUnicode-Regular-Unknown"]
+)
+def test_stix_recovery_does_not_guess_pua_meaning_in_other_fonts(name):
+    spec = _stix_font_spec(name)
+    font = PDFType1Font(PDFResourceManager(), spec)
+    repair_stix_replacement_mapping(font, spec)
+    assert font.to_unichr(1) == "\ufffd"
+
+
+@pytest.mark.parametrize("field", ["Encoding", "ToUnicode"])
+def test_stix_recovery_requires_both_explicit_pdf_mappings(field):
+    spec = _stix_font_spec()
+    font = PDFType1Font(PDFResourceManager(), spec)
+    del spec[field]
+    repair_stix_replacement_mapping(font, spec)
+    assert font.to_unichr(1) == "\ufffd"
 
 
 def test_cff_builtin_ligatures_recover_without_overriding_explicit_pdf_encoding():

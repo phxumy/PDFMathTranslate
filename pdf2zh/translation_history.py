@@ -89,7 +89,7 @@ def article_metadata(path):
                 r"(Journal of Physics:)\s*\n\s*(Condensed Matter)", r"\1 \2", text
             )
             journal = re.search(
-                r"(?im)^\s*((?:Journal of|Physical Review|PHYSICAL REVIEW|Nature|NATURE)[^\n]{0,70})",
+                r"(?m)^\s*((?:(?i:Journal of|Physical Review)|Nature|NATURE)\b[^\n]{0,70})",
                 text,
             )
             if journal:

@@ -50,6 +50,7 @@ from pdf2zh.translation_quality import (
     has_reversed_not_only_condition,
     has_changed_numeric_citations,
     has_suspicious_physics_translation,
+    has_suspicious_biomedical_translation,
     has_changed_author_scope,
     is_spectroscopy_peak_list,
     is_math_expression_only,
@@ -1320,6 +1321,13 @@ class ScientificTranslator(BaseTranslator):
             "nomenclature while preserving locants, stereochemistry, and protected tokens; "
             "do not mistake a complete compound name for a mathematical formula. "
             "Keep purely numerical spectroscopy peak lists and their units unchanged. "
+            "In ligand-binding experiments, apo protein/apoprotein means protein "
+            "without the tested ligand (无配体蛋白), unless loss of a cofactor or "
+            "prosthetic group is explicitly discussed. Direct-to-biology (D2B) "
+            "means a synthesis-to-biological-testing workflow (直接生物测试), "
+            "not a field called 'direct biology'. "
+            "Keep glossary abbreviation labels such as 'n.d.' intact while translating "
+            "their definitions: 'n.d.—not determined' means 'n.d.—未测定', not 'no date'. "
             "Keep section labels complete: for Chinese output, 'Sec. I in Ref. [42]' "
             "means '文献[42]第I节', not a bare '第I' followed by another parenthesis. "
             "In quantum-state contexts, population means state occupation "
@@ -1951,6 +1959,7 @@ class ScientificTranslator(BaseTranslator):
     def _is_passthrough_text(text: str) -> bool:
         return (
             not text.strip()
+            or re.fullmatch(r"(?:n\.d\.|n\.a\.)", text.strip(), re.I) is not None
             or re.match(r"^\{v\d+\}$", text) is not None
             or is_protected_literal_only(text)
             or is_spectroscopy_peak_list(text)
@@ -4036,6 +4045,7 @@ class ScientificTranslator(BaseTranslator):
             or has_suspicious_english_residue(source, normalized)
             or has_detached_norm_relation(source, normalized)
             or has_suspicious_physics_translation(source, normalized)
+            or has_suspicious_biomedical_translation(source, normalized)
             or has_changed_author_scope(source, normalized)
             or has_changed_numeric_citations(source, normalized)
             or has_reversed_not_only_condition(source, normalized)
