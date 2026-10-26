@@ -183,10 +183,42 @@ def _layout_detections(
     ]
     if source_page is None:
         return detections
+    detections = _recover_publisher_contact_lines(
+        detections, source_page, height, width
+    )
     detections = _recover_caption_line_bounds(detections, source_page, height, width)
     detections = _recover_abandoned_prose(detections, source_page, height, width)
     detections = _recover_table_note_lines(detections, source_page, height, width)
     return _recover_publisher_cover_lines(detections, source_page, height, width)
+
+
+def _recover_publisher_contact_lines(detections, page, height, width):
+    """Keep a publisher's contact lead-in separate from the preceding author list."""
+    sx, sy = width / page.rect.width, height / page.rect.height
+    recovered = list(detections)
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            text = "".join(span.get("text", "") for span in line["spans"]).strip()
+            if line.get("dir", (1, 0)) != (1, 0) or not re.fullmatch(
+                r"Complete contact information is available at:\s*", text
+            ):
+                continue
+            left, top, right, bottom = line["bbox"]
+            bounds = (
+                max(0, int(left * sx) - 1),
+                max(0, int(height - bottom * sy) - 1),
+                min(width - 1, int(right * sx) + 1),
+                min(height - 1, int(height - top * sy) + 1),
+            )
+            recovered.append(
+                _LayoutDetection(
+                    max((x.value for x in recovered), default=1) + 1,
+                    "publisher_text",
+                    bounds,
+                    1.0,
+                )
+            )
+    return recovered
 
 
 def _recover_caption_line_bounds(detections, page, height, width):

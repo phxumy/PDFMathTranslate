@@ -39,6 +39,24 @@ class _FakeLayout:
 
 
 class LayoutOverlapTests(unittest.TestCase):
+    def test_plain_text_detection_cannot_leave_first_letter_of_contact_line_behind(
+        self,
+    ):
+        with Document() as document:
+            page = document.new_page(width=600, height=800)
+            page.insert_text(
+                (50, 70), "Complete contact information is available at:", fontsize=10
+            )
+            page.insert_text((340, 70), "An independent column", fontsize=10)
+            layout, _ = _build_layout_mask(
+                _FakeLayout([_FakeBox(0, (57, 58, 245, 74))], {0: "plain text"}),
+                800,
+                600,
+                page,
+            )
+            self.assertEqual(layout[735, 52], 3)
+            self.assertEqual(layout[735, 345], 1)
+
     def test_clipped_caption_edges_include_whole_words_and_superscript(self):
         with Document() as document:
             page = document.new_page(width=600, height=800)

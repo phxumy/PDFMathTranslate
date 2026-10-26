@@ -2304,9 +2304,22 @@ class ScientificTranslator(BaseTranslator):
             return False
         # Reject the most direct form of an accidental formula expansion.  Comparing
         # against the source count avoids rejecting a unit/name already visible in it.
+        visible_source = cls.FORMULA_TOKEN_RE.sub("", source)
+        visible_target = cls.FORMULA_TOKEN_RE.sub("", target)
         for item in formula_context:
             value = item["unicode_formula"]
-            if target.count(value) > source.count(value):
+            if value.isdecimal():
+                # A subscript 2 is not a new occurrence when Chinese repeats
+                # the already introduced compound number 26/29 in place of
+                # an English pronoun. Still detect CH2 and a separate 2, and
+                # exclude internal placeholder IDs from both counts.
+                pattern = rf"(?<!\d){re.escape(value)}(?!\d)"
+                expanded = len(re.findall(pattern, visible_target)) > len(
+                    re.findall(pattern, visible_source)
+                )
+            else:
+                expanded = visible_target.count(value) > visible_source.count(value)
+            if expanded:
                 return False
         return True
 
