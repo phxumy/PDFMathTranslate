@@ -79,6 +79,33 @@ def _copy_pdf_value(value, parsed, source, destination, copied_refs) -> str:
     raise ValueError(f"unsupported PDF link action operand: {type(value).__name__}")
 
 
+def restore_imported_transparency_groups(
+    source: Document, destination: Document, *, start_at: int
+) -> None:
+    """Keep page-level blending color spaces when assembling a bilingual PDF.
+
+    MuPDF's page import does not retain /Group. Dropping a CMYK transparency
+    group changes compositing and text antialiasing even with identical page
+    operators and font programs. Copy referenced color-space/ICC objects too;
+    source xref numbers cannot be reused in the destination document.
+    """
+    if start_at < 0 or start_at + len(source) > len(destination):
+        raise ValueError("imported page range is outside the destination document")
+    parsed = None
+    copied_refs = {}
+    for page_number, page in enumerate(source):
+        if source.xref_get_key(page.xref, "Group")[0] == "null":
+            continue
+        if parsed is None:
+            parsed = PDFDocument(PDFParser(BytesIO(source.tobytes(no_new_id=True))))
+        group = dict_value(parsed.getobj(page.xref)).get("Group")
+        destination.xref_set_key(
+            destination.page_xref(start_at + page_number),
+            "Group",
+            _copy_pdf_value(group, parsed, source, destination, copied_refs),
+        )
+
+
 def restore_imported_uri_links(
     source: Document, destination: Document, *, start_at: int
 ) -> None:

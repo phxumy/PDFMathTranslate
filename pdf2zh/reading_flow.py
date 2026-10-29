@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 from pdf2zh.source_segmentation import (
     scientific_abbreviation_spans,
@@ -153,6 +153,11 @@ def _looks_like_body_prose(segment: FlowSegment) -> bool:
     text = segment.text.strip()
     if segment.region_kind != "plain text" or len(text) < 8:
         return False
+    if (
+        re.match(r"^(?:Received|Accepted|Published(?:\s+online)?)\s*:", text, re.I)
+        or text == "Check for updates"
+    ):
+        return False
     if len(_ENGLISH_WORD_RE.findall(text)) < 2:
         return False
     if _looks_like_reference_segment(text):
@@ -172,8 +177,9 @@ def _looks_like_reference_segment(text: str) -> bool:
     (for example, ``Section V-B. When ...``); the latter resembles an author
     initial and surname to the scoring regex.
 
-    Keep the conservative exclusion for a leading numbered reference, a strong
-    score, or a scored fragment with a bibliography-style terminal.  This
+    Keep the conservative exclusion for a leading numbered reference or a
+    scored fragment with bibliography structure. Acronyms followed by a new
+    sentence ("TLS. Moreover") can mimic initials even at a score of four. This
     preserves the independent reference-continuation path while allowing
     ordinary multi-sentence body text to participate in column/page flow.
     """
@@ -183,8 +189,6 @@ def _looks_like_reference_segment(text: str) -> bool:
     if any(not compact[: marker.start].strip() for marker in markers):
         return True
     score = reference_entry_score(compact)
-    if score >= 4:
-        return True
     return score >= 3 and (
         _has_reference_terminal(compact)
         or _has_incomplete_reference_author_structure(compact)
@@ -211,7 +215,15 @@ def _has_incomplete_reference_author_structure(text: str) -> bool:
 
 
 def _column_index(segment: FlowSegment) -> int | None:
-    if segment.page_width <= 0 or segment.width >= segment.page_width * 0.58:
+    if (
+        segment.page_width <= 0
+        or segment.width >= segment.page_width * 0.58
+        or (
+            segment.width >= segment.page_width * 0.50
+            and segment.x0 < segment.page_width * 0.45
+            and segment.x1 > segment.page_width * 0.55
+        )
+    ):
         return None
     return 0 if segment.center_x < segment.page_width / 2 else 1
 
@@ -431,8 +443,13 @@ def _body_follows_column_figure(
     right: FlowSegment, segments: Sequence[FlowSegment]
 ) -> bool:
     """Prove a low column start follows a figure caption or a full-width table note."""
+    caption_refs = {tail.ref for _, tail in _caption_column_pairs(segments)}
     above = [
-        item
+        (
+            replace(item, region_kind="figure_caption")
+            if item.ref in caption_refs
+            else item
+        )
         for item in segments
         if item.ref != right.ref
         and item.ref.page_id == right.ref.page_id
@@ -469,12 +486,39 @@ def _body_follows_column_figure(
     )
 
 
+def _body_below_front_matter(right, segments):
+    """Two aligned body columns may start below a wide opening abstract."""
+    left = _ordered_column_segments(segments, 0)
+    if not left or abs(left[0].y1 - right.y1) > 2 * right.size:
+        return False
+    above = [
+        item
+        for item in segments
+        if item.ref.page_id == right.ref.page_id
+        and item.region_kind == "plain text"
+        and item.y0 > right.y1
+        and min(item.x1, right.x1) - max(item.x0, right.x0) > right.width * 0.5
+    ]
+    return (
+        bool(above)
+        and all(_column_index(item) is None for item in above)
+        and any(
+            len(item.text) > 250
+            and _ends_sentence(item.text)
+            and item.width >= right.width * 1.25
+            and item.y0 - right.y1 <= 0.2 * right.page_height
+            for item in above
+        )
+    )
+
+
 def _compatible_boundary(
     left: FlowSegment,
     right: FlowSegment,
     kind: Literal["column", "page"],
     *,
     below_column_figure: bool = False,
+    above_bottom_figure: bool = False,
 ) -> tuple[bool, tuple[str, ...]]:
     if not (_looks_like_body_prose(left) and _looks_like_body_prose(right)):
         return False, ()
@@ -499,9 +543,15 @@ def _compatible_boundary(
     if abs(left.size - right.size) / largest_size > 0.15:
         return False, ()
     largest_width = max(left.width, right.width, 0.01)
-    if min(left.width, right.width) / largest_width < 0.72:
+    short_word_tail = (
+        kind == "column"
+        and left.text.rstrip().endswith("-")
+        and _first_alpha_is_lower(right.text)
+        and len(_ENGLISH_WORD_RE.findall(right.text)) <= 4
+    )
+    if min(left.width, right.width) / largest_width < 0.72 and not short_word_tail:
         return False, ()
-    if left.y0 > left.page_height * 0.28:
+    if left.y0 > left.page_height * 0.28 and not above_bottom_figure:
         return False, ()
     reasons = ["unfinished-left", continuation_start, "matching-body-style"]
     if kind == "column":
@@ -517,14 +567,64 @@ def _compatible_boundary(
     return True, tuple(reasons)
 
 
+def _caption_column_pairs(segments):
+    """Recognize a two-column legend even if only its first half is labelled."""
+    pairs = []
+    for left in segments:
+        if (
+            left.region_kind != "figure_caption"
+            or _column_index(left) != 0
+            or _ends_sentence(left.text)
+        ):
+            continue
+        candidates = [
+            right
+            for right in segments
+            if right.ref.page_id == left.ref.page_id
+            and right.region_kind in {"plain text", "figure_caption"}
+            and _column_index(right) == 1
+            and _continuation_start_reason(right.text) is not None
+            and abs(left.size - right.size) <= 0.1 * left.size
+            and abs(left.y1 - right.y1) <= left.size
+            and abs(left.y0 - right.y0) <= 3 * left.size
+            and min(left.width, right.width) >= 0.9 * max(left.width, right.width)
+        ]
+        if len(candidates) == 1:
+            pairs.append((left, candidates[0]))
+    return pairs
+
+
+def _body_precedes_bottom_figure(left, segments):
+    """A bottom float can terminate the body columns well above the page foot."""
+    below = [
+        item
+        for item in segments
+        if item.ref != left.ref
+        and item.ref.page_id == left.ref.page_id
+        and item.y1 <= left.y0 + left.size
+        and min(item.x1, left.x1) - max(item.x0, left.x0) >= 0.5 * left.width
+    ]
+    caption_refs = {right.ref for _, right in _caption_column_pairs(segments)}
+    return any(
+        item.region_kind == "figure_caption" or item.ref in caption_refs
+        for item in below
+    ) and not any(
+        item.region_kind in {"plain text", "title"} and item.ref not in caption_refs
+        for item in below
+    )
+
+
 def _ordered_column_segments(
     segments: Sequence[FlowSegment],
     column: int,
 ) -> list[FlowSegment]:
+    caption_refs = {right.ref for _, right in _caption_column_pairs(segments)}
     selected = [
         segment
         for segment in segments
-        if _looks_like_body_prose(segment) and _column_index(segment) == column
+        if _looks_like_body_prose(segment)
+        and _column_index(segment) == column
+        and segment.ref not in caption_refs
     ]
     return sorted(
         selected, key=lambda item: (-item.y1, item.x0, item.ref.segment_index)
@@ -579,21 +679,46 @@ def _page_boundary_body_segment(
 
 def detect_page_edges(segments: Sequence[FlowSegment]) -> list[ContinuationEdge]:
     """Detect only high-confidence left-column to right-column continuations."""
+    caption_edges = [
+        ContinuationEdge(
+            left.ref,
+            right.ref,
+            "column",
+            "normal",
+            0.95,
+            ("unfinished-caption", "matching-caption-columns"),
+        )
+        for left, right in _caption_column_pairs(segments)
+    ]
     left_column = _ordered_column_segments(segments, 0)
     right_column = _ordered_column_segments(segments, 1)
     if not left_column or not right_column:
-        return []
+        return caption_edges
     left = left_column[-1]
     right = right_column[0]
-    accepted, reasons = _compatible_boundary(left, right, "column")
-    if not accepted and _body_follows_column_figure(right, segments):
+    above_float = _body_precedes_bottom_figure(left, segments) or (
+        left.text.rstrip().endswith("-")
+        and len(left_column) == len(right_column) == 1
+        and abs(left.y1 - right.y1) <= 2 * left.size
+    )
+    accepted, reasons = _compatible_boundary(
+        left, right, "column", above_bottom_figure=above_float
+    )
+    if not accepted and (
+        _body_follows_column_figure(right, segments)
+        or _body_below_front_matter(right, segments)
+    ):
         accepted, reasons = _compatible_boundary(
-            left, right, "column", below_column_figure=True
+            left,
+            right,
+            "column",
+            below_column_figure=True,
+            above_bottom_figure=above_float,
         )
     if not accepted:
-        return []
+        return caption_edges
     hyphenated = left.text.rstrip().endswith("-")
-    return [
+    return caption_edges + [
         ContinuationEdge(
             left.ref,
             right.ref,
@@ -626,7 +751,12 @@ def detect_cross_page_edge(
     head = _page_boundary_body_segment(following, boundary="head")
     if tail is None or head is None:
         return None
-    accepted, reasons = _compatible_boundary(tail, head, "page")
+    accepted, reasons = _compatible_boundary(
+        tail,
+        head,
+        "page",
+        above_bottom_figure=_body_precedes_bottom_figure(tail, previous),
+    )
     if not accepted:
         return None
     hyphenated = tail.text.rstrip().endswith("-")

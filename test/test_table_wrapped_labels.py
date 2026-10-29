@@ -1,6 +1,7 @@
 import pytest
 
 from pdf2zh.converter import _wrapped_table_label_pairs
+from pdf2zh.converter import _table_description_columns, _table_line_cells
 from test_cm_prose_and_region_recovery import detection, recover, run
 
 
@@ -84,6 +85,29 @@ def test_separate_tables_never_share_label_class():
         ],
     )
     assert mapping[id(left[0])] != mapping[id(right[0])]
+
+
+def test_repeated_value_description_column_preserves_quantities():
+    rows = []
+    for i, (value, label) in enumerate(
+        [
+            ("7.8 GHz", "resonator frequency"),
+            ("5.5 GHz", "maximum frequency"),
+            ("8.1 GHz", "reference frequency"),
+        ]
+    ):
+        number = run(value, x=100, y=500 - i * 15, size=10, font="Times-Roman")
+        description = run(
+            label, x=number[-1].x1 + 10, y=500 - i * 15, size=10, font="Times-Roman"
+        )
+        rows.append(number + description)
+    columns = _table_description_columns(rows)
+    assert columns
+    for row in rows:
+        cells = _table_line_cells(row, columns)
+        assert "".join(c.get_text() for c in cells[0]).endswith("GHz")
+        assert not any(c.get_text().isdigit() for c in cells[1])
+    assert not _table_description_columns(rows[:1])
 
 
 def test_unrelated_following_label_remains_its_own_cell():

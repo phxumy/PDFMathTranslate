@@ -7,7 +7,7 @@ The final release contains `PDFMathTranslate-Codex-Setup-win64.exe` and `SHA256S
 For a prepared, clean staging directory on Windows:
 
 ```powershell
-.\script\build-windows-installer.ps1 -ReleaseRoot C:\staging\PDFMathTranslate-Codex -ReleaseTag v1.9.11-codex.6.2 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+.\script\build-windows-installer.ps1 -ReleaseRoot C:\staging\PDFMathTranslate-Codex -ReleaseTag v1.9.11-codex.7 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 ```
 
 Do not build a release from a user's working application folder. Copy only clean dependency packages, tracked project files, offline assets and required license files. Never bundle `.codex`, `auth.json`, environment files, translation caches, or PDFs.

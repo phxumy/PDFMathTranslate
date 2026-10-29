@@ -33,6 +33,7 @@ from pdf2zh.font_cmap import prepare_pdf_text_font
 from pdf2zh.link_annotations import (
     restore_imported_named_links,
     restore_imported_uri_links,
+    restore_imported_transparency_groups,
     suppress_reflowed_link_borders,
 )
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
@@ -183,6 +184,7 @@ def _layout_detections(
     ]
     if source_page is None:
         return detections
+    detections = _recover_source_text_rows(detections, source_page, height, width)
     detections = _recover_publisher_contact_lines(
         detections, source_page, height, width
     )
@@ -193,6 +195,70 @@ def _layout_detections(
     detections = _recover_abandoned_prose(detections, source_page, height, width)
     detections = _recover_table_note_lines(detections, source_page, height, width)
     return _recover_publisher_cover_lines(detections, source_page, height, width)
+
+
+def _recover_source_text_rows(detections, page, height, width):
+    """Recover exact institutional rows and explicitly labelled supplement titles."""
+    from pdf2zh.translation_policy import looks_like_affiliation
+
+    lines = [
+        line
+        for block in page.get_text("dict")["blocks"]
+        for line in block.get("lines", [])
+    ]
+    recovered = list(detections)
+    sx, sy = width / page.rect.width, height / page.rect.height
+    text_of = lambda line: "".join(
+        span.get("text", "") for span in line["spans"]
+    ).strip()
+    for line in lines:
+        if line.get("dir", (1, 0)) != (1, 0):
+            continue
+        text = text_of(line)
+        left, top, right, bottom = line["bbox"]
+        kind = None
+        if (
+            getattr(page, "number", None) == 0
+            and top < page.rect.height * 0.45
+            and re.match(
+                r"^(?:\d{1,2}\)\s*[A-Z]|(?:Department|School|Institute|Faculty|Laboratory|Centre|Center|Physikalisches Institut)\b)",
+                text,
+            )
+            and looks_like_affiliation(text)
+            and "," in text
+        ):
+            kind = "source_affiliation"
+        elif re.fullmatch(
+            r"Supplement(?:ary|al)\s+(?:Note|Section)\s+[A-Z0-9]+[.:]", text
+        ):
+            titles = [
+                other
+                for other in lines
+                if other is not line
+                and other.get("dir", (1, 0)) == (1, 0)
+                and re.fullmatch(r"[A-Z][A-Z -]{5,}", text_of(other))
+                and abs(other["bbox"][1] - top) < 1
+                and 0 <= other["bbox"][0] - right <= 3 * (bottom - top)
+            ]
+            if len(titles) == 1:
+                right = titles[0]["bbox"][2]
+                bottom = max(bottom, titles[0]["bbox"][3])
+                kind = "source_heading"
+        if kind:
+            recovered.append(
+                _LayoutDetection(
+                    max((d.value for d in recovered), default=1) + 1,
+                    kind,
+                    (
+                        max(0, int(left * sx) - 1),
+                        max(0, int(height - bottom * sy) - 1),
+                        min(width - 1, int(right * sx) + 1),
+                        min(height - 1, int(height - top * sy) + 1),
+                    ),
+                    1.0,
+                )
+            )
+    return recovered
 
 
 def _recover_publisher_contact_lines(detections, page, height, width):
@@ -563,7 +629,14 @@ def _build_layout_mask(
     layout_box = np.ones((height, width))
     confidence_map = np.full(layout_box.shape, -np.inf, dtype=np.float32)
     detections = _layout_detections(page_layout, height, width, source_page)
-    region_types = {detection.value: detection.class_name for detection in detections}
+    region_types = {
+        detection.value: (
+            "title"
+            if detection.class_name == "source_heading"
+            else detection.class_name
+        )
+        for detection in detections
+    }
     text_regions: list[tuple[tuple[int, int, int, int], float]] = []
     semantic_text_regions: list[tuple[tuple[int, int, int, int], float]] = []
 
@@ -651,7 +724,11 @@ def _build_layout_mask(
     # Source font ascenders/descenders overlap adjacent rows. Verified linked
     # title glyphs take priority over the neighbouring author-row rectangle.
     for detection in detections:
-        if detection.class_name == "publisher_text":
+        if detection.class_name in {
+            "publisher_text",
+            "source_affiliation",
+            "source_heading",
+        }:
             _paint_layout_region(
                 layout_box,
                 confidence_map,
@@ -1162,6 +1239,7 @@ def translate_stream(
                 suppress_reflowed_link_borders(page)
 
         doc_en.insert_file(doc_zh)
+        restore_imported_transparency_groups(doc_zh, doc_en, start_at=page_count)
         restore_imported_named_links(doc_zh, doc_en, start_at=page_count)
         restore_imported_uri_links(doc_zh, doc_en, start_at=page_count)
         for id in range(page_count):

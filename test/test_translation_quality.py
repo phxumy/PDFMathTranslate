@@ -159,13 +159,40 @@ class ScientificCrossReferencePlacementTests(unittest.TestCase):
                 )
 
     def test_panel_reference_retains_equivalent_notation(self):
-        for source in ("See Fig. 4(b).", "See Figure 4b."):
+        for source in ("See Fig. 4(b).", "See Figure 4b.", "See Fig. 4 b."):
             for target in ("见图4b。", "见图 4(b)。", "见图4（b）。"):
                 with self.subTest(source=source, target=target):
                     self.assertEqual(
                         normalize_scientific_cross_reference_placement(source, target),
                         target,
                     )
+
+    def test_spaced_panel_and_whole_figure_are_distinct_references(self):
+        source = "Figure 4 shows the device. In Fig. 4 a, a top view is shown."
+        for target in (
+            "图4展示器件。图4a给出了俯视图。",
+            "图4展示器件。图4（a）给出了俯视图。",
+        ):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_scientific_cross_reference_placement(source, target),
+                    target,
+                )
+        for target in (
+            "图4展示器件。图4给出了俯视图。",
+            "图4展示器件。图4b给出了俯视图。",
+        ):
+            with self.subTest(target=target):
+                self.assertIsNone(
+                    normalize_scientific_cross_reference_placement(source, target)
+                )
+
+    def test_article_following_figure_number_is_not_a_panel(self):
+        source = "We call Figure 4 a useful example."
+        target = "我们称图4为一个有用的例子。"
+        self.assertEqual(
+            normalize_scientific_cross_reference_placement(source, target), target
+        )
 
     def test_full_panel_references_in_a_list_stay_in_order(self):
         source = "Figs. 4(a) and 4(b) show the results."

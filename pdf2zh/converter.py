@@ -79,6 +79,7 @@ from pdf2zh.translation_policy import (
     SegmentPart,
     SegmentPlan,
     formula_cache_signature,
+    find_reference_markers,
     is_running_header_segment,
     looks_like_affiliation,
     looks_like_reference_author_block,
@@ -351,9 +352,10 @@ def _release_parenthetical_prose_articles(
     remain protected.
     """
     phrase = re.compile(
-        r"\s+(?:relative|absolute|small|large|positive|negative|constant|"
+        r"\s+(?:(?:proxy|measure|estimate|indicator)\s+(?:of|for)\s+|"
+        r"(?:relative|absolute|small|large|positive|negative|constant|"
         r"uniform|random|finite|infinitesimal|additional|effective|average)"
-        r"\s+[a-z]{3,}\b[^()\r\n=+<>]{0,180}\)"
+        r"\s+[a-z]{3,}\b)[^()\r\n=+<>]{0,180}\)"
     )
     for index, chars in enumerate(formulas):
         joined = "".join(char.get_text() for char in chars)
@@ -371,7 +373,15 @@ def _release_parenthetical_prose_articles(
         if source.count(marker) != 1:
             continue
         following = source[source.index(marker) + len(marker) :]
-        if phrase.match(following) is None:
+        expanded_following = _FORMULA_MARKER_RE.sub(
+            lambda m: (
+                "".join(ch.get_text() for ch in formulas[int(m[1])])
+                if int(m[1]) < len(formulas)
+                else m[0]
+            ),
+            following,
+        )
+        if phrase.match(expanded_following) is None:
             continue
         prefix, suffix = chars[: match.start()], chars[match.start() :]
         em = float(suffix[0].size)
@@ -389,12 +399,16 @@ def _release_parenthetical_prose_articles(
         ):
             continue
         if any(
-            abs(_char_baseline(char) - _char_baseline(prefix[-1])) > em * 0.15
+            abs(
+                _char_baseline(char)
+                - _char_baseline(max(prefix, key=lambda ch: ch.size))
+            )
+            > em * 0.15
             for char in suffix
         ):
             continue
         gap = float(suffix[0].x0) - max(float(char.x1) for char in prefix)
-        if not em * 0.12 < gap <= em * 0.5:
+        if not em * 0.12 < gap <= em * 0.8:
             continue
         formulas[index] = prefix
         texts[paragraph_id] = source.replace(marker, marker + " " + match.group(), 1)
@@ -402,6 +416,208 @@ def _release_parenthetical_prose_articles(
 
 
 _PROSE_SENTENCE_PUNCTUATION = frozenset(".,;:!?，。；：！？")
+
+
+def _release_formula_prose_suffixes(texts, formulas, owners, paragraphs, text_chars):
+    """Keep axis labels and explicit parenthetical cross-references in prose."""
+    for index, chars in enumerate(formulas):
+        pid = owners[index]
+        if paragraphs[pid].region_kind not in _INLINE_SCRIPT_REGION_KINDS:
+            continue
+        if any(len(ch.get_text()) != 1 for ch in chars):
+            continue
+        value = "".join(ch.get_text() for ch in chars)
+        marker = f"{{v{index}}}"
+        if texts[pid].count(marker) != 1:
+            continue
+        before, after = texts[pid].split(marker)
+        if (
+            re.fullmatch(r"[A-Z][A-Za-z]{2,}-", value)
+            and re.match(r"(?:design|type|architecture)\b", after)
+            and all(
+                _is_non_math_text_font(ch.fontname)
+                and not _is_non_horizontal_text_matrix(ch.matrix)
+                for ch in chars
+            )
+        ):
+            # A named circuit design is ordinary prose, not a mathematical
+            # atom whose order must be locked relative to an author citation.
+            texts[pid] = before + value + after
+            text_chars[pid].extend(chars)
+            continue
+        quantity = re.fullmatch(
+            r"(?P<prefix>instantaneous|average|mean)?(?P<symbol>[A-Z][a-z]?\d)(?P<suffix>gain|time|rate)",
+            value,
+        )
+        if quantity:
+            start, end = quantity.span("symbol")
+            noun = chars[end:]
+            symbol = chars[start:end]
+            em = max(ch.size for ch in symbol)
+            gap = noun[0].x0 - max(ch.x1 for ch in symbol)
+            if not (0.12 * em < gap < 0.8 * em) or any(
+                not _is_non_math_text_font(ch.fontname)
+                or _is_non_horizontal_text_matrix(ch.matrix)
+                for ch in chars[:start] + noun
+            ):
+                continue
+            prefix = quantity["prefix"] or ""
+            # An emphasized adjective can end the previous physical line,
+            # leaving two adjacent placeholders for one ordinary noun phrase.
+            previous = re.search(r"\{v(\d+)\}\s*$", before)
+            if not prefix and previous:
+                previous_id = int(previous[1])
+                previous_chars = formulas[previous_id]
+                previous_text = "".join(ch.get_text() for ch in previous_chars)
+                if (
+                    owners[previous_id] == pid
+                    and previous_text in {"instantaneous", "average", "mean"}
+                    and all(
+                        _is_non_math_text_font(ch.fontname) for ch in previous_chars
+                    )
+                ):
+                    before = before[: previous.start()] + previous_text + " "
+                    text_chars[pid].extend(previous_chars)
+            formulas[index] = chars[start:end]
+            texts[pid] = (
+                before
+                + (prefix + " " if prefix else "")
+                + marker
+                + " "
+                + quantity["suffix"]
+                + after
+            )
+            text_chars[pid].extend(chars[:start] + chars[end:])
+            continue
+        expanded_after = _FORMULA_MARKER_RE.sub(
+            lambda m: "".join(ch.get_text() for ch in formulas[int(m[1])]), after
+        )
+        axis = re.search(r"\([xyz]-$", value)
+        reference = re.search(r"\((?:Eq|Fig|Ref|Sec)\.?\d+[a-z]?[),]?$", value)
+        match = axis if axis and re.match(r"axis\)", expanded_after) else reference
+        if match is None or match.start() == 0:
+            continue
+        prefix, suffix = chars[: match.start()], chars[match.start() :]
+        if any(_is_non_horizontal_text_matrix(ch.matrix) for ch in chars):
+            continue
+        if reference and any(not _is_non_math_text_font(ch.fontname) for ch in suffix):
+            continue
+        prose = _reconstruct_italic_run(suffix)
+        if reference:
+            prose = re.sub(r"(Eq|Fig|Ref|Sec)\.?(?=\d)", r"\1. ", prose)
+        formulas[index] = prefix
+        texts[pid] = before + marker + " " + prose + after
+        text_chars[pid].extend(suffix)
+
+
+def _release_inline_prose_closers(texts, formulas, owners, paragraphs, text_chars):
+    """Return a prose explanation's closing mark from an opaque math atom.
+
+    Track literal and formula-owned openers separately. Only a visible opener
+    followed by several prose words proves that an unmatched closing glyph
+    belongs to the sentence. Balanced functions and cross-atom math stay intact.
+    """
+    for index, chars in enumerate(formulas):
+        pid = owners[index]
+        if (
+            paragraphs[pid].region_kind not in _INLINE_SCRIPT_REGION_KINDS
+            or len(chars) < 2
+        ):
+            continue
+        value = "".join(ch.get_text() for ch in chars)
+        if not value.endswith(")") or value.count(")") <= value.count("("):
+            continue
+        closer = chars[-1]
+        if not _is_non_math_text_font(
+            closer.fontname
+        ) or _is_non_horizontal_text_matrix(closer.matrix):
+            continue
+        marker = f"{{v{index}}}"
+        source = texts[pid]
+        if source.count(marker) != 1:
+            continue
+        before, after = source.split(marker)
+        stack = []
+        cursor = 0
+
+        def consume(text, offset=None):
+            for pos, char in enumerate(text):
+                if char == "(":
+                    stack.append(None if offset is None else offset + pos)
+                elif char == ")" and stack:
+                    stack.pop()
+
+        for match in _FORMULA_MARKER_RE.finditer(before):
+            consume(before[cursor : match.start()], cursor)
+            consume("".join(ch.get_text() for ch in formulas[int(match[1])]))
+            cursor = match.end()
+        consume(before[cursor:], cursor)
+        if not stack or stack[-1] is None:
+            continue
+        explanation = _FORMULA_MARKER_RE.sub(" ", before[stack[-1] + 1 :])
+        percentage_qualifier = (
+            not explanation.strip()
+            and re.search(r"\b[A-Za-z]{2,}\s+\($", before)
+            and re.fullmatch(r"[≈~<>≤≥]?\s*\d+(?:\.\d+)?\s*%\)", value)
+        )
+        if (
+            len(re.findall(r"[A-Za-z]{2,}", explanation)) < 2
+            and not percentage_qualifier
+        ):
+            continue
+        formulas[index] = chars[:-1]
+        texts[pid] = before + marker + ")" + after
+        text_chars[pid].append(closer)
+
+
+def _merge_encoded_formula_gaps(texts, formulas, owners, paragraphs, text_chars, lines):
+    """Preserve source glyphs for a misencoded delimiter between math atoms."""
+    pattern = re.compile(r"\{v(\d+)\}(?P<gap>\s*ð\d+\s*)\{v(\d+)\}")
+    for pid, source in enumerate(texts):
+        for match in reversed(list(pattern.finditer(source))):
+            a, b = int(match[1]), int(match[3])
+            if (
+                owners[a] != pid
+                or owners[b] != pid
+                or not formulas[a]
+                or not formulas[b]
+            ):
+                continue
+            left, right = formulas[a], formulas[b]
+            if not any(ch.get_text() == "=" for ch in left) or not "".join(
+                ch.get_text() for ch in right
+            ).startswith("+expð"):
+                continue
+            em = paragraphs[pid].size
+            baseline = _char_baseline(max(left, key=lambda ch: ch.size))
+            x0, x1 = max(ch.x1 for ch in left), min(ch.x0 for ch in right)
+            gap_chars = sorted(
+                [
+                    ch
+                    for ch in text_chars[pid]
+                    if x0 - 0.1 * em <= ch.x0
+                    and ch.x1 <= x1 + 0.1 * em
+                    and abs(_char_baseline(ch) - baseline) <= 0.15 * em
+                    and not _is_non_horizontal_text_matrix(ch.matrix)
+                ],
+                key=lambda ch: ch.x0,
+            )
+            if (
+                "".join(ch.get_text() for ch in gap_chars).replace(" ", "")
+                != match["gap"].strip()
+            ):
+                continue
+            if x1 - x0 > 3 * em or not all(
+                abs(_char_baseline(ch) - baseline) < em for ch in right
+            ):
+                continue
+            formulas[a] = left + gap_chars + right
+            lines[a].extend(lines[b])
+            texts[pid] = (
+                texts[pid][: match.start()] + f"{{v{a}}}" + texts[pid][match.end() :]
+            )
+
+
 _FORMULA_TRAILING_PROSE_WORDS = frozenset(
     {
         "and",
@@ -900,6 +1116,67 @@ def _release_reference_number_labels(
     expanded = [expand(s) for s in segments]
     for index, chars in enumerate(formulas):
         label = "".join(ch.get_text() for ch in chars)
+        paragraph_id = formula_paragraphs[index]
+        paragraph = paragraphs[paragraph_id]
+        marker = f"{{v{index}}}"
+        # Superscript labels can absorb the first author's initial, or attach
+        # to the preceding italic venue/year across a physical line break.
+        # Require bibliography evidence and a small numeral at the column's
+        # left edge; ordinary years, volumes, powers and bylines do not qualify.
+        leading = re.fullmatch(r"(?P<number>\d{1,3})[A-Z][A-Za-z]{0,2}", label)
+        trailing = re.search(r"(?<=[.,])(?P<number>\d{1,3})$", label)
+        candidate = leading or trailing
+        if (
+            candidate
+            and not lines[index]
+            and paragraph.region_kind == "plain text"
+            and paragraph.layout_class > 1
+            and segments[paragraph_id].count(marker) == 1
+            and reference_entry_score(expanded[paragraph_id]) >= 5
+            and all(len(ch.get_text()) == 1 for ch in chars)
+        ):
+            start, end = candidate.span("number")
+            digits = chars[start:end]
+            em = float(paragraph.size)
+            left, right = segments[paragraph_id].split(marker)
+            if (
+                digits
+                and all(0.5 * em <= ch.size <= 0.85 * em for ch in digits)
+                and paragraph.x0 - 0.5 * em <= digits[0].x0 <= paragraph.x0 + 1.2 * em
+                and all(
+                    _is_non_math_text_font(ch.fontname)
+                    and not _is_non_horizontal_text_matrix(ch.matrix)
+                    for ch in digits
+                )
+            ):
+                if leading and re.match(r"\s*(?:[.,]\s*)?[A-ZÀ-ÖØ-Þ]", right):
+                    initial = chars[end:]
+                    if all(
+                        0.9 * em <= ch.size <= 1.1 * em
+                        and 0.15 * em
+                        <= _char_baseline(digits[0]) - _char_baseline(ch)
+                        <= 0.7 * em
+                        and _is_non_math_text_font(ch.fontname)
+                        for ch in initial
+                    ):
+                        segments[paragraph_id] = left + label + right
+                        text_chars[paragraph_id].extend(chars)
+                        continue
+                if (
+                    trailing
+                    and re.search(
+                        r"(?:19|20)\d{2}\)?\.\s*$", expand(left) + label[:start]
+                    )
+                    and re.match(r"\s*[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+\b", right)
+                    and digits[0].x0 < chars[start - 1].x0 - em
+                    and _char_baseline(digits[0]) < _char_baseline(chars[start - 1])
+                ):
+                    formulas[index] = chars[:start]
+                    segments[paragraph_id] = (
+                        left + marker + " " + candidate["number"] + right.lstrip()
+                    )
+                    text_chars[paragraph_id].extend(digits)
+                    continue
         article = re.fullmatch(r"\):\s*(A|An|The)", label)
         if article and not lines[index]:
             paragraph_id = formula_paragraphs[index]
@@ -1140,6 +1417,28 @@ def _recover_author_information_affiliations(
     These are address lists, proved by institution vocabulary plus postal or
     contact metadata. No general italic prose or mathematical run is released.
     """
+    affiliation_rows = [p for p in paragraphs if p.region_kind == "source_affiliation"]
+    for pid, paragraph in enumerate(paragraphs):
+        if paragraph.region_kind != "source_affiliation":
+            continue
+        paragraph.x1 = max(
+            p.x1 for p in affiliation_rows if abs(p.x0 - paragraph.x0) <= paragraph.size
+        )
+        source = segments[pid]
+        runs = [formulas[int(m[1])] for m in _FORMULA_MARKER_RE.finditer(source)]
+        expanded = _FORMULA_MARKER_RE.sub(
+            lambda m: _reconstruct_italic_run(formulas[int(m[1])]), source
+        )
+        if not looks_like_affiliation(expanded):
+            continue
+        segments[pid] = expanded
+        paragraph.region_kind = "plain text"
+        paragraph.affiliation_parts = (SegmentPart(ROLE_AFFILIATION, expanded),)
+        letters = [char for run in runs for char in run if char.get_text().isalpha()]
+        if letters:
+            paragraph.size = float(np.median([char.size for char in letters]))
+            paragraph.y = float(np.median([char.y0 for char in letters]))
+        paragraph.brk = True
     name_pattern = re.compile(
         r"(?P<name>[A-Z][A-Za-z.'’\-]+(?:\s+[A-Z][A-Za-z.'’\-]+){1,4})"
         r"\s*[−—–]\s*(?=(?:Department|Institute|State|International|Laboratory|"
@@ -2444,6 +2743,43 @@ def _recover_detector_boundary_text(
             for pos in range(start, end)
             if classes[pos] == 1
         )
+    # A box can begin after a short grammatical prefix on each source line,
+    # e.g. "The | wafer ..." and "is e|xposed ...". Recover that prefix only
+    # with several same-line body words to its right. Source gaps, other boxes,
+    # mathematical labels, and protected/rotated glyphs remain boundaries.
+    for boundary in range(1, len(chars)):
+        target_class = classes[boundary]
+        if target_class <= 1 or classes[boundary - 1] != 1 or not eligible(boundary):
+            continue
+
+        def adjacent(a, b):
+            return (
+                eligible(a)
+                and eligible(b)
+                and classes[a] in {1, target_class}
+                and classes[b] in {1, target_class}
+                and _touching_text_glyphs(chars[a], chars[b], max_gap=0.8)
+            )
+
+        start, end = boundary - 1, boundary + 1
+        while start > 0 and classes[start - 1] == 1 and adjacent(start - 1, start):
+            start -= 1
+        while (
+            end < len(chars) and classes[end] == target_class and adjacent(end - 1, end)
+        ):
+            end += 1
+        prefix = _reconstruct_italic_run(chars[start:boundary]).strip()
+        body = _reconstruct_italic_run(chars[boundary:end])
+        if (
+            adjacent(boundary - 1, boundary)
+            and re.fullmatch(
+                r"(?:The|the|An|an|A|a|It|it|is|are|was|were)(?:\s+[a-z]{1,6})?", prefix
+            )
+            and len(re.findall(r"[A-Za-z]{3,}", body)) >= 3
+        ):
+            recovered.update(
+                (object_id(char), target_class) for char in chars[start:boundary]
+            )
     return recovered
 
 
@@ -4075,15 +4411,49 @@ def _is_scripted_table_symbol(chars: list[LTChar]) -> bool:
     return True
 
 
-def _table_line_cells(line: list[LTChar]) -> list[list[LTChar]]:
+def _table_line_cells(line: list[LTChar], column_starts=()) -> list[list[LTChar]]:
     cells: list[list[LTChar]] = []
     for char in sorted(line, key=lambda ch: (ch.x0, -ch.y0)):
-        if not cells or char.x0 - cells[-1][-1].x1 > 1.8 * max(
-            char.size, cells[-1][-1].size
+        if (
+            not cells
+            or char.x0 - cells[-1][-1].x1 > 1.8 * max(char.size, cells[-1][-1].size)
+            or any(
+                cells[-1][-1].x1 <= x <= char.x0 + 0.1 * char.size
+                for x in column_starts
+            )
         ):
             cells.append([])
         cells[-1].append(char)
     return cells
+
+
+def _table_description_columns(lines):
+    """Infer repeated value/description boundaries, not arbitrary word gaps."""
+    candidates = []
+    for row, line in enumerate(lines):
+        ordered = sorted(line, key=lambda ch: ch.x0)
+        for index in range(1, len(ordered)):
+            left, right = ordered[index - 1], ordered[index]
+            em = max(left.size, right.size)
+            if right.x0 - left.x1 < 0.8 * em:
+                continue
+            prefix = _reconstruct_italic_run(ordered[:index])
+            suffix = _reconstruct_italic_run(ordered[index:])
+            if (
+                re.search(r"\d", prefix)
+                and re.match(r"[A-Za-z]{3,}\b", suffix)
+                and len(re.findall(r"[A-Za-z]{2,}", suffix)) >= 2
+            ):
+                candidates.append((row, right.x0, em))
+    return tuple(
+        sorted(
+            {
+                x
+                for row, x, em in candidates
+                if len({r for r, y, _ in candidates if abs(x - y) < 0.2 * em}) >= 3
+            }
+        )
+    )
 
 
 def _wrapped_table_label_pairs(lines: list[list[LTChar]]) -> dict[int, int]:
@@ -4383,6 +4753,9 @@ def _recover_preserved_region_prose(
         table_continuations = (
             _wrapped_table_label_pairs(lines) if region.class_name == "table" else {}
         )
+        description_columns = (
+            _table_description_columns(lines) if region.class_name == "table" else ()
+        )
         previous_footnote = None
         footnote_history = []
         for line in lines:
@@ -4399,7 +4772,7 @@ def _recover_preserved_region_prose(
             cells = [line]
             kind = "plain text"
             if region.class_name == "table":
-                cells = _table_line_cells(line)
+                cells = _table_line_cells(line, description_columns)
                 kind = "table_cell"
             elif region.class_name == "abandon":
                 if max(ch.y1 for ch in line) > height * 0.30 or (
@@ -5100,9 +5473,7 @@ def _collect_reference_title_italic_runs(
     """
 
     candidates: dict[int, str] = {}
-    label_pattern = re.compile(
-        r"(?:^|\s)(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[Ss]?\d+[.)．）])\s*"
-    )
+    formula_texts = ["".join(ch.get_text() for ch in run) for run in formula_runs]
     for formula_id, (chars, paragraph_id) in enumerate(
         zip(formula_runs, formula_paragraphs, strict=True)
     ):
@@ -5113,10 +5484,12 @@ def _collect_reference_title_italic_runs(
         match = marker.search(segment)
         if match is None or len(marker.findall(segment)) != 1:
             continue
-        preceding_labels = tuple(label_pattern.finditer(segment[: match.start()]))
+        preceding_labels = find_reference_markers(
+            segment[: match.start()], formula_texts
+        )
         if not preceding_labels:
             continue
-        entry_start = preceding_labels[-1].start()
+        entry_start = preceding_labels[-1].start
         entry_prefix = segment[entry_start : match.start()]
         # The same italic title may be split into multiple PDF font runs at a
         # source line break.  Previously accepted runs still belong to this title.
@@ -5162,6 +5535,11 @@ def _collect_reference_title_italic_runs(
         ):
             continue
         text = _reconstruct_italic_run(chars)
+        # An italic author abbreviation is metadata, not the work's title.
+        # Releasing it here makes the title extractor choose "et al" and leave
+        # the actual title untranslated, particularly with tight/superscript labels.
+        if re.fullmatch(r"et\s*al\.?", text.strip(), re.IGNORECASE):
+            continue
         words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
         if (
             not words
@@ -6717,6 +7095,15 @@ class TranslateConverter(PDFConverterEx):
             if segment_index in already_english:
                 plans.append(SegmentPlan(source, (SegmentPart(ROLE_PRESERVE, text),)))
                 continue
+            if (
+                (
+                    paragraph.region_kind == "figure_caption"
+                    or (paragraph.layout_class <= 1 and paragraph.region_kind == "")
+                )
+                and re.fullmatch(r"[A-Za-z]", text.strip())
+            ):
+                plans.append(SegmentPlan(source, (SegmentPart(ROLE_PRESERVE, text),)))
+                continue
             if paragraph.affiliation_parts:
                 plans.append(SegmentPlan(source, paragraph.affiliation_parts))
                 continue
@@ -7336,6 +7723,7 @@ class TranslateConverter(PDFConverterEx):
                         unicodedata.category(char[0])
                         in ["Lm", "Mn", "Sk", "Sm", "Zl", "Zp", "Zs"]   # 文字修饰符、数学符号、分隔符号
                         or ord(char[0]) in range(0x370, 0x400)          # 希腊字母
+                        or char in "〈〉⟨⟩"  # preserve expectation-value delimiters
                     )
                 ):
                     return True
@@ -7835,6 +8223,9 @@ class TranslateConverter(PDFConverterEx):
             paragraph_text_chars,
         )
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
+        _release_formula_prose_suffixes(sstk, var, varp, pstk, paragraph_text_chars)
+        _release_inline_prose_closers(sstk, var, varp, pstk, paragraph_text_chars)
+        _merge_encoded_formula_gaps(sstk, var, varp, pstk, paragraph_text_chars, varl)
         _release_formula_case_explanations(sstk, var, varp, pstk, paragraph_text_chars)
         if not self.vfont and not self.vchar:
             _release_reference_number_labels(sstk, var, varl, varp, pstk, paragraph_text_chars)

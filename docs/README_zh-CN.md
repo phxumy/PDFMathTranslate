@@ -66,9 +66,9 @@
 
 <a id="codex-fields"></a>
 
-### Codex 各字段怎么填（核对日期：2026-10-18）
+### Codex 各字段怎么填（核对日期：2026-10-28）
 
-以下字段行为适用于桌面版 `.5` 至 `.5.4`。模型 ID、所调用的 CLI 版本、登录方式和账户权限共同决定请求能否执行。
+以下字段行为适用于桌面版 `.5` 至 `.7`。模型 ID、所调用的 CLI 版本、登录方式和账户权限共同决定请求能否执行。
 
 | 字段 | 建议填写 | 留空时的实际行为 |
 | --- | --- | --- |
@@ -82,7 +82,7 @@
 
 <a id="codex-models"></a>
 
-### Codex 模型 ID（核对日期：2026-10-18）
+### Codex 模型 ID（核对日期：2026-10-28）
 
 `gpt-6-luna` 是官方有效 ID，包含连字符；不要填写 `gpt6luna`、`luna` 或其他简称。下表列出官方模型，不表示旧安装包内置的 CLI 已能使用每一项。
 
@@ -90,11 +90,16 @@
 | --- | --- | --- |
 | GPT-6 Luna | `gpt-6-luna` | 面向重复、批量任务；可用于翻译。官方支持 `none`、`low`、`medium`、`high`、`xhigh`、`max`，不支持 Ultra。 |
 | GPT-6.1 Sol | `gpt-6.1-sol` | 当前 Sol 型号，适合复杂工作；需当前客户端及账户已开放。 |
+| GPT-6.1 Terra | `gpt-6.1-terra` | 官方新型号；可直接填写精确 ID。2026-10-28 已从本机官方 CLI `0.163.0` 的模型目录读取到此项及 `low`、`medium`、`high`、`xhigh`、`max` 档位；这次为目录查询，未执行 Terra 翻译请求。 |
 | GPT-6 Sol | `gpt-6-sol` | GPT-6 系列的前一款 Sol，按账户可用性选择。 |
 | GPT-6 Astra | `gpt-6-astra` | 适合较难的推理工作；使用 `low` 至 `max`，不要显式填 `none`。 |
 | GPT-5.6 Sol / Terra / Luna | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` | 上一代型号；是否仍可使用，以当前客户端、账户和官方公告为准。 |
 
 型号与推理强度分别设置：`CODEX_MODEL=gpt-6-luna`、`CODEX_REASONING_EFFORT=max` 就是请求 GPT-6 Luna + Max。翻译后端接受 `none`、`low`、`medium`、`high`、`xhigh`、`max`，尚不接受 `ultra`。Luna 的官方能力见 [GPT-6 Luna 模型页](https://developers.openai.com/api/docs/models/gpt-6-luna)；Codex 入口与账户可用性见 [官方 Models 说明](https://learn.chatgpt.com/docs/models)。
+
+Terra 可填写 `CODEX_MODEL=gpt-6.1-terra`，例如配合 `CODEX_REASONING_EFFORT=max`。[Terra API 模型页](https://developers.openai.com/api/docs/models/gpt-6.1-terra)列出的 effort 为 `none`、`low`、`medium`、`high`、`xhigh`、`max`；Codex 客户端目录中的可选项可能不同。本机目录还为 Terra 列出了 `ultra`，但当前翻译后端不接受该档位，不能将 Codex 应用中的全部选项直接照搬。
+
+从 `.7` 起，“模型与服务设置”中的模型和 effort 均为可手动填写的下拉框。启动或切换到 Codex 时自动读取目录，也可点击“刷新模型与推理强度”。选择目录中的模型会联动 effort 选项；手动填写的新型号不会被替换，读取失败也会保留当前值。官方 [`model/list` 接口](https://learn.chatgpt.com/docs/app-server)提供模型 ID、显示名、effort 和默认档位。目录可能来自客户端缓存或内置列表，不能当作账号调用权限的确认，详见[官方模型目录说明](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)。
 
 旧型号不应继续列为当前推荐项：ChatGPT 登录下的 `gpt-5.4` / `gpt-5.4-mini` 已于 2026-08-31 退役，`gpt-5.3-codex-spark` 于 2026-09-14 退役，`gpt-5.5` 于 2026-10-14 退役。API Key 登录的可用范围和计费另按 API 规则处理，不能从订阅登录的结果推断。
 

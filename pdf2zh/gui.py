@@ -29,6 +29,7 @@ from pdf2zh.translation_queue import queue_files, queue_signature, queue_summary
 from pdf2zh.translation_history import HistoryStore, TaskRecorder, current_task, now
 from pdf2zh.cache import cache_information, clear_translation_cache
 from pdf2zh import history_ui
+from pdf2zh.codex_models import get_codex_models, model_choices, effort_choices
 from pdf2zh.app_update import APP_VERSION, REPOSITORY_URL, update_manager, UpdateError
 from pdf2zh.codex_account import (
     get_codex_status,
@@ -494,6 +495,60 @@ def _codex_settings(env_values, fast_mode, speed, parallel):
     }.items():
         values[keys.index(key)] = value
     return values, workers
+
+
+def refresh_codex_model_catalog(service, configured_bin, profile, model, effort):
+    """Keep current values while refreshing the editable catalog controls."""
+    if service != "Codex":
+        yield ([], "", *[gr.update() for _ in range(6)])
+        return
+    # Disable the provider and its settings during the bounded request so a
+    # late response cannot overwrite another provider's fields.
+    yield (
+        gr.update(),
+        "正在读取模型和推理强度…",
+        *[gr.update(interactive=False) for _ in range(6)],
+    )
+    try:
+        result = get_codex_models(configured_bin, profile)
+    except Exception:
+        # A metadata failure must not strand all settings in a disabled state.
+        result = {
+            "ok": False,
+            "models": [],
+            "message": "模型目录读取失败；当前设置保留，可重试或手动填写。",
+        }
+    models = result.get("models", []) if result.get("ok") else []
+    value = str(model or "").strip()
+    selected_effort = str(effort or "low").strip().lower() or "low"
+    choices = effort_choices(models, value, CodexTranslator.SUPPORTED_REASONING_EFFORTS)
+    yield (
+        models,
+        result["message"],
+        gr.update(interactive=True),
+        gr.update(interactive=True),
+        gr.update(interactive=True),
+        gr.update(choices=model_choices(models), value=value, interactive=True),
+        gr.update(choices=choices, value=selected_effort, interactive=True),
+        gr.update(interactive=True),
+    )
+
+
+def select_codex_catalog_model(service, models, model, effort):
+    if service != "Codex":
+        return gr.update()
+    choices = effort_choices(
+        models or [], model, CodexTranslator.SUPPORTED_REASONING_EFFORTS
+    )
+    value = str(effort or "low").strip().lower() or "low"
+    entry = next((item for item in models or [] if item["id"] == model), None)
+    if entry and choices and value not in choices:
+        value = (
+            entry["default_effort"]
+            if entry["default_effort"] in choices
+            else choices[0]
+        )
+    return gr.update(choices=choices, value=value)
 
 
 def _duration(seconds):
@@ -1582,8 +1637,13 @@ cancellation_event_map = {}
 with gr.Blocks(
     title="PDFMathTranslate - PDF Translation with preserved formats",
     theme=app_theme,
-    css=custom_css + "\n#live-page-updates {display:none !important;}",
-    js=Path(__file__).with_name("live_preview.js").read_text(encoding="utf-8"),
+    css=custom_css
+    + "\n#live-page-updates {display:none !important;}\n#pdf-upload.pdf2zh-dragover {outline:2px solid #18aa99;outline-offset:2px;}",
+    js="() => { ("
+    + Path(__file__).with_name("live_preview.js").read_text(encoding="utf-8")
+    + ")(); ("
+    + Path(__file__).with_name("file_drop.js").read_text(encoding="utf-8")
+    + ")(); }",
     head=demo_recaptcha if flag_demo else "",
 ) as demo:
     state = gr.State({"session_id": None})
@@ -1608,6 +1668,7 @@ with gr.Blocks(
                 file_types=[".pdf"],
                 type="filepath",
                 elem_classes=["input-file"],
+                elem_id="pdf-upload",
             )
             link_input = gr.Textbox(
                 label="Link",
@@ -1626,9 +1687,17 @@ with gr.Blocks(
             )
             with gr.Accordion("模型与服务设置", open=False):
                 envs = []
-                for _ in range(MAX_ENV_FIELDS):
+                for index in range(MAX_ENV_FIELDS):
                     envs.append(
-                        gr.Textbox(
+                        gr.Dropdown(
+                            choices=[],
+                            allow_custom_value=True,
+                            filterable=True,
+                            visible=False,
+                            interactive=True,
+                        )
+                        if index in (2, 3)
+                        else gr.Textbox(
                             visible=False,
                             interactive=True,
                         )
@@ -1636,6 +1705,9 @@ with gr.Blocks(
             with gr.Column(
                 visible=desktop_mode and "Codex" in enabled_services
             ) as codex_panel:
+                codex_model_catalog = gr.State([])
+                codex_model_catalog_status = gr.Markdown("")
+                codex_models_refresh = gr.Button("刷新模型与推理强度")
                 codex_status = gr.Textbox(
                     label="Codex 登录状态",
                     value="正在检查登录状态…",
@@ -1804,8 +1876,22 @@ with gr.Blocks(
                     _envs[i] = gr.update(
                         visible=visible,
                         label=label,
-                        value=value,
+                        value=(
+                            str(value) if i in (2, 3) and value is not None else value
+                        ),
+                        **({"choices": []} if i in (2, 3) else {}),
                     )
+                    if translator.name == "codex" and label in {
+                        "CODEX_MODEL",
+                        "CODEX_REASONING_EFFORT",
+                    }:
+                        _envs[i]["info"] = (
+                            "从自动读取的目录选择，或手动填写精确模型 ID；留空由 CLI 选择。"
+                            if label == "CODEX_MODEL"
+                            else "选择当前模型的档位，也可手动填写。翻译后端支持 none 至 max，暂不支持 ultra。"
+                        )
+                    elif i in (2, 3):
+                        _envs[i]["info"] = None
                 return [
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
@@ -1892,6 +1978,17 @@ with gr.Blocks(
                 elem_classes=["secondary-text"],
             )
             page_range.select(on_select_page, page_range, page_input)
+            catalog_inputs = [service, envs[0], envs[1], envs[2], envs[3]]
+            catalog_outputs = [
+                codex_model_catalog,
+                codex_model_catalog_status,
+                service,
+                envs[0],
+                envs[1],
+                envs[2],
+                envs[3],
+                codex_models_refresh,
+            ]
             service.select(
                 on_select_service,
                 service,
@@ -1906,6 +2003,30 @@ with gr.Blocks(
                     chatgpt_model,
                     chatgpt_effort,
                 ],
+            ).then(
+                refresh_codex_model_catalog,
+                catalog_inputs,
+                catalog_outputs,
+                concurrency_id="codex-model-catalog",
+                concurrency_limit=1,
+                show_progress="hidden",
+                api_name=False,
+            )
+            codex_models_refresh.click(
+                refresh_codex_model_catalog,
+                catalog_inputs,
+                catalog_outputs,
+                concurrency_id="codex-model-catalog",
+                concurrency_limit=1,
+                show_progress="hidden",
+                api_name=False,
+            )
+            envs[2].input(
+                select_codex_catalog_model,
+                [service, codex_model_catalog, envs[2], envs[3]],
+                envs[3],
+                queue=False,
+                api_name=False,
             )
             codex_login_outputs = [codex_status, codex_login_id, codex_login_timer]
             codex_login_btn.click(
@@ -2167,6 +2288,14 @@ with gr.Blocks(
             )
         ),
         outputs=codex_status,
+    ).then(
+        refresh_codex_model_catalog,
+        catalog_inputs,
+        catalog_outputs,
+        concurrency_id="codex-model-catalog",
+        concurrency_limit=1,
+        show_progress="hidden",
+        api_name=False,
     )
 
     cancellation_btn.click(

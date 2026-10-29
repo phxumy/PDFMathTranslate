@@ -103,9 +103,9 @@ translation provider you select; Codex requests are sent to OpenAI according to
 the account that signs in. See the [official OpenAI Codex CLI documentation](https://developers.openai.com/codex/cli)
 for account and sign-in details.
 
-### Codex fields and model IDs (checked October 18, 2026)
+### Codex fields and model IDs (checked October 28, 2026)
 
-These field rules apply to desktop releases codex.5 through codex.5.4. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
+These field rules apply to desktop releases codex.5 through codex.7. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
 
 | Field | Behavior |
 | --- | --- |
@@ -119,11 +119,16 @@ These field rules apply to desktop releases codex.5 through codex.5.4. The progr
 | --- | --- |
 | GPT-6 Luna | `gpt-6-luna` |
 | GPT-6.1 Sol | `gpt-6.1-sol` |
+| GPT-6.1 Terra | `gpt-6.1-terra` |
 | GPT-6 Sol | `gpt-6-sol` |
 | GPT-6 Astra | `gpt-6-astra` |
 | Previous-generation GPT-5.6 Sol / Terra / Luna | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` |
 
 GPT-6 Luna is an official Codex model and supports reasoning through `max`. Use the full hyphenated ID, not `gpt6luna` or `luna`. See the [Luna model specification](https://developers.openai.com/api/docs/models/gpt-6-luna) and [Codex model availability](https://learn.chatgpt.com/docs/models). GPT-6 Astra does not support explicit `none`.
+
+GPT-6.1 Terra can be entered as `gpt-6.1-terra`; it is also present in the local official CLI 0.163.0 model catalog checked on October 28. The [Terra API specification](https://developers.openai.com/api/docs/models/gpt-6.1-terra) lists `none`, `low`, `medium`, `high`, `xhigh`, and `max`. Codex picker choices can differ: use the selected CLI's returned model/effort metadata. This translation backend currently supports efforts through `max`, so an `ultra` option advertised by a Codex catalog is not yet accepted here.
+
+Starting with codex.7, the model and effort fields are editable dropdowns. They load the selected CLI's catalog at startup or when selecting Codex; the refresh button reloads it. Choosing a catalog model updates the effort options, while custom model IDs remain editable. A failed refresh preserves current values. The official [`model/list` app-server RPC](https://learn.chatgpt.com/docs/app-server) supplies IDs, display names, supported efforts and defaults. Its catalog may be cached or bundled and does not prove inference access; see [account model catalogs](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
 
 **codex.5.4 bundles official stable CLI 0.163.0; keep `CODEX_BIN=codex` to use it.** Earlier codex.5.3 installers bundle 0.145.0. The [official September 23 changelog](https://learn.chatgpt.com/docs/changelog) records the Sol/Luna catalog addition in CLI 0.156.1. A local comparison on October 18 found that 0.145.0 rejected `gpt-6-luna` + `max` with HTTP 400, while official stable 0.163.0 translated a short text successfully with the same account and settings. This identifies the older CLI as a compatibility issue in that environment, rather than proving Luna or Max unavailable in general. The compatibility comparison uses a short request; PDF and queue checks are described in the release notes.
 

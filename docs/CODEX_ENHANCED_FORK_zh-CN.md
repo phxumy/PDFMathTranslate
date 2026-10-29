@@ -68,9 +68,9 @@ Codex 登录凭据、用户论文、API Key 或翻译缓存。登录和账户规
 pdf2zh -i
 ```
 
-在 `Service` 中选择 `Codex`，再设置程序、模型和推理强度。字段规则及模型 ID 已于 **2026-10-18** 核对，完整表格、官方来源和同机 CLI 对照结果见 [简体中文 README 的 Codex 配置说明](./README_zh-CN.md#codex-fields)。
+在 `Service` 中选择 `Codex`，再设置程序、模型和推理强度。字段规则及模型 ID 已于 **2026-10-28** 核对，完整表格、官方来源和同机 CLI 对照结果见 [简体中文 README 的 Codex 配置说明](./README_zh-CN.md#codex-fields)。
 
-- `CODEX_MODEL` 使用精确 ID，例如 `gpt-6-luna`、`gpt-6.1-sol`、`gpt-6-sol` 或 `gpt-6-astra`，程序将它原样传给 CLI。留空则不传 `--model`，具体自动选择由所选 CLI 决定。
+- `CODEX_MODEL` 使用精确 ID，例如 `gpt-6-luna`、`gpt-6.1-terra`、`gpt-6.1-sol`、`gpt-6-sol` 或 `gpt-6-astra`，程序将它原样传给 CLI。留空则不传 `--model`，具体自动选择由所选 CLI 决定。
 - GPT-6 Luna 支持 `max`。当前翻译后端允许 `none`、`low`、`medium`、`high`、`xhigh`、`max`；从 `.5` 起，推理强度留空使用 `low`，不是旧文档写的 `none`。模型自身的支持范围仍需核对。
 - `.6` 内置官方稳定版 CLI `0.163.0`，`CODEX_BIN=codex` 或留空会优先选择它。旧 `.5.3` 包内仍为 `0.145.0`，可覆盖升级；若使用其他 CLI，填写完整路径并核对 `--version`。
 - 同机对照中，旧 CLI 拒绝 `gpt-6-luna` / `max`，官方稳定版 `0.163.0` 使用相同账号和参数成功返回短文本译文。这不等于模型 ID 无效，也不等于所有账号已开放。请按完整说明核验当前 CLI 与登录权限。

@@ -1,3 +1,17 @@
+## v1.9.11-codex.7 — 队列拖拽追加、模型选择与科研 PDF 修复
+
+PDF 队列已有文件时，继续拖入上传区域会追加到列表末尾，并保留已有文件与顺序。拖入文件不再触发浏览器打开该文件；翻译进行中仍禁止修改输入队列。
+
+- Codex 模型与推理强度改为可手动输入的下拉框，启动及切换到 Codex 时读取所选 CLI 的模型目录，也可点击刷新。选择模型会联动其支持的 effort；读取失败保留当前值。目录可能来自 CLI 缓存，实际调用权限仍以翻译请求结果为准。
+- 更新 GPT-6.1 Terra 的精确 ID `gpt-6.1-terra`。下拉档位取模型目录与当前翻译后端支持范围的交集，当前最高为 `max`；未知的新型号仍可手动填写。
+- 修复带空格的分图号（如 `Fig. 4 a`）被误判而导致全文翻译中断。恢复被检测框截断的正文、参考文献上标编号、短姓氏及斜体书籍/学位论文题名。
+- 修复正文和图注的跨栏/跨页衔接、被公式吞入的量名及解释性括号、表格数值与说明混排、补充材料标题和机构行。补充测量次数、电场、图中情形标签等明显误译的校验，继续保留完整性检查。
+- 双语 PDF 合并保留原页面透明度及混合色空间，消除同一译文页在单语和双语版之间的显示差异。
+
+内置 Codex CLI 保持 `0.163.0`。原文、实验数值、公式绘制、个人账号及缓存继续保留；私人文献、译文和审查记录不进入安装包。
+
+This release restores drag-and-drop appending to populated PDF queues, adds editable model/effort pickers backed by the selected official CLI, and repairs scientific PDF segmentation, bibliography recovery and bilingual-page compositing.
+
 ## v1.9.11-codex.6.2 — 修复全文翻译中断与科学文献排版
 
 修复部分药物化学论文翻译到表格页时出现“译文完整性校验失败”的问题：版面识别框截断了表题首尾单词，留下极短的独立残片，导致重试仍无法得到有效译文。

@@ -1,5 +1,5 @@
 """Version of the independently released desktop edition."""
 
-APP_VERSION = "v1.9.11-codex.6.2"
+APP_VERSION = "v1.9.11-codex.7"
 REPOSITORY = "phxumy/PDFMathTranslate"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"

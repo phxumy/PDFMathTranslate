@@ -21,7 +21,7 @@ _ABBREVIATED_REFERENCE = re.compile(
 _SENTENCE_END = re.compile(r"[.!?;:](?:\s+|$)")
 _INTERNAL_TOKEN = re.compile(r"\[\[PDF2ZH_(?:FLOW_\d+|ITALIC_\d+_(?:BEGIN|END))\]\]")
 _CONTINUING_ABBREVIATION = re.compile(
-    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|[ad]\.\s*c\.|viz\.|cf\.)"
+    r"\b(?:w\.\s*r\.\s*t\.|i\.\s*e\.|e\.\s*g\.|[ad]\.\s*c\.|viz\.|cf\.|vs\.)"
     r"(?=\s*[,;:]?\s+\S)",
     re.IGNORECASE,
 )
@@ -75,6 +75,14 @@ def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
         tuple(match.span() for match in _CONTINUING_ABBREVIATION.finditer(text))
         + statistical_abbreviation_spans(text)
         + tuple(match.span() for match in _DEFINED_TABLE_ABBREVIATION.finditer(text))
+        + tuple(
+            match.span("name")
+            for match in re.finditer(
+                r"\b(?:fabricated|prepared|developed|proposed|reported|shown|demonstrated|built|designed|thesis|paper|work|study|book)\s+by\s+"
+                r"(?P<name>(?:[A-Z]\.\s*){1,3}[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’\-]{2,})",
+                text,
+            )
+        )
     )
 
 

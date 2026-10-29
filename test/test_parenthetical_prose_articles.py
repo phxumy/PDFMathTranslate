@@ -26,6 +26,8 @@ def test_article_of_descriptive_parenthesis_returns_to_prose_with_original_symbo
     for article, phrase in (
         ("a", " relative offset in frequency)"),
         ("an", " additional error term)"),
+        ("a", " proxy of {v1})"),
+        ("an", " estimate for the decay time)"),
     ):
         text, formula, prose = release(phrase, article=article)
         assert text == "Frequency error {v0} (" + article + phrase

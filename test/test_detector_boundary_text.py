@@ -124,3 +124,31 @@ def test_arbitrary_openers_and_protected_number_markers_are_not_attached():
         elif change == "code":
             protected.add(id(chars[0]))
         assert not recover(converter, chars, protected), change
+
+
+def test_clipped_grammatical_line_prefix_rejoins_its_body_paragraph():
+    for text, prefix in (
+        ("The wafer is coated before exposure to air.", "The "),
+        ("is exposed to air only after oxidation.", "is e"),
+    ):
+        converter, page, chars = setup(text, len(text) - 1, 2)
+        converter.layout[0][:, : int(chars[len(prefix)].x0)] = 1
+        draft = converter.receive_layout(page, preview_only=True)
+        assert draft.sstk == [text]
+
+
+def test_short_label_cannot_join_across_a_column_or_protected_glyph():
+    for change in ("gap", "protected", "font"):
+        text = "The wafer is coated before exposure."
+        converter, _, chars = setup(text, len(text) - 1, 2)
+        converter.layout[0][:, : int(chars[4].x0)] = 1
+        protected = set()
+        if change == "gap":
+            for char in chars[:4]:
+                char.x0 -= 30
+                char.x1 -= 30
+        elif change == "protected":
+            protected.add(id(chars[3]))
+        else:
+            chars[3].fontname = "OtherFont"
+        assert not recover(converter, chars, protected), change

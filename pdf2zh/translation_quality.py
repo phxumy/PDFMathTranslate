@@ -164,6 +164,14 @@ def is_spectroscopy_peak_list(text: str) -> bool:
 
 def is_math_expression_only(text: str) -> bool:
     """Recognize a closed mathematical operator expression around PDF formulas."""
+    number = r"[+−-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+−-]?\d+)?"
+    unit = r"(?:[munpkMGTμµ]?(?:Hz|s|V|A|F|H|m|Ω|Ω|W|K)|eV|eÅ|%)"
+    power = r"(?:\^?[+−-]?\d+|[²³])?"
+    if re.fullmatch(
+        rf"\s*{number}(?:\s*(?:±|–|-)\s*{number})?\s*{unit}{power}(?:/{unit}{power})?\s*",
+        text,
+    ):
+        return True
     # A table may spell a subscript with an actual underscore in an ordinary
     # font (k_inact), then switch fonts for Ki and the units. This complete
     # symbol-only grammar also handles labels without any formula placeholder;
@@ -316,8 +324,99 @@ def has_suspicious_physics_translation(source: str, target: str) -> bool:
     quantum state populations. The omitted quantity check uses a complete noun
     phrase and accepts the common Chinese variants, without prescribing syntax.
     """
+    for area in re.finditer(r"\barea\s+(\{v\d+\})\s+of\b", source, re.I):
+        if re.search(r"\bplott?\w*\b", source, re.I) and re.search(
+            r"(?:函数|橫坐標|横坐标)\s*" + re.escape(area[1]), target
+        ):
+            return True
+    for factor in re.finditer(
+        r"\b(?:enhanced|increased|raised) by a factor of\s+(\{v\d+\}|\d+(?:\.\d+)?)",
+        source,
+        re.I,
+    ):
+        if re.search(
+            r"(?:提高|增加|增大|增强|升高)了\s*" + re.escape(factor[1]) + r"\s*倍",
+            target,
+        ):
+            return True
+    for threshold in re.finditer(
+        r"\brange of reasonable values\s+(\{v\d+\})", source, re.I
+    ):
+        if re.search(
+            r"(?:平面|岛|区域)上(?:观测到|观察到|检测到|发现|出现)?\s*"
+            + re.escape(threshold[1]),
+            target,
+        ):
+            return True
+    if re.search(
+        r"\bwidth of a peak in\s+\{v\d+\}\s+vs\.?\s+(?:E-field|electric field)\b",
+        source,
+        re.I,
+    ) and re.search(r"峰宽纳入\s*\{v\d+\}|将电场作为[^。]{0,30}判据", target):
+        return True
+    shift_citation = re.search(r"\bAC[- ]stark shift\s*(\{v\d+\})", source, re.I)
+    if shift_citation:
+        shift = re.search(
+            r"(?:Stark|斯塔克)[^。！？；]{0,12}?(?:频移|頻移|位移)", target, re.I
+        )
+        citation = target.find(shift_citation[1])
+        if (
+            shift
+            and citation > shift.end()
+            and re.search(r"[。！？；]", target[shift.end() : citation])
+        ):
+            return True
     source = _strip_non_prose(source)
     target = _strip_non_prose(target)
+    if re.search(r"\btrans[-\s]*mon\b", source, re.I) and re.search(
+        r"跨能[级級]", target
+    ):
+        return True
+    if (
+        re.search(r"\bconnected\s+a\s+via\b", source, re.I)
+        and re.search(r"\bor\s+b\s+via\b", source, re.I)
+        and re.search(r"\b(?:figure|fig\.)\s+S?\d", source, re.I)
+        and re.search(r"连接到\s*[abc](?![A-Za-z])", target)
+    ):
+        return True
+    if (
+        re.search(r"\bfluctuations of\b", source, re.I)
+        and re.search(r"\btimes?\b", source, re.I)
+        and re.search(
+            r"\bfluc[-\s]*tuations were[^.]{0,100}\bfor the optimized E-field",
+            source,
+            re.I,
+        )
+        and re.search(
+            r"优化(?:后的)?电场(?:的)?(?:波动|涨落)[^。]{0,20}(?:高|大|强)", target
+        )
+    ):
+        return True
+    if (
+        re.search(r"\b(?:electric|E)[- ]fields?\b", source, re.I)
+        and not re.search(r"\bmagnet\w*\b", source, re.I)
+        and "磁场" in target
+    ):
+        return True
+    for name in re.finditer(
+        r"\b(?:fabricated|prepared|developed|proposed|reported|shown|demonstrated|built|designed|thesis|paper|work|study|book)\s+by\s+"
+        r"(?P<name>(?:[A-Z]\.\s*){1,3}[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’\-]{2,})",
+        source,
+    ):
+        if re.sub(r"\s+", "", name["name"]) not in re.sub(r"\s+", "", target):
+            return True
+    if (
+        re.search(r"\bshots?\b", source, re.I)
+        and re.search(
+            r"\b(?:qubit|quantum|TLS|circuits?|measurements?)\b", source, re.I
+        )
+        and re.search(r"射击|射擊", target)
+    ):
+        return True
+    if re.search(
+        r"loaded quality factor for all (?:four|\d+) electrodes", source, re.I
+    ) and re.search(r"(?:四|4)\s*个电极[^。]{0,25}(?:均为|各为|分别为)", target):
+        return True
     if (
         re.search(r"\bnear[- ]term\s+(?:quantum\s+)?processors?\b", source, re.I)
         and not re.search(r"\bproximal\b", source, re.I)
@@ -427,6 +526,11 @@ def has_incomplete_scientific_caption(source: str, target: str) -> bool:
         for panel in panels:
             if re.search(rf"[（(]\s*{panel}\s*[）)]|分图\s*{panel}\b", target) is None:
                 return True
+        bare_panels = set(re.findall(r"[.;]\s+([a-z])\s+(?=[A-Z][a-z])", source))
+        if {"a", "b"} <= bare_panels:
+            for panel in bare_panels:
+                if re.search(rf"(?<![A-Za-z]){panel}(?![A-Za-z])", target) is None:
+                    return True
     if re.search(r"\bone[- ]dimensional\s+cuts?\b", source, re.I):
         if (
             re.search(r"截线|截線|切线|切線|剖面|截面|切面|切片|剖线|剖線", target)
@@ -543,8 +647,12 @@ _SOFTWARE_PRODUCT_SUFFIXES = (
 )
 _SOURCE_CROSS_REFERENCE_IDENTIFIER = (
     r"\{\{v\d+\}\}|\{v\d+\}|"
-    r"[A-Za-z]\.\d+(?:\.\d+)*[A-Za-z]?(?:\s*[（(]\s*[A-Za-z]\s*[）)])?|"
-    r"[A-Za-z]?\d+(?:\.\d+)*[A-Za-z]?(?:\s*[（(]\s*[A-Za-z]\s*[）)])?|"
+    r"(?:[A-Za-z]\.)?[A-Za-z]?\d+(?:\.\d+)*"
+    # PDF extraction can separate a panel letter from its figure number.
+    # Require punctuation/end after a spaced bare letter, so the article in
+    # "Figure 4 a useful example" is not swallowed as a panel suffix.
+    r"(?:[A-Za-z]|\s*[（(]\s*[A-Za-z]\s*[）)]|"
+    r"\s+[A-Za-z](?=\s*(?:[,;:.）)\]–—-]|$)))?|"
     r"(?-i:[IVXLCDM]+)"
 )
 _PANEL_IDENTIFIER_RE = re.compile(
@@ -1629,7 +1737,7 @@ def _has_untranslated_mathematical_prose(source: str, target: str) -> bool:
         target,
     ):
         return True
-    for word in ("sharp", "sharpness"):
+    for word in ("sharp", "sharpness", "million", "billion"):
         pattern = rf"(?<![A-Za-z]){word}(?![A-Za-z])"
         if re.search(pattern, source) and re.search(pattern, target):
             return True

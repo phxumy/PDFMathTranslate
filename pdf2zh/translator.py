@@ -1308,8 +1308,22 @@ class ScientificTranslator(BaseTranslator):
     def _scientific_fidelity_hint() -> str:
         return (
             "Preserve every measured quantity, qualifier, condition, and citation, "
-            "including bare numbered citations such as [12]. Do not summarize "
-            "captions or drop a sensitivity, maximum, or comparison. Preserve the "
+            "including bare numbered citations such as [12]. "
+            "A citation token attached to a named effect must stay with that "
+            "effect's clause, not move after the next sentence. Do not summarize "
+            "captions or drop a sensitivity, maximum, or comparison. "
+            "Figure-panel letters a, b, c are case labels, not indefinite articles "
+            "or electrical destinations. A measured quantity's fluctuations under "
+            "an optimized field are not fluctuations of that applied field itself. "
+            "Keep a physical variable attached to the quantity it names: a plot "
+            "versus area A is a function of that area, not a function named A. "
+            "A peak in Y versus X means a peak of the Y(X) curve; including its "
+            "width as a criterion means using that peak width, not using X itself. "
+            "Keep a threshold inequality attached to the range of values it bounds, "
+            "not to a physical location. Increased by a factor of N means N times "
+            "the original value (变为原来的 N 倍), not an increase of N times "
+            "(增加了 N 倍). Preserve the factor token without arithmetic rewriting. "
+            "Preserve the "
             "scope of negation and of constructions such as 'not only ... but ...'. "
             "Keep distribution adjectives attached to the random variables they "
             "describe, even when abbreviations contain periods. In particular, "
@@ -1342,6 +1356,8 @@ class ScientificTranslator(BaseTranslator):
             "In quantum-state contexts, population means state occupation "
             "(Chinese: 布居), not demographic population; use the terminology "
             "appropriate to the scientific context. "
+            "Preserve coined circuit names such as transmon and fluxonium in "
+            "Latin spelling; transmon does not mean 跨能级. "
             "If a prose fragment introduces a following displayed expression, "
             "for example by ending with 'computing the subgradient of', leave "
             "the expression outside the translation and write a natural lead-in "
@@ -2316,6 +2332,34 @@ class ScientificTranslator(BaseTranslator):
         formula_context: list[dict[str, str]],
     ) -> bool:
         if not cls._validate_formula_translation(source, target):
+            return False
+        # A protected atom may contain a prose closing parenthesis ("T1)" or
+        # ">50%)"). Validate its actual delimiter scope too: checking only
+        # visible prose accepts duplicate closers and a percentage moved into
+        # the sentence slot belonging to a later field threshold.
+        values = {
+            item["placeholder"]: item["unicode_formula"] for item in formula_context
+        }
+
+        def unmatched_parentheses(text):
+            expanded = (
+                cls.FORMULA_TOKEN_RE.sub(
+                    lambda match: values.get(match.group(), match.group()), text
+                )
+                .replace("（", "(")
+                .replace("）", ")")
+            )
+            depth = minimum = 0
+            for char in expanded:
+                depth += (char == "(") - (char == ")")
+                minimum = min(minimum, depth)
+            return -minimum, depth - minimum
+
+        source_closes, source_opens = unmatched_parentheses(source)
+        target_closes, target_opens = unmatched_parentheses(target)
+        if any(re.search(r"[()（）]", value) for value in values.values()) and (
+            target_closes > source_closes or target_opens > source_opens
+        ):
             return False
         # Reject the most direct form of an accidental formula expansion.  Comparing
         # against the source count avoids rejecting a unit/name already visible in it.

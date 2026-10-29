@@ -256,8 +256,13 @@ def find_reference_markers(
         ),
         (
             r"(?<![\dA-Za-z])(\d(?:\s*\d){0,2})"
-            r"(?=[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{2,}[,\s])",
+            r"(?=[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+[,\s])",
             "tight-surname",
+        ),
+        (
+            r"(?<![\dA-Za-z])(\d(?:\s*\d){0,2})"
+            r"(?=[A-Z][A-Za-z]{0,2}\s+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+\b)",
+            "tight-given-initial",
         ),
     )
     for pattern, kind in numbered_patterns:
@@ -618,7 +623,7 @@ def looks_like_reference_author_block(text: str) -> bool:
 
     compact = _FORMULA_RE.sub("", text)
     compact = re.sub(
-        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[（(]\s*[Ss]?\d+\s*[)）]|[Ss]?\d+[.)．）])\s*",
+        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[（(]\s*[Ss]?\d+\s*[)）]|[Ss]?\d+[.)．）]|\d{1,3}(?=[A-ZÀ-ÖØ-Þ]))\s*",
         "",
         compact,
     )
@@ -720,7 +725,7 @@ def looks_like_reference_title_prefix(text: str) -> bool:
         return False
     author = compact.rstrip("., ")
     author_without_label = re.sub(
-        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[（(]\s*[Ss]?\d+\s*[)）]|[Ss]?\d+[.)．）])\s*",
+        r"^\s*(?:[\[［]\s*[Ss]?\d+\s*[\]］]|[（(]\s*[Ss]?\d+\s*[)）]|[Ss]?\d+[.)．）]|\d{1,3}(?=[A-ZÀ-ÖØ-Þ]))\s*",
         "",
         author,
     )
