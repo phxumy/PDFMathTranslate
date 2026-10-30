@@ -65,7 +65,7 @@ Quick start:
 
 ### New in v1.9.11-codex.5.4
 
-- Bundle official stable Codex CLI 0.163.0 so the default executable supports current models such as `gpt-6-luna`. The CLI archive is pinned by SHA-256 in the release workflow.
+- Bundle official stable Codex CLI 0.166.0 so the default executable supports current models such as `gpt-6-luna`. The CLI archive is pinned by SHA-256 in the release workflow.
 - Select multiple PDFs and translate them in displayed order. Completed mono/bilingual downloads remain available if a later file fails. Stop halts the queue; retrying the same files/settings in the current session skips completed outputs unless Ignore cache is selected.
 - Show structured model/access rejections directly instead of retrying them into an opaque `RetryError`. The model documentation now distinguishes official IDs, CLI versions and account availability.
 
@@ -95,7 +95,7 @@ Quick start:
 - Remaining time uses a rolling range from actually completed pages, excludes the first cold-start sample and waits for sufficient observations. Font processing and final PDF writing are shown as a separate stage.
 - A Windows EXE installer and explicit in-app GitHub updates, with size and SHA-256 verification before installation. Translation must finish or be cancelled before updating.
 
-The release includes the official stable **Codex CLI 0.163.0 program** so a separate
+The release includes the official stable **Codex CLI 0.166.0 program** so a separate
 Python or Codex installation is unnecessary. It does **not** include an account,
 subscription, free quota, login credentials, API keys, user PDFs, or translation
 caches. The desktop interface is bound to `127.0.0.1`, but text is sent to the
@@ -105,9 +105,11 @@ for account and sign-in details.
 
 ### Codex fields and model IDs (checked October 28, 2026)
 
-These field rules apply to desktop releases codex.5 through codex.7.2. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
+These field rules apply to desktop releases codex.5 through codex.7.3. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
 
 Starting with codex.7.2, the bundled CLI uses independent credentials under `%USERPROFILE%\.config\PDFMathTranslate\codex`, including when `CODEX_BIN` explicitly points to the bundled executable. Login, logout, account/model queries, and translation all use this scope; inherited OpenAI credentials are not reused. Upgrading requires signing in once, without copying or modifying personal Codex credentials. An external CLI selected by the user retains its existing `CODEX_HOME` and credential store. The account panel displays email, plan, quota remaining percentages and reset times from the official account RPCs when available. Failed queries show unavailable, and API-key billing balances are not supplied by this interface. Separate sign-ins do not create extra account quota.
+
+Codex.7.3 upgrades the bundled CLI to 0.166.0 and adds **取消下载** during update downloads. Cancelling prevents installer launch, removes the unfinished download, and restores the retry controls. The existing independent login from codex.7.2 is retained.
 
 | Field | Behavior |
 | --- | --- |

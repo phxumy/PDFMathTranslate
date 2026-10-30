@@ -34,6 +34,8 @@ def ui(tmp_path, monkeypatch):
         "refresh_codex_account",
         "logout_codex_account",
         "install_app_update",
+        "_update_download_controls",
+        "cancel_app_update_download",
     }
     tree.body = [
         node
@@ -84,6 +86,11 @@ def ui(tmp_path, monkeypatch):
         get_codex_status=Mock(),
         logout_codex=Mock(),
     )
+    ns["update_manager"].download_state.return_value = {
+        "busy": False,
+        "cancellable": False,
+        "available": True,
+    }
     exec(compile(tree, str(source), "exec"), ns)
     return ns
 
@@ -267,7 +274,36 @@ def test_update_download_yields_progress(ui):
 
     ui["update_manager"].install.side_effect = install
     messages = list(ui["install_app_update"]())
-    assert messages[1:] == ["50%", "done"]
+    assert [row[0] for row in messages[1:]] == ["50%", "done"]
+    assert messages[-1][1:] == (
+        {"interactive": True},
+        {"visible": False, "interactive": False},
+        {"interactive": True},
+    )
+
+
+def test_update_cancel_button_is_enabled_only_during_download(ui):
+    ui["update_manager"].download_state.return_value = {
+        "busy": True,
+        "cancellable": True,
+        "available": True,
+    }
+    result = ui["_update_download_controls"]("downloading")
+    assert result[1:] == (
+        {"interactive": False},
+        {"visible": True, "interactive": True},
+        {"interactive": False},
+    )
+    ui["update_manager"].cancel_download.return_value = "正在取消"
+    ui["update_manager"].download_state.return_value = {
+        "busy": True,
+        "cancellable": False,
+        "available": True,
+    }
+    cancelled = ui["cancel_app_update_download"]()
+    assert cancelled[0] == "正在取消" and not cancelled[2]["visible"]
+    assert not cancelled[1]["interactive"]
+    ui["update_manager"].cancel_download.assert_called_once()
 
 
 def test_successful_login_refreshes_identity_and_quota_then_stops_polling(ui):

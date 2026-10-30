@@ -1,3 +1,12 @@
+## v1.9.11-codex.7.3 — Codex CLI 0.166.0 与取消更新下载
+
+- 内置官方稳定版 Codex CLI 从 `0.163.0` 升级到 `0.166.0`，保留官方 Windows 完整包中的执行服务和运行资源，并锁定官方附件 SHA-256。
+- 更新下载期间新增“取消下载”按钮。取消会停止下载、清理本次未完成的安装文件并恢复重试入口，不启动安装程序。校验完成并进入安装阶段后不再提供下载取消。
+- 继续使用 `.7.2` 的软件独立账号目录。内置 CLI 登录、账号额度查询、模型列表和翻译保持隔离；指定用户自己的 CLI 时继续沿用其登录配置。
+- 从 `.7.2` 升级会保留软件独立账号、设置和译文；从更早版本首次使用内置 CLI 时需在本软件中登录。
+
+This release bundles the verified official Codex CLI 0.166.0 Windows package and adds cancellation during update downloads. Cancellation prevents installer launch and allows a fresh retry. The existing independent account directory and user settings are retained.
+
 ## v1.9.11-codex.7.2 — 独立 Codex 登录与账号额度显示
 
 内置 Codex CLI 改用软件专属的凭据目录，登录、切换、退出、账号查询、模型查询及翻译均与桌面端、个人 CLI 隔离。显式选择安装目录中的内置 `codex.exe` 仍使用独立登录；指定用户自己的外部 CLI 时，沿用该 CLI 的登录和配置，界面会标明其作用范围。

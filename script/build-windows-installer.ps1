@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string] $ReleaseRoot,
-    [string] $ReleaseTag = "v1.9.11-codex.7.2",
+    [string] $ReleaseTag = "v1.9.11-codex.7.3",
     [string] $OutputRoot,
     [string] $Compiler
 )
@@ -31,7 +31,7 @@ if (-not $Compiler) {
 if (-not (Test-Path -LiteralPath $Compiler -PathType Leaf)) {
     throw "Install Inno Setup 6 and provide -Compiler with the path to ISCC.exe."
 }
-foreach ($required in @("PDFMathTranslate-Codex.exe", "pdf2zh.exe", "runtime\python.exe", "site-packages\pdf2zh\version.py", "codex-cli\x86_64-pc-windows-msvc\bin\codex.exe", "LICENSE")) {
+foreach ($required in @("PDFMathTranslate-Codex.exe", "pdf2zh.exe", "runtime\python.exe", "site-packages\pdf2zh\version.py", "codex-cli\x86_64-pc-windows-msvc\bin\codex.exe", "codex-cli\x86_64-pc-windows-msvc\bin\codex-code-mode-host.exe", "codex-cli\x86_64-pc-windows-msvc\bin\codex-exec-server.exe", "LICENSE")) {
     if (-not (Test-Path -LiteralPath (Join-Path $ReleaseRoot $required))) { throw "Missing required file: $required" }
 }
 $versionSource = Get-Content -LiteralPath (Join-Path $ReleaseRoot "site-packages\pdf2zh\version.py") -Raw

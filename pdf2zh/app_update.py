@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -28,6 +28,15 @@ class UpdateError(RuntimeError):
     """An update was refused or could not be verified."""
 
 
+class UpdateCancelled(UpdateError):
+    """The user cancelled before the installer handoff."""
+
+
+def _check_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise UpdateCancelled("更新下载已取消。")
+
+
 def version_key(version: str) -> tuple[int, ...]:
     match = _VERSION.fullmatch(version)
     if not match:
@@ -39,7 +48,7 @@ def _release_url(url: str, tag: str, name: str) -> bool:
     return url == f"{REPOSITORY_URL}/releases/download/{tag}/{name}"
 
 
-def _verified_response(url: str, *, stream: bool = False):
+def _verified_response(url: str, *, stream: bool = False, cancel_event=None):
     """Follow HTTPS redirects only to GitHub's release download infrastructure."""
     allowed = {
         "api.github.com",
@@ -48,6 +57,7 @@ def _verified_response(url: str, *, stream: bool = False):
         "objects.githubusercontent.com",
     }
     for _ in range(6):
+        _check_cancelled(cancel_event)
         parsed = urlparse(url)
         if (
             parsed.scheme != "https"
@@ -60,15 +70,22 @@ def _verified_response(url: str, *, stream: bool = False):
         response = requests.get(
             url,
             headers={"User-Agent": f"PDFMathTranslate/{APP_VERSION}"},
-            timeout=(15, 60),
+            timeout=(10, 5) if cancel_event is not None else (15, 60),
             allow_redirects=False,
             stream=stream,
         )
+        if cancel_event is not None and cancel_event.is_set():
+            response.close()
+            raise UpdateCancelled("更新下载已取消。")
         if response.is_redirect:
             url = response.headers.get("Location", "")
             response.close()
             continue
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.RequestException:
+            response.close()
+            raise
         return response
     raise UpdateError("更新下载重定向次数过多。")
 
@@ -122,6 +139,8 @@ class UpdateManager:
         self._lock = Lock()
         self._translations = 0
         self._installing = False
+        self._download_cancel: Event | None = None
+        self._download_response = None
         self._release: Release | None = None
         self._close_desktop: Callable[[], None] | None = None
         self._status = "尚未检查更新。"
@@ -151,8 +170,47 @@ class UpdateManager:
         with self._lock:
             return self._status
 
+    def download_state(self) -> dict:
+        with self._lock:
+            return {
+                "busy": self._installing,
+                "cancellable": self._download_cancel is not None
+                and not self._download_cancel.is_set(),
+                "available": self._release is not None,
+            }
+
+    def cancel_download(self) -> str:
+        """Signal cancellation without waiting on a blocked network reader."""
+        with self._lock:
+            if self._download_cancel is None:
+                return (
+                    "安装程序即将或已经启动，下载阶段已结束。"
+                    if self._installing
+                    else self._status
+                )
+            if self._download_cancel.is_set():
+                return self._status
+            self._download_cancel.set()
+            self._status = "正在取消更新下载…"
+            response = self._download_response
+            message = self._status
+        if response is not None:
+
+            def close_response():
+                try:
+                    response.close()
+                except (OSError, ValueError, requests.RequestException):
+                    pass
+
+            Thread(
+                target=close_response, name="pdf2zh-update-cancel", daemon=True
+            ).start()
+        return message
+
     def _report(self, message: str, callback=None):
         with self._lock:
+            if self._download_cancel is not None and self._download_cancel.is_set():
+                message = "正在取消更新下载…"
             self._status = message
         if callback:
             callback(message)
@@ -160,6 +218,8 @@ class UpdateManager:
     def check(self) -> dict:
         """Check only; never download or launch an installer automatically."""
         with self._lock:
+            if self._installing:
+                raise UpdateError("更新正在进行，请完成或取消下载后再检查更新。")
             self._release = None
         try:
             with _verified_response(
@@ -205,16 +265,24 @@ class UpdateManager:
             release = self._release
             close_desktop = self._close_desktop
             self._installing = True
+            cancel_event = Event()
+            self._download_cancel = cancel_event
 
         launched = False
+        cache = None
         try:
+            _check_cancelled(cancel_event)
             self._report("正在下载 SHA-256 校验文件…", progress_callback)
-            with _verified_response(release.checksum_url) as response:
+            with _verified_response(
+                release.checksum_url, cancel_event=cancel_event
+            ) as response:
+                _check_cancelled(cancel_event)
                 if len(response.content) > 1024 * 1024:
                     raise UpdateError("更新校验文件大小异常。")
                 expected = _checksum(response.text)
             if release.digest and release.digest != f"sha256:{expected}":
                 raise UpdateError("GitHub 记录的附件摘要与校验文件不一致。")
+            _check_cancelled(cancel_event)
 
             cache = Path(tempfile.mkdtemp(prefix="PDFMathTranslate-update-"))
             partial = cache / (INSTALLER_NAME + ".part")
@@ -223,9 +291,15 @@ class UpdateManager:
             received = 0
             last_percent = -1
             try:
-                with _verified_response(release.installer_url, stream=True) as response:
+                with _verified_response(
+                    release.installer_url, stream=True, cancel_event=cancel_event
+                ) as response:
+                    with self._lock:
+                        self._download_response = response
+                    _check_cancelled(cancel_event)
                     with partial.open("xb") as target:
-                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                            _check_cancelled(cancel_event)
                             if not chunk:
                                 continue
                             received += len(chunk)
@@ -243,11 +317,19 @@ class UpdateManager:
                                     progress_callback,
                                 )
                                 last_percent = percent
+                _check_cancelled(cancel_event)
                 if received != release.size or digest.hexdigest() != expected:
                     raise UpdateError("安装程序 SHA-256 或大小校验失败，未执行更新。")
                 partial.rename(installer)
             finally:
                 partial.unlink(missing_ok=True)
+            # Serialize the last cancellation check with committing the handoff.
+            # After this point a cancellation request must not claim success.
+            with self._lock:
+                _check_cancelled(cancel_event)
+                self._download_cancel = None
+                self._download_response = None
+            self._report("下载及校验完成，正在启动安装程序…", progress_callback)
             command = [
                 str(installer),
                 "/SILENT",
@@ -271,13 +353,39 @@ class UpdateManager:
             self._report(message, progress_callback)
             close_desktop()
             return message
-        except UpdateError:
-            raise
-        except (requests.RequestException, OSError) as exc:
+        except (UpdateError, requests.RequestException, OSError, ValueError) as exc:
+            if not launched and cancel_event.is_set():
+                cleaned = self._clean_download(cache)
+                with self._lock:
+                    self._download_cancel = None
+                message = "已取消更新下载，未启动安装，可以重新下载。"
+                if not cleaned:
+                    message += f" 临时文件未能清理，可手动删除：{cache}"
+                self._report(message, progress_callback)
+                return message
+            if isinstance(exc, UpdateError):
+                raise
             raise UpdateError("更新下载或启动失败，当前程序未被替换，请重试。") from exc
         finally:
+            if not launched:
+                self._clean_download(cache)
             with self._lock:
+                self._download_cancel = None
+                self._download_response = None
                 self._installing = launched
+
+    @staticmethod
+    def _clean_download(cache):
+        if cache is None:
+            return True
+        try:
+            (cache / (INSTALLER_NAME + ".part")).unlink(missing_ok=True)
+            (cache / INSTALLER_NAME).unlink(missing_ok=True)
+            if cache.exists():
+                cache.rmdir()
+            return True
+        except OSError:
+            return False
 
 
 update_manager = UpdateManager()

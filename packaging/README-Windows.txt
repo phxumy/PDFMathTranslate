@@ -25,6 +25,8 @@ Use Check for updates in the application, then explicitly click Download and
 install. The application checks only https://github.com/phxumy/PDFMathTranslate,
 downloads its official EXE attachment, verifies SHA-256 and the expected size,
 then closes and upgrades. Updates cannot install while translation is running.
+Use Cancel download to stop before installer handoff; a cancelled download can
+be retried. The cancellation button is hidden once installation begins.
 The app reopens after a successful in-app upgrade. A failed download or hash
 check never runs the installer. Browser mode links to the release page.
 
@@ -57,7 +59,7 @@ An account with tighter rate limits may work better with lower concurrency.
 
 WHAT IS INCLUDED
 - The Windows desktop shell and command-line/browser launchers.
-- Official stable Codex CLI 0.163.0, Node.js 24.19.0, and locked browser bridge packages.
+- Official stable Codex CLI 0.166.0, Node.js 24.19.0, and locked browser bridge packages.
 - Python and pinned dependencies, plus offline layout/OCR/font assets.
 - Source references and third-party license notices.
 No account, allowance, API key, credentials, or personal documents are bundled.

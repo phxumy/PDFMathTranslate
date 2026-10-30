@@ -1198,6 +1198,25 @@ def check_app_updates():
         return f"检查更新失败：{exc}", gr.update(interactive=False)
 
 
+def _update_download_controls(message):
+    state = update_manager.download_state()
+    return (
+        message,
+        gr.update(
+            interactive=desktop_mode and state["available"] and not state["busy"]
+        ),
+        gr.update(
+            visible=desktop_mode and state["cancellable"],
+            interactive=state["cancellable"],
+        ),
+        gr.update(interactive=not state["busy"]),
+    )
+
+
+def cancel_app_update_download():
+    return _update_download_controls(update_manager.cancel_download())
+
+
 def install_app_update():
     events = Queue()
 
@@ -1211,13 +1230,14 @@ def install_app_update():
         events.put((True, message))
 
     Thread(target=run, name="pdf2zh-update-download", daemon=True).start()
-    yield "正在准备更新…"
+    yield _update_download_controls("正在准备更新…")
     while True:
         try:
             finished, message = events.get(timeout=1.0)
         except Empty:
+            yield _update_download_controls(update_manager.status())
             continue
-        yield message
+        yield _update_download_controls(message)
         if finished:
             break
 
@@ -1991,13 +2011,32 @@ with gr.Blocks(
                     update_install_btn = gr.Button(
                         "下载并安装更新", interactive=False, visible=desktop_mode
                     )
+                    update_cancel_btn = gr.Button(
+                        "取消下载", interactive=False, visible=False
+                    )
                 gr.Markdown(
-                    "安装更新前请完成或取消翻译。下载并校验成功后关闭软件，由安装程序完成更新；保留账号与设置。"
+                    "安装更新前请完成或取消翻译。下载中可取消，取消后可重新下载。"
+                    "下载并校验成功后关闭软件，由安装程序完成更新；保留账号与设置。"
                 )
                 update_check_btn.click(
                     check_app_updates, outputs=[update_status, update_install_btn]
                 )
-                update_install_btn.click(install_app_update, outputs=update_status)
+                update_download_outputs = [
+                    update_status,
+                    update_install_btn,
+                    update_cancel_btn,
+                    update_check_btn,
+                ]
+                update_install_btn.click(
+                    install_app_update, outputs=update_download_outputs, api_name=False
+                )
+                update_cancel_btn.click(
+                    cancel_app_update_download,
+                    outputs=update_download_outputs,
+                    queue=False,
+                    show_progress="hidden",
+                    api_name=False,
+                )
             tech_details_tog = gr.Markdown(
                 tech_details_string,
                 elem_classes=["secondary-text"],

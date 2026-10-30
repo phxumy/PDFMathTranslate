@@ -53,7 +53,7 @@
 3. 双击 `PDFMathTranslate-Codex.exe`。
 4. 在 `Service` 中选择 `Codex`，上传 PDF 后开始翻译。
 
-`.5.4` 发布包内置官方稳定版 **Codex CLI 0.163.0**，无需另装 Python 或 Codex CLI；但不包含
+`.7.3` 发布包内置官方稳定版 **Codex CLI 0.166.0**，无需另装 Python 或 Codex CLI；但不包含
 账号、套餐或免费额度、登录凭据、API Key、用户论文或翻译缓存。界面只绑定
 `127.0.0.1`，选择云翻译服务后，待翻译文本仍会发送给对应服务商；Codex 后端会使用
 你登录的账户调用 OpenAI/Codex 服务。账户和登录方式以 [OpenAI 官方 Codex CLI 说明](https://developers.openai.com/codex/cli)为准。
@@ -72,7 +72,7 @@
 
 | 字段 | 建议填写 | 留空时的实际行为 |
 | --- | --- | --- |
-| `CODEX_BIN` | `.5.4` 保持默认 `codex` 即使用包内稳定版 CLI `0.163.0`；自定义时填写其他 `codex.exe` 的完整路径。 | 留空等同于 `codex`，依次查找包内 CLI、`CODEX_CLI_PATH`、`PATH` 和 Codex Desktop。显式路径不存在时直接报错。 |
+| `CODEX_BIN` | `.7.3` 保持默认 `codex` 即使用包内稳定版 CLI `0.166.0`；自定义时填写其他 `codex.exe` 的完整路径。 | 留空等同于 `codex`，依次查找包内 CLI、`CODEX_CLI_PATH`、`PATH` 和 Codex Desktop。显式路径不存在时直接报错。 |
 | `CODEX_PROFILE` | 一般留空；需要时填写所选 CLI 支持的 profile 名称。 | 不传 `--profile`。内置 CLI 的快速路径还会忽略用户配置和规则；兼容路径的配置解析由所选 CLI 决定。 |
 | `CODEX_MODEL` | 填写下表中的精确 ID，或留空让 CLI 选择。 | 不传 `--model`，不固定到某一个模型。最终取决于所选 CLI、其可用配置和账户；不要据此推断它会跟随桌面应用当前选择的模型。 |
 | `CODEX_REASONING_EFFORT` | 默认 `low`，也可填写所选模型支持的强度。 | 从 `.5` 起，空值明确转换为 `low`，并通过命令行覆盖 CLI/profile 的默认值。旧文档所写的“留空变成 `none`”已不适用。 |
