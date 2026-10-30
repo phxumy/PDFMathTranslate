@@ -4,11 +4,18 @@ on:
   push:
     tags:
       - "v*-codex.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing version tag to build and publish"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   PYTHON_VERSION: "3.12.9"
   PYTHON_EMBED_SHA256: "615861fb801e8b04c847598db4e1e46e4b046295017caa37cb5486dde72b5865"
   PYSTAND_VERSION: "1.1.4"
@@ -33,6 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@f94ec6bedd8674c4426838e6b50417d36b6ab231 # v5.3.1
@@ -53,8 +61,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if ("${{ github.ref_name }}" -notmatch '^v\d+\.\d+\.\d+-codex\.\d+(?:\.\d+)?$') {
-              throw "Unexpected release tag: ${{ github.ref_name }}"
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+-codex\.\d+(?:\.\d+)?$') {
+              throw "Unexpected release tag: $env:RELEASE_TAG"
           }
           uv lock --check
           if ($LASTEXITCODE -ne 0) { throw "Dependency lock validation failed." }
@@ -198,12 +206,14 @@ jobs:
               Assert-Sha256 $item.Path $item.Sha256
           }
 
-          $sourceUrl = "https://github.com/$env:GITHUB_REPOSITORY/tree/${{ github.ref_name }}"
-          $sourceArchive = "https://github.com/$env:GITHUB_REPOSITORY/archive/refs/tags/${{ github.ref_name }}.zip"
+          $sourceCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Could not resolve the checked-out source commit." }
+          $sourceUrl = "https://github.com/$env:GITHUB_REPOSITORY/tree/$env:RELEASE_TAG"
+          $sourceArchive = "https://github.com/$env:GITHUB_REPOSITORY/archive/refs/tags/${env:RELEASE_TAG}.zip"
           @(
               "PDFMathTranslate Codex Edition build information",
-              "Release tag: ${{ github.ref_name }}",
-              "Source commit: $env:GITHUB_SHA",
+              "Release tag: $env:RELEASE_TAG",
+              "Source commit: $sourceCommit",
               "Source: $sourceUrl",
               "GitHub Actions run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
               "Python embedded runtime: $env:PYTHON_VERSION",
@@ -221,7 +231,7 @@ jobs:
               $sourceArchive,
               "",
               "Exact Git commit:",
-              $env:GITHUB_SHA
+              $sourceCommit
           ) | Set-Content -Path (Join-Path $releaseRoot "SOURCE-CODE.txt") -Encoding utf8
 
       - name: Verify package contents and launchers
@@ -297,7 +307,7 @@ jobs:
               throw "pdf2zh.exe --version failed with exit code $LASTEXITCODE."
           }
           $appVersion = Get-Content (Join-Path $releaseRoot "site-packages\pdf2zh\version.py") -Raw
-          if (-not $appVersion.Contains('APP_VERSION = "${{ github.ref_name }}"')) {
+          if (-not $appVersion.Contains('APP_VERSION = "' + $env:RELEASE_TAG + '"')) {
               throw "The desktop application version does not match this tag."
           }
           $helpOutput = & (Join-Path $releaseRoot "pdf2zh.exe") --help
@@ -334,7 +344,7 @@ jobs:
           $compilerRoot = Join-Path $env:GITHUB_WORKSPACE "release-dependencies\inno-setup"
           $installCompiler = Start-Process -FilePath $compilerSetup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', ('/DIR="' + $compilerRoot + '"')) -Wait -PassThru -WindowStyle Hidden
           if ($installCompiler.ExitCode -ne 0) { throw "Inno Setup installation failed." }
-          & .\script\build-windows-installer.ps1 -ReleaseRoot $releaseRoot -ReleaseTag "${{ github.ref_name }}" -OutputRoot $distRoot -Compiler (Join-Path $compilerRoot "ISCC.exe")
+          & .\script\build-windows-installer.ps1 -ReleaseRoot $releaseRoot -ReleaseTag $env:RELEASE_TAG -OutputRoot $distRoot -Compiler (Join-Path $compilerRoot "ISCC.exe")
 
       - name: Smoke test the installer in an isolated directory
         shell: pwsh
@@ -356,17 +366,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           $title = "PDFMathTranslate Codex Edition $tag"
           $archive = Join-Path $env:GITHUB_WORKSPACE "release-dist\$env:RELEASE_ASSET"
           $checksums = Join-Path $env:GITHUB_WORKSPACE "release-dist\SHA256SUMS.txt"
-          $notes = Join-Path $env:GITHUB_WORKSPACE "packaging\RELEASE_NOTES.md"
+          $notes = Join-Path $env:RUNNER_TEMP "desktop-release-notes.md"
+          $allNotes = Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "packaging\RELEASE_NOTES.md") -Raw
+          $pattern = '(?ms)^## ' + [regex]::Escape($tag) + '[^\r\n]*\r?\n.*?(?=^## |\z)'
+          $releaseNotes = [regex]::Match($allNotes, $pattern).Value.Trim()
+          if (-not $releaseNotes) { throw "Release notes for $tag are missing." }
+          $releaseNotes | Set-Content -LiteralPath $notes -Encoding utf8
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
               gh release upload $tag $archive $checksums --clobber --repo $env:GITHUB_REPOSITORY
               if ($LASTEXITCODE -ne 0) { throw "Updating release assets failed." }
-              gh release edit $tag --target desktop-app --title $title --notes-file $notes --latest --repo $env:GITHUB_REPOSITORY
+              gh release edit $tag --target desktop-app --title $title --notes-file $notes --draft=false --latest --repo $env:GITHUB_REPOSITORY
               if ($LASTEXITCODE -ne 0) { throw "Updating release metadata failed." }
           }
           else {
