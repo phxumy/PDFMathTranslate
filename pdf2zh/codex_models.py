@@ -10,6 +10,7 @@ from threading import Thread
 import time
 
 from pdf2zh.codex_account import _cli, _terminate_process, _window_kwargs
+from pdf2zh.codex_runtime import CodexRuntime
 
 
 class CatalogError(Exception):
@@ -68,7 +69,8 @@ def get_codex_models(configured_bin=None, profile=None, *, timeout=12.0):
             "models": [],
             "message": "未找到 Codex CLI；仍可手动填写模型和推理强度。",
         }
-    command = [binary]
+    runtime = CodexRuntime.for_binary(binary)
+    command = runtime.command()
     if profile:
         command += ["--profile", str(profile)]
     command += ["app-server", "--listen", "stdio://"]
@@ -85,6 +87,7 @@ def get_codex_models(configured_bin=None, profile=None, *, timeout=12.0):
             text=True,
             encoding="utf-8",
             errors="replace",
+            **runtime.subprocess_kwargs(account_operation=True),
             **_window_kwargs(),
         )
 

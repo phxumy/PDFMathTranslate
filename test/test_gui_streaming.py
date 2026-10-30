@@ -29,6 +29,10 @@ def ui(tmp_path, monkeypatch):
         "translate_file_stream",
         "_codex_login_updates",
         "begin_codex_account_login",
+        "poll_codex_account_login",
+        "codex_selection_changed",
+        "refresh_codex_account",
+        "logout_codex_account",
         "install_app_update",
     }
     tree.body = [
@@ -75,6 +79,10 @@ def ui(tmp_path, monkeypatch):
         logger=Mock(),
         poll_codex_login=Mock(),
         start_codex_login=Mock(),
+        cancel_codex_login=Mock(),
+        get_login_account_status=Mock(),
+        get_codex_status=Mock(),
+        logout_codex=Mock(),
     )
     exec(compile(tree, str(source), "exec"), ns)
     return ns
@@ -260,3 +268,40 @@ def test_update_download_yields_progress(ui):
     ui["update_manager"].install.side_effect = install
     messages = list(ui["install_app_update"]())
     assert messages[1:] == ["50%", "done"]
+
+
+def test_successful_login_refreshes_identity_and_quota_then_stops_polling(ui):
+    ui["poll_codex_login"].return_value = {"status": "succeeded", "message": "done"}
+    ui["get_login_account_status"].return_value = {
+        "message": "account@example.com · 剩余 75%"
+    }
+    result = ui["poll_codex_account_login"]("private-login")
+    assert result == ("account@example.com · 剩余 75%", None, {"active": False})
+    ui["get_login_account_status"].assert_called_once_with("private-login")
+
+
+def test_changing_cli_cancels_old_login_and_clears_stale_account(ui):
+    result = ui["codex_selection_changed"]("old-login")
+    ui["cancel_codex_login"].assert_called_once_with("old-login")
+    assert "已更改" in result[0]
+    assert result[1:] == (None, {"active": False})
+
+
+def test_account_refresh_and_login_follow_selected_cli_and_profile(ui):
+    ui["get_codex_status"].return_value = {"message": "selected account"}
+    assert ui["refresh_codex_account"]("custom-cli", "work") == "selected account"
+    ui["get_codex_status"].assert_called_once_with("custom-cli", "work")
+    ui["start_codex_login"].return_value = {"status": "pending", "login_id": "new"}
+    ui["begin_codex_account_login"]("custom-cli", "device", None, "work")
+    ui["start_codex_login"].assert_called_once_with(
+        mode="device", configured_bin="custom-cli", profile="work"
+    )
+
+
+def test_refresh_does_not_expose_exception_details_and_web_cannot_logout(ui):
+    ui["get_codex_status"].side_effect = RuntimeError("private-token-sentinel")
+    assert "private-token-sentinel" not in ui["refresh_codex_account"]("codex")
+    ui["desktop_mode"] = False
+    with pytest.raises(RuntimeError, match="桌面软件"):
+        ui["logout_codex_account"]("codex")
+    ui["logout_codex"].assert_not_called()

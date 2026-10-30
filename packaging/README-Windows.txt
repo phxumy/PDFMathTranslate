@@ -30,13 +30,20 @@ check never runs the installer. Browser mode links to the release page.
 
 Existing ZIP installations can install this release into its default directory.
 The installer does not remove the old extracted folder or its translated PDFs.
-Account credentials and existing settings are reused from their user locations.
+Existing application settings are retained. The bundled CLI requires a fresh
+sign-in when upgrading to codex.7.2; personal Codex credentials are not copied.
 
 YOUR FILES
 Settings: %USERPROFILE%\.config\PDFMathTranslate
 New desktop translation workspace:
   %USERPROFILE%\.config\PDFMathTranslate\workspace
-Codex sign-in: the official CLI's existing CODEX_HOME / user account location.
+Bundled Codex sign-in: %USERPROFILE%\.config\PDFMathTranslate\codex
+The bundled CLI uses private file credentials for login, logout, account/model
+queries and translation. Personal Codex credentials are not read or changed.
+A user-specified external CLI retains its own CODEX_HOME and credential store.
+The account panel shows email, plan, remaining quota percentages and reset times
+when available. API-key billing balances are not available through this API.
+Separate sign-ins to the same account still consume that account's quota.
 Upgrades and uninstallation leave these user directories untouched.
 
 TRANSLATION SPEED

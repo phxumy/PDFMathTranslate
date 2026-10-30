@@ -13,10 +13,10 @@ if not exist "%CODEX_EXE%" (
 )
 
 echo This opens the official Codex sign-in flow.
-echo Your login credentials are stored by Codex for your Windows account;
-echo they are never included in this application package.
+echo This login is private to PDFMathTranslate and separate from your personal Codex.
+echo Credentials stay in your user profile, never in this application package.
 echo.
-"%CODEX_EXE%" login
+"%~dp0runtime\python.exe" -c "import sys; sys.path.insert(0, sys.argv[1]); from pdf2zh.codex_runtime import login_bundled_cli; sys.exit(login_bundled_cli(sys.argv[2]))" "%~dp0site-packages" "%CODEX_EXE%"
 set "LOGIN_EXIT=%ERRORLEVEL%"
 echo.
 if not "%LOGIN_EXIT%"=="0" (

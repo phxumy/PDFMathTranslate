@@ -15,7 +15,7 @@ Windows 独立窗口的安装和打包方式请参阅[桌面工作台说明](./D
 
 ## 主要改动
 
-- 新增本机 Codex CLI 翻译后端，复用 Codex CLI 已有的 ChatGPT/Codex 登录状态，不要求在 PDFMathTranslate 中填写 OpenAI API Key。
+- 新增本机 Codex CLI 翻译后端，不要求在 PDFMathTranslate 中填写 OpenAI API Key。从 `.7.2` 起，内置 CLI 使用软件独立登录；用户指定外部 CLI 时复用其已有登录状态。
 - Codex 请求在临时目录中以只读沙箱、临时会话和结构化 JSON 输出运行。
 - 批量翻译、超时重试、缓存隔离和公式占位符完整性校验。
 - 保护公式、变量、引用标号、个人姓名、期刊名、年份、卷期页码、DOI、URL 等内容。

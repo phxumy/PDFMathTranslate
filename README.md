@@ -54,7 +54,7 @@ Python.
 Quick start:
 
 1. Download and run `PDFMathTranslate-Codex-Setup-win64.exe`. The installer creates a Start menu shortcut and an uninstaller.
-2. Launch **PDFMathTranslate Codex Studio** and click **登录 Codex** inside the app. Complete the official browser sign-in; the app updates the login status automatically.
+2. Launch **PDFMathTranslate Codex Studio** and click **登录 / 切换账号** inside the app. Complete the official browser sign-in; the app updates the account and quota panel automatically.
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
@@ -105,7 +105,9 @@ for account and sign-in details.
 
 ### Codex fields and model IDs (checked October 28, 2026)
 
-These field rules apply to desktop releases codex.5 through codex.7. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
+These field rules apply to desktop releases codex.5 through codex.7.2. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
+
+Starting with codex.7.2, the bundled CLI uses independent credentials under `%USERPROFILE%\.config\PDFMathTranslate\codex`, including when `CODEX_BIN` explicitly points to the bundled executable. Login, logout, account/model queries, and translation all use this scope; inherited OpenAI credentials are not reused. Upgrading requires signing in once, without copying or modifying personal Codex credentials. An external CLI selected by the user retains its existing `CODEX_HOME` and credential store. The account panel displays email, plan, quota remaining percentages and reset times from the official account RPCs when available. Failed queries show unavailable, and API-key billing balances are not supplied by this interface. Separate sign-ins do not create extra account quota.
 
 | Field | Behavior |
 | --- | --- |

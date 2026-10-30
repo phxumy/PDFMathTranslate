@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string] $ReleaseRoot,
-    [string] $ReleaseTag = "v1.9.11-codex.7",
+    [string] $ReleaseTag = "v1.9.11-codex.7.2",
     [string] $OutputRoot,
     [string] $Compiler
 )

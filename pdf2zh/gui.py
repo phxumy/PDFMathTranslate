@@ -36,6 +36,8 @@ from pdf2zh.codex_account import (
     start_codex_login,
     poll_codex_login,
     cancel_codex_login,
+    get_login_account_status,
+    logout_codex,
 )
 from pdf2zh.chatgpt import (
     ChatGPTTranslator,
@@ -1118,11 +1120,11 @@ def translate_queue_stream(
         update_manager.end_translation()
 
 
-def refresh_codex_account(configured_bin):
+def refresh_codex_account(configured_bin, profile=None):
     try:
-        return get_codex_status(configured_bin or "codex")["message"]
-    except Exception as exc:
-        return f"无法读取 Codex 登录状态：{exc}"
+        return get_codex_status(configured_bin or "codex", profile)["message"]
+    except Exception:
+        return "无法读取 Codex 账号与额度，请检查所选 CLI 和 profile 后重试。"
 
 
 def _codex_login_updates(result):
@@ -1140,7 +1142,7 @@ def _codex_login_updates(result):
     )
 
 
-def begin_codex_account_login(configured_bin, mode, login_id=None):
+def begin_codex_account_login(configured_bin, mode, login_id=None, profile=None):
     if not desktop_mode:
         raise gr.Error("请在桌面软件中登录 Codex。")
     try:
@@ -1149,22 +1151,41 @@ def begin_codex_account_login(configured_bin, mode, login_id=None):
             if existing.get("status") == "pending":
                 return _codex_login_updates(existing)
         return _codex_login_updates(
-            start_codex_login(mode=mode, configured_bin=configured_bin or "codex")
+            start_codex_login(
+                mode=mode, configured_bin=configured_bin or "codex", profile=profile
+            )
         )
-    except Exception as exc:
-        return str(exc), None, gr.update(active=False)
+    except Exception:
+        return "无法启动 Codex 登录，请检查所选 CLI。", None, gr.update(active=False)
 
 
 def poll_codex_account_login(login_id):
     if not login_id:
         return gr.update(), None, gr.update(active=False)
-    return _codex_login_updates(poll_codex_login(login_id))
+    result = poll_codex_login(login_id)
+    if result.get("status") == "succeeded":
+        details = get_login_account_status(login_id)
+        if details:
+            result["message"] = details["message"]
+    return _codex_login_updates(result)
 
 
 def cancel_codex_account_login(login_id):
     if not login_id:
         return gr.update(), None, gr.update(active=False)
     return _codex_login_updates(cancel_codex_login(login_id))
+
+
+def codex_selection_changed(login_id):
+    if login_id:
+        cancel_codex_login(login_id)
+    return "CLI 或 profile 已更改，请刷新账号与额度。", None, gr.update(active=False)
+
+
+def logout_codex_account(configured_bin, profile=None):
+    if not desktop_mode:
+        raise gr.Error("请在桌面软件中管理 Codex 登录。")
+    return logout_codex(configured_bin or "codex", profile)["message"]
 
 
 def check_app_updates():
@@ -1709,14 +1730,17 @@ with gr.Blocks(
                 codex_model_catalog_status = gr.Markdown("")
                 codex_models_refresh = gr.Button("刷新模型与推理强度")
                 codex_status = gr.Textbox(
-                    label="Codex 登录状态",
+                    label="Codex 账号与剩余额度",
                     value="正在检查登录状态…",
                     interactive=False,
-                    lines=3,
+                    lines=7,
+                    max_lines=12,
                 )
                 with gr.Row():
-                    codex_login_btn = gr.Button("登录 Codex", visible=desktop_mode)
-                    codex_refresh_btn = gr.Button("刷新登录状态")
+                    codex_login_btn = gr.Button("登录 / 切换账号", visible=desktop_mode)
+                    codex_refresh_btn = gr.Button("刷新账号与额度")
+                with gr.Row():
+                    codex_logout_btn = gr.Button("退出当前账号", visible=desktop_mode)
                     codex_cancel_btn = gr.Button("取消登录", visible=desktop_mode)
                 codex_login_mode = gr.Radio(
                     choices=[
@@ -1730,7 +1754,8 @@ with gr.Blocks(
                 codex_login_id = gr.State(None)
                 codex_login_timer = gr.Timer(1.5, active=False)
                 gr.Markdown(
-                    "在软件内点击登录，由官方浏览器页面完成账号验证；完成后这里会自动显示状态。"
+                    "内置 Codex 使用本软件的独立账号；指定自己的 CLI 时沿用该 CLI 的登录。"
+                    "切换账号可先退出，再在官方页面登录。额度为查询时的账号快照，点击刷新可更新。"
                 )
                 codex_parallel = gr.Slider(
                     minimum=1,
@@ -2031,13 +2056,28 @@ with gr.Blocks(
             codex_login_outputs = [codex_status, codex_login_id, codex_login_timer]
             codex_login_btn.click(
                 begin_codex_account_login,
-                [envs[0], codex_login_mode, codex_login_id],
+                [envs[0], codex_login_mode, codex_login_id, envs[1]],
                 codex_login_outputs,
                 queue=False,
             )
             codex_refresh_btn.click(
-                refresh_codex_account, envs[0], codex_status, queue=False
+                refresh_codex_account, [envs[0], envs[1]], codex_status, queue=False
             )
+            codex_logout_btn.click(
+                logout_codex_account,
+                [envs[0], envs[1]],
+                codex_status,
+                queue=False,
+                api_name=False,
+            )
+            for selector in envs[:2]:
+                selector.input(
+                    codex_selection_changed,
+                    codex_login_id,
+                    codex_login_outputs,
+                    queue=False,
+                    api_name=False,
+                )
             codex_cancel_btn.click(
                 cancel_codex_account_login,
                 codex_login_id,
@@ -2282,11 +2322,8 @@ with gr.Blocks(
             chatgpt_effort,
         ],
     ).then(
-        lambda: refresh_codex_account(
-            ConfigManager.get_env_by_translatername(
-                CodexTranslator, "CODEX_BIN", "codex"
-            )
-        ),
+        refresh_codex_account,
+        inputs=[envs[0], envs[1]],
         outputs=codex_status,
     ).then(
         refresh_codex_model_catalog,

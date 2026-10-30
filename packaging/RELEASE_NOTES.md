@@ -1,3 +1,17 @@
+## v1.9.11-codex.7.2 — 独立 Codex 登录与账号额度显示
+
+内置 Codex CLI 改用软件专属的凭据目录，登录、切换、退出、账号查询、模型查询及翻译均与桌面端、个人 CLI 隔离。显式选择安装目录中的内置 `codex.exe` 仍使用独立登录；指定用户自己的外部 CLI 时，沿用该 CLI 的登录和配置，界面会标明其作用范围。
+
+- 内置 CLI 的凭据保存在 `%USERPROFILE%\.config\PDFMathTranslate\codex`，不复制原有凭据，也不修改全局 `CODEX_HOME`；兼容入口 `Login-Codex.cmd` 使用相同隔离规则。
+- 升级后使用内置 CLI 需在软件中首次登录。已有设置、翻译历史和译文保留，后续升级继续使用软件专属账号。
+- “Codex 账号与剩余额度”显示官方接口返回的邮箱、套餐、各额度窗口剩余百分比、重置时间及查询时间。登录成功自动刷新，也可手动刷新。
+- 加入“登录 / 切换账号”和“退出当前账号”。更改 CLI 或 profile 会取消尚未完成的登录，避免将旧登录状态显示为新选择的账号。
+- 额度查询失败或不支持时明确显示暂不可用，不把缺失数据当作零或满额。API Key 方式的余额不由此接口提供；同一账号在不同客户端仍共享其服务额度。
+
+本版包含 `.7` 的队列追加、模型选择和科研 PDF 修复。可从“关于与更新”升级，或下载安装 EXE 覆盖安装。
+
+The bundled CLI now keeps its authentication separate from personal Codex clients across every operation. External CLIs retain their own authentication. The account panel shows identity, plan and available quota snapshots through official RPCs without reading or exposing credential files. Existing bundled-CLI users need to sign in once after upgrading.
+
 ## v1.9.11-codex.7 — 队列拖拽追加、模型选择与科研 PDF 修复
 
 PDF 队列已有文件时，继续拖入上传区域会追加到列表末尾，并保留已有文件与顺序。拖入文件不再触发浏览器打开该文件；翻译进行中仍禁止修改输入队列。

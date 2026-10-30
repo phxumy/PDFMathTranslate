@@ -441,7 +441,7 @@ class TestCodexTranslator(unittest.TestCase):
         self.assertNotEqual(cwd_capture["cwd"], None)
         self.assertEqual(run.call_args.kwargs["timeout"], 120)
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
-        self.assertIn("--ignore-user-config", cmd)
+        self.assertNotIn("--ignore-user-config", cmd)
         self.assertIn("--ignore-rules", cmd)
         self.assertIn("--config", cmd)
         self.assertIn('model_reasoning_effort="low"', cmd)
@@ -527,9 +527,9 @@ class TestCodexTranslator(unittest.TestCase):
 
         def compat_run(cmd, **kwargs):
             run_calls.append(cmd)
-            if "--ignore-user-config" in cmd:
+            if "--ignore-rules" in cmd:
                 return subprocess.CompletedProcess(
-                    cmd, 2, "", "error: unexpected argument '--ignore-user-config'"
+                    cmd, 2, "", "error: unexpected argument '--ignore-rules'"
                 )
             self._write_translation_payload(cmd, "兼容路径")
             return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -543,8 +543,8 @@ class TestCodexTranslator(unittest.TestCase):
 
         self.assertEqual("兼容路径", translated)
         self.assertEqual(2, len(run_calls))
-        self.assertIn("--ignore-user-config", run_calls[0])
-        self.assertNotIn("--ignore-user-config", run_calls[1])
+        self.assertIn("--ignore-rules", run_calls[0])
+        self.assertNotIn("--ignore-rules", run_calls[1])
 
     def test_translate_batch_returns_cached_and_batched_values(self):
         with mock.patch("pdf2zh.translator.subprocess.run") as run:

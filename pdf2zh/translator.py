@@ -112,27 +112,11 @@ def find_codex_executable(configured: str | None = None) -> str | None:
         discovered = shutil.which(raw)
         return str(Path(discovered).resolve()) if discovered else None
 
-    relative_codex = Path("codex-cli") / "x86_64-pc-windows-msvc" / "bin" / "codex.exe"
-    roots: list[Path] = []
-    pystand = os.environ.get("PYSTAND")
-    if pystand:
-        roots.append(Path(pystand).expanduser().resolve().parent)
-    pystand_home = os.environ.get("PYSTAND_HOME")
-    if pystand_home:
-        roots.append(Path(pystand_home).expanduser().resolve())
-    executable = Path(sys.executable).resolve()
-    roots.extend([executable.parent, executable.parent.parent])
-    module_path = Path(__file__).resolve()
-    roots.extend(module_path.parents[:4])
+    from pdf2zh.codex_runtime import bundled_codex_candidates
 
-    seen: set[Path] = set()
-    for root in roots:
-        for candidate in (root / relative_codex, root / "build" / relative_codex):
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if candidate.is_file():
-                return str(candidate.resolve())
+    for candidate in bundled_codex_candidates():
+        if candidate.is_file():
+            return str(candidate)
 
     cli_path = os.environ.get("CODEX_CLI_PATH")
     if cli_path:
@@ -5996,6 +5980,9 @@ class CodexTranslator(ScientificTranslator):
                 "portable package, CODEX_CLI_PATH, PATH, and the Codex desktop app. "
                 "Set CODEX_BIN to the full path of codex.exe."
             )
+        from pdf2zh.codex_runtime import CodexRuntime
+
+        self.codex_runtime = CodexRuntime.for_binary(self.codex_bin)
         self.profile = self.envs["CODEX_PROFILE"]
         self.timeout = int(self.envs.get("CODEX_TIMEOUT") or "120")
         self.codex_version = None
@@ -6019,7 +6006,7 @@ class CodexTranslator(ScientificTranslator):
     def _run_probe_command(self, args: list[str]) -> subprocess.CompletedProcess:
         try:
             return subprocess.run(
-                [self.codex_bin, *args],
+                self.codex_runtime.command(*args),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -6027,6 +6014,7 @@ class CodexTranslator(ScientificTranslator):
                 errors="replace",
                 timeout=5,
                 check=False,
+                **self.codex_runtime.subprocess_kwargs(),
                 **codex_subprocess_window_kwargs(),
             )
         except FileNotFoundError as exc:
@@ -6098,12 +6086,12 @@ class CodexTranslator(ScientificTranslator):
     def _build_command(
         self, prompt_text: str, schema_path: str, output_path: str, mode: str
     ) -> list[str]:
-        command = [
-            self.codex_bin,
-            "exec",
-        ]
+        command = self.codex_runtime.command("exec")
         if mode == "fast":
-            command.extend(["--ignore-user-config", "--ignore-rules"])
+            if self.codex_runtime.isolated:
+                command.append("--ignore-user-config")
+            # External CLIs must keep their configured credential store/provider.
+            command.append("--ignore-rules")
         if mode == "compat" and self.profile:
             command.extend(["--profile", self.profile])
         command.extend(
@@ -6203,12 +6191,18 @@ class CodexTranslator(ScientificTranslator):
             raise last_error
 
     def _run_translation_command(self, command, workdir):
+        from pdf2zh.codex_runtime import CodexRuntime
+
+        runtime = getattr(self, "codex_runtime", None) or CodexRuntime.for_binary(
+            command[0]
+        )
         options = dict(
             cwd=workdir,
             stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
+            **runtime.subprocess_kwargs(),
             **codex_subprocess_window_kwargs(),
         )
         if getattr(self, "cancellation_event", None) is None:

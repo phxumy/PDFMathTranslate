@@ -5,7 +5,10 @@ PDFMathTranslate Codex 增强桌面版（非官方）
 1. 在本项目 GitHub 发行页面下载 PDFMathTranslate-Codex-Setup-win64.exe。
 2. 双击安装，默认只为当前 Windows 用户安装，无需单独安装 Python 或 Node.js。
    安装后可从开始菜单启动，也可选择创建桌面快捷方式。
-3. 在软件里的 Codex 账号区域查看状态或发起登录，按提示完成官方账号验证。
+3. 在软件里的“Codex 账号与剩余额度”区域查看账号或发起登录，按提示完成官方账号验证。
+   内置 CLI 从 .7.2 起使用独立账号，升级后需首次登录；不会复制原有 Codex 凭据。
+   指定用户自己的 CLI 时，沿用该 CLI 的登录与配置，切换会影响该 CLI 的账号。
+   可刷新账号邮箱、套餐、额度窗口剩余百分比和重置时间；查询失败显示暂不可用。
    不再需要先找外部 CMD 文件登录；旧 Login-Codex.cmd 仅保留作兼容入口。
 4. 可一次选择多个 PDF，点击“翻译 / 继续队列”后按列表顺序逐个处理。
    队列已有文件时，也可继续将 PDF 拖到上传区域，追加到现有列表末尾。
@@ -34,12 +37,16 @@ PDFMathTranslate Codex 增强桌面版（非官方）
 下载或校验失败不会运行安装包。浏览器模式请通过发行页面下载安装。
 
 从旧 ZIP 升级时，运行本版 EXE 安装程序即可；旧解压目录和其中的译文不会删除。
-账号和已有软件设置会沿用用户目录中的数据。可确认新版正常后自行处理旧目录。
+已有软件设置会沿用用户目录中的数据。内置 CLI 首次启用独立账号需重新登录。
+可确认新版正常后自行处理旧目录。
 
 四、文件位置与卸载
 软件设置：%USERPROFILE%\.config\PDFMathTranslate
 新桌面版翻译工作区：%USERPROFILE%\.config\PDFMathTranslate\workspace
-Codex 登录保留在官方 CLI 原有的用户账号目录（或已配置的 CODEX_HOME）。
+内置 Codex 独立登录：%USERPROFILE%\.config\PDFMathTranslate\codex
+外部 Codex：沿用该 CLI 的 CODEX_HOME 与凭据存储配置。
+内置 CLI 的登录、切换和退出不修改桌面端或个人 CLI 的凭据。
+登录隔离不增加账号额度；两端使用同一账号时仍消耗该账号的服务额度。
 升级和卸载不删除这些用户数据。卸载入口在 Windows 设置的“已安装的应用”中。
 
 五、发行内容

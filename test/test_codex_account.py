@@ -17,6 +17,7 @@ from pdf2zh.translator import CodexTranslator, TranslationAbortedError
 def sessions(monkeypatch):
     monkeypatch.setattr(account, "_sessions", {})
     monkeypatch.setattr(account, "_cli", lambda configured: "codex.exe")
+    monkeypatch.setattr(account, "_account_details", lambda *args: {})
     yield
     account._close_logins()
 
