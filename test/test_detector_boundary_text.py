@@ -34,6 +34,16 @@ def test_split_word_crossing_two_plain_text_boxes_or_background_is_whole():
         assert draft.sstk == [text]
 
 
+def test_bisected_caption_word_rejoins_continuous_caption_row():
+    text = "All assay data is reported here."
+    converter, page, chars = setup(text, text.index("a is"))
+    converter.layout_region_types = {0: {2: "figure_caption", 3: "figure_caption"}}
+    recovered = recover(converter, chars)
+    assert all(recovered[id(c)] == 2 for c in chars)
+    draft = converter.receive_layout(page, preview_only=True)
+    assert draft.sstk == [text]
+
+
 def test_complete_reference_marker_rejoins_reference_policy():
     text = "[10] A. Smith, First work title. Phys. Rev. Lett. 113, 220502 (2014)."
     converter, page, chars = setup(text, len(text) - 1, 2)

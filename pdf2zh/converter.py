@@ -138,7 +138,7 @@ _PROSE_ITALIC_FONT_RE = re.compile(
 _PROSE_BOLD_FONT_RE = re.compile(r"(?:bold|demi|semibold)", re.IGNORECASE)
 _MATH_FONT_RE = re.compile(
     r"(?:^CM(?:I(?!TT)|MI|SY|EX)|RMTMI|MTSY|MTEX|Math|Symbol|Sym$|TeX(?!t)|Euler|"
-    r"AdvP[0-9A-Fa-f]+)",
+    r"AdvP[0-9A-Fa-f]+|AdvPSMP\d+)",
     re.IGNORECASE,
 )
 _MATH_WORDS = {
@@ -201,7 +201,15 @@ _STRUCTURAL_ITALIC_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _SUBSECTION_ITALIC_LABEL_RE = re.compile(
-    r"^(?:[A-Z]|\d+(?:\.\d+){0,4})\.\s*[A-Z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*){0,15}$"
+    r"^(?:(?:[A-Z]|\d+(?:\.\d+){0,4})\.\s*[A-Z][A-Za-z-]*"
+    r"(?:\s+[A-Za-z][A-Za-z-]*){0,15}|"
+    r"(?P<method>(?i:Determination\s+of\s+(?:logD|pKa|aqueous\s+solubility|"
+    r"metabolic\s+stability\s+in\s+liver\s+microsomes|"
+    r"compound\s+activity\s+on\s+hERG|"
+    r"CYPs\s+Inhibition\s+using\s+Human\s+Recombinant\s+Cytochrome\s+P450s)|"
+    r"Automated\s+Method\s+for\s+Cytochrome\s+P450\s+Reaction\s+Phenotyping\s+"
+    r"Using\s+Six\s+Isoforms\s+of\s+Human\s+Recombinant\s+Enzymes|"
+    r"Automated\s+TDI\s+assay\s+in\s+Human\s+Liver\s+Microsomes\s+with\s+LC-MS\s+analysis)))$"
 )
 _RUNIN_ITALIC_HEADING_RE = re.compile(
     r"^(?:\d+\)\s*)?[A-Z][A-Za-z-]*" r"(?:\s+[A-Za-z][A-Za-z-]*){1,16}:$"
@@ -560,9 +568,19 @@ def _release_inline_prose_closers(texts, formulas, owners, paragraphs, text_char
             and re.search(r"\b[A-Za-z]{2,}\s+\($", before)
             and re.fullmatch(r"[≈~<>≤≥]?\s*\d+(?:\.\d+)?\s*%\)", value)
         )
+        qualifier_word = re.search(r"\b([A-Za-z]{3,})\s+\($", before)
+        numeric_qualifier = (
+            (
+                not explanation.strip()
+                and qualifier_word is not None
+                and qualifier_word[1].lower() not in _MATH_WORDS
+            )
+            or re.fullmatch(r"\s*(?:c?[Ll]og[PD]|pKa|pH)\s*", explanation) is not None
+        ) and re.search(r"\d", value) is not None
         if (
             len(re.findall(r"[A-Za-z]{2,}", explanation)) < 2
             and not percentage_qualifier
+            and not numeric_qualifier
         ):
             continue
         formulas[index] = chars[:-1]
@@ -1327,6 +1345,82 @@ def _release_bold_chemical_names(
         re.I,
     )
     allowed = re.compile(r"[A-Za-z0-9\s(),.\[\]:/'’′″−–\-]+")
+
+    def bold_text(index):
+        chars = formulas[index]
+        visible = [char for char in chars if char.get_text().strip()]
+        if not visible or any(
+            getattr(char, "_pdf2zh_layout_class", 0) == 0
+            or not _PROSE_BOLD_FONT_RE.search(_font_name(char.fontname))
+            or _is_non_horizontal_text_matrix(char.matrix)
+            for char in visible
+        ):
+            return None
+        value = _reconstruct_italic_run(chars)
+        return value if allowed.fullmatch(value) else None
+
+    def expand_bold(text):
+        return _FORMULA_MARKER_RE.sub(
+            lambda match: bold_text(int(match[1])) or match[0], text
+        )
+
+    def merge_heading(before_id, after_id, leading_text):
+        before, after = paragraphs[before_id], paragraphs[after_id]
+        tail = segments[after_id]
+        leading = leading_text.rstrip()
+        separator = "" if leading.endswith("-") else " "
+        prefix = leading + separator
+        stripped = len(tail) - len(tail.lstrip())
+        segments[after_id] = prefix + tail.lstrip()
+        segments[before_id] = ""
+        after.x, after.y = before.x, before.y
+        after.x0 = min(before.x0, after.x0)
+        after.x1 = max(before.x1, after.x1)
+        after.y0 = min(before.y0, after.y0)
+        after.y1 = max(before.y1, after.y1)
+        after.break_offsets = [
+            len(prefix) + offset - stripped for offset in after.break_offsets
+        ]
+        text_chars[after_id].extend(text_chars[before_id])
+        text_chars[before_id] = []
+        for index, owner in enumerate(formula_paragraphs):
+            if owner == before_id:
+                formula_paragraphs[index] = after_id
+                text_chars[after_id].extend(formulas[index])
+
+    # Some Word PDFs split a bold-italic alkyl prefix into a separate formula
+    # paragraph even though the compound name starts on the very same baseline.
+    # Recover only a closed prefix vocabulary beside a numbered chemical name,
+    # never a structure/diagram glyph or an unrelated next line.
+    for pid in range(len(segments) - 1):
+        marker = _FORMULA_MARKER_RE.fullmatch(segments[pid].strip())
+        if marker is None:
+            continue
+        index = int(marker[1])
+        prefix = bold_text(index)
+        before, after = paragraphs[pid], paragraphs[pid + 1]
+        next_name = expand_bold(segments[pid + 1]).strip()
+        label = re.search(r"\(\d{1,3}[a-z]?\)\.", next_name[:350])
+        chemical_name = next_name[: label.end()] if label else next_name
+        if (
+            prefix is None
+            or re.fullmatch(r"(?:tert|sec)-butyl", prefix, re.I) is None
+            or formula_paragraphs[index] != pid
+            or before.layout_class <= 1
+            or after.layout_class != before.layout_class
+            or before.region_kind not in {"plain text", "title", "running_header"}
+            or after.region_kind not in {"plain text", "title"}
+            or before.page_id != after.page_id
+            or abs(before.size - after.size) > 0.1 * before.size
+            or abs(before.y - after.y) > 0.15 * before.size
+            or not -0.1 * before.size <= after.x - before.x1 <= 0.6 * before.size
+            or re.match(r"(?:\d|[NOS]-)", chemical_name) is None
+            or len(stems.findall(chemical_name)) < 2
+            or not allowed.fullmatch(chemical_name)
+        ):
+            continue
+        merge_heading(pid, pid + 1, prefix)
+
     for pid, source in enumerate(segments):
         if paragraphs[pid].region_kind not in {"plain text", "title", ""}:
             continue
@@ -1351,6 +1445,41 @@ def _release_bold_chemical_names(
             lambda m: candidates.get(int(m[1]), m[0]), source
         )
         label = re.search(r"\(\d{1,3}[a-z]?\)\.", expanded)
+        if label is None and candidates:
+            # A title detector can end a chemical name one line before its
+            # compound number, assigning the continuation to body text. The
+            # number and same-column geometry prove the heading's boundary.
+            next_id = pid + 1
+            while (
+                next_id < min(len(segments), pid + 4) and not segments[next_id].strip()
+            ):
+                next_id += 1
+            if next_id < len(segments):
+                before, after = paragraphs[pid], paragraphs[next_id]
+                continuation = segments[next_id].lstrip()
+                following_label = re.match(
+                    r"(?:(?:carboxylic\s+acid|carboxylate|carbamate)\s+)?"
+                    r"\(\d{1,3}[a-z]?\)\.",
+                    continuation,
+                    re.I,
+                )
+                if (
+                    following_label
+                    and before.layout_class > 1
+                    and after.layout_class > 1
+                    and before.region_kind in {"plain text", "title"}
+                    and after.region_kind in {"plain text", "title"}
+                    and before.page_id == after.page_id
+                    and abs(before.size - after.size) <= 0.1 * before.size
+                    and 0.8 * before.size <= before.y - after.y <= 1.8 * before.size
+                    and abs(before.x0 - after.x0) <= 0.5 * before.size
+                    and re.match(r"\s*(?:(?:tert|sec)-butyl\s+|\d[-(])", expanded, re.I)
+                    and len(stems.findall(expanded)) >= 2
+                    and allowed.fullmatch(expanded)
+                    and all(bold_text(index) is not None for index in candidates)
+                ):
+                    merge_heading(pid, next_id, expanded)
+                    continue
         name = expanded[: label.end()] if label else expanded
         if (
             len(stems.findall(name)) < 2
@@ -2583,7 +2712,19 @@ def _recover_detector_boundary_text(
         cls = classes[index]
         return (
             object_id(char) not in protected_ids
-            and (cls == 1 or (cls > 1 and region_types.get(cls) == "plain text"))
+            and (
+                cls == 1
+                or (
+                    cls > 1
+                    and region_types.get(cls)
+                    in {
+                        "plain text",
+                        "figure_caption",
+                        "table_caption",
+                        "table_footnote",
+                    }
+                )
+            )
             and not is_formula(char.fontname, char.get_text())
             and not getattr(char, "_pdf2zh_scan_fragment", False)
         )
@@ -2660,6 +2801,38 @@ def _recover_detector_boundary_text(
             continue
         target_class = next((cls for cls in run_classes if cls > 1), None)
         if target_class is None:
+            continue
+        caption_kinds = {"figure_caption", "table_caption", "table_footnote"}
+        if all(
+            cls > 1 and region_types.get(cls) in caption_kinds for cls in run_classes
+        ):
+            # A detector can bisect a caption word across two positive text
+            # boxes ("dat" / "a is"). Reunite its continuous same-line caption
+            # component, stopping at real column gaps and protected content.
+            em = float(chars[start].size)
+            baseline = _char_baseline(chars[start])
+            row = sorted(
+                (
+                    i
+                    for i, candidate in enumerate(chars)
+                    if eligible(i)
+                    and region_types.get(classes[i]) in caption_kinds
+                    and abs(_char_baseline(candidate) - baseline) <= 0.2 * em
+                ),
+                key=lambda i: chars[i].x0,
+            )
+            component = []
+            for position in row:
+                if (
+                    component
+                    and chars[position].x0 - chars[component[-1]].x1 > 0.8 * em
+                ):
+                    if start in component:
+                        break
+                    component = []
+                component.append(position)
+            if start in component:
+                recovered.update((object_id(chars[i]), target_class) for i in component)
             continue
         if set(run_classes) == {1, target_class}:
             clipped_words.append((start, index, target_class))
@@ -4665,6 +4838,61 @@ def _algorithm_display_math_chars(
     return preserved
 
 
+def _recover_supplementary_caption_lines(chars, region_types, excluded):
+    """Reunite explicit supplementary captions split or hidden by detections.
+
+    Only complete, numbered caption labels followed by explanatory prose are
+    released. Ordinary figure labels and a bare supplementary running head do
+    not provide that evidence.
+    """
+    rows = []
+    for char in sorted(chars, key=lambda ch: (-_char_baseline(ch), ch.x0)):
+        if object_id(char) in excluded or _is_non_horizontal_text_matrix(char.matrix):
+            continue
+        row = next(
+            (
+                r
+                for r in reversed(rows[-3:])
+                if abs(_char_baseline(r[0]) - _char_baseline(char))
+                <= 0.25 * max(r[0].size, char.size)
+            ),
+            None,
+        )
+        if row is None:
+            rows.append([char])
+        else:
+            row.append(char)
+    recovered = {}
+    next_class = max(region_types, default=1) + 1
+    cells = []
+    for row in rows:
+        row.sort(key=lambda ch: ch.x0)
+        cell = []
+        for char in row:
+            if cell and char.x0 - cell[-1].x1 > 2 * max(char.size, cell[-1].size):
+                cells.append(cell)
+                cell = []
+            cell.append(char)
+        if cell:
+            cells.append(cell)
+    for row in cells:
+        text = _reconstruct_italic_run(row).strip()
+        match = re.match(
+            r"^(?:Supplementary|Supplemental|Supporting)\s+(Scheme|Figure|Table)\s+[A-Z]?\d+[A-Za-z]?\s*[.:]\s+",
+            text,
+            re.I,
+        )
+        if match is None or len(re.findall(r"[A-Za-z]{3,}", text[match.end() :])) < 2:
+            continue
+        region_types[next_class] = (
+            "table_caption" if match[1].lower() == "table" else "figure_caption"
+        )
+        for char in row:
+            recovered[object_id(char)] = next_class
+        next_class += 1
+    return recovered
+
+
 def _recover_preserved_region_prose(
     chars: list[LTChar],
     layout,
@@ -5182,6 +5410,7 @@ def _is_high_confidence_prose_italic(
     paragraph_size: float,
     *,
     allow_heading_wrap: bool = False,
+    allow_method_heading: bool = False,
 ) -> str | None:
     """Return reconstructed prose only when an italic formula run is clearly text."""
     visible = [
@@ -5189,7 +5418,13 @@ def _is_high_confidence_prose_italic(
     ]
     if not visible:
         return None
-    if any(getattr(char, "_pdf2zh_layout_class", 0) == 0 for char in visible):
+    method_match = _SUBSECTION_ITALIC_LABEL_RE.fullmatch(_reconstruct_italic_run(chars))
+    method_heading = bool(
+        allow_method_heading and method_match and method_match.group("method")
+    )
+    if not method_heading and any(
+        getattr(char, "_pdf2zh_layout_class", 0) == 0 for char in visible
+    ):
         return None
     for char in visible:
         state = getattr(char, "_pdf2zh_source_text_state", None)
@@ -5216,7 +5451,9 @@ def _is_high_confidence_prose_italic(
         if abs(baseline_change) > baseline_tolerance:
             if (
                 not allow_heading_wrap
-                or not 0.9 * typical_size <= baseline_change <= 1.8 * typical_size
+                or not 0.9 * typical_size
+                <= baseline_change
+                <= (2.5 if method_heading else 1.8) * typical_size
                 or abs(float(current.x0) - float(line_start.x0)) > 0.5 * typical_size
             ):
                 return None
@@ -5346,7 +5583,7 @@ def _release_standalone_italic_headings(
 
     A wrapped all-italic heading can become one opaque formula even though the
     layout model correctly identified its title region. Only a complete numbered
-    heading in that region may cross baselines; inline math and names retain the
+    or closed methodology heading in that region may cross baselines; math retains the
     stricter single-line classifier.
     """
     for formula_id, (chars, paragraph_id) in enumerate(
@@ -5355,17 +5592,27 @@ def _release_standalone_italic_headings(
         if not 0 <= paragraph_id < len(paragraphs):
             continue
         paragraph = paragraphs[paragraph_id]
-        if (
-            paragraph.region_kind != "title"
-            or segments[paragraph_id].strip() != f"{{v{formula_id}}}"
+        if segments[paragraph_id].strip() != f"{{v{formula_id}}}":
+            continue
+        method_match = _SUBSECTION_ITALIC_LABEL_RE.fullmatch(
+            _reconstruct_italic_run(chars)
+        )
+        method_heading = bool(method_match and method_match.group("method"))
+        if paragraph.region_kind != "title" and not (
+            method_heading and paragraph.region_kind in {"", "plain text"}
         ):
             continue
         text = _is_high_confidence_prose_italic(
-            chars, paragraph.size, allow_heading_wrap=True
+            chars,
+            paragraph.size,
+            allow_heading_wrap=True,
+            allow_method_heading=method_heading,
         )
         if text is not None and _SUBSECTION_ITALIC_LABEL_RE.fullmatch(text):
             segments[paragraph_id] = text
             paragraph.brk = True
+            if method_heading:
+                paragraph.region_kind = "title"
 
 
 def _has_inline_prose_context(
@@ -5708,6 +5955,18 @@ def _decode_formula_glyph(char: LTChar) -> str | None:
     except (PDFUnicodeNotDefined, KeyError, TypeError, ValueError):
         return None
     visible = char.get_text()
+    font_name = _font_name(
+        getattr(char, "fontname", getattr(char.font, "fontname", ""))
+    )
+    if (
+        re.search(r"AdvPSMP\d+", font_name)
+        and isinstance(decoded, str)
+        and re.search(r"[A-Za-z]", decoded)
+    ):
+        # Legacy publisher math-pi fonts can label visual >=/Delta glyphs as
+        # ASCII P/D in both maps. Keep the original CID for rendering, but do
+        # not tell the model that the symbol is a Latin variable.
+        return None
     if (
         not isinstance(decoded, str)
         or decoded != visible
@@ -6655,6 +6914,7 @@ class Paragraph:
         self.y1: float = y1  # 下边界
         self.size: float = size  # 字体大小
         self.brk: bool = brk  # 换行标记
+        self.body_text_at_top = False
         self.break_offsets: list[int] = []  # 原文段落内换行在 sstk 中的位置
         self.page_id = int(page_id)
         self.layout_class = int(layout_class)
@@ -6706,6 +6966,41 @@ def _classify_running_header_regions(
             f"paragraph text/property count mismatch: {len(sstk)} != {len(pstk)}"
         )
     classified: list[int] = []
+    # A body line can occupy the same top-margin band as a journal header.
+    # Same-size body text immediately underneath, with ordinary line spacing
+    # and a shared column, is stronger evidence than the margin alone.
+    for index, paragraph in enumerate(pstk):
+        if (
+            not sstk[index].strip()
+            or paragraph.region_kind not in {"", "plain text"}
+            or paragraph.size <= 0
+            or paragraph.y0 < page_height * 0.94
+            or paragraph.y1 - paragraph.y0 > 1.5 * paragraph.size
+        ):
+            continue
+        em = paragraph.size
+        row = [
+            (i, other)
+            for i, other in enumerate(pstk)
+            if sstk[i].strip()
+            and other.region_kind in {"", "plain text"}
+            and abs(other.y0 - paragraph.y0) <= 0.15 * em
+            and 0.9 * em <= other.size <= 1.1 * em
+        ]
+        left = min(p.x0 for _, p in row)
+        right = max(p.x1 for _, p in row)
+        if any(
+            sstk[i].strip()
+            and other.region_kind == "plain text"
+            and 0.9 * em <= other.size <= 1.1 * em
+            and other.y1 - other.y0 > 1.5 * em
+            and 0 <= paragraph.y0 - other.y1 <= 0.6 * em
+            and abs(left - other.x0) <= 0.5 * em
+            and min(right, other.x1) - max(left, other.x0) >= 0.8 * (right - left)
+            for i, other in enumerate(pstk)
+        ):
+            for _, member in row:
+                member.body_text_at_top = True
     for index, (text, paragraph) in enumerate(zip(sstk, pstk, strict=True)):
         source = SourceSegment(
             index=index,
@@ -6720,6 +7015,7 @@ def _classify_running_header_regions(
             break_offsets=tuple(paragraph.break_offsets),
             region_kind=paragraph.region_kind,
             page_index=paragraph.page_id,
+            body_text_at_top=getattr(paragraph, "body_text_at_top", False),
         )
         if is_running_header_segment(source):
             paragraph.region_kind = RUNNING_HEADER_REGION_KIND
@@ -7198,13 +7494,14 @@ class TranslateConverter(PDFConverterEx):
                 break_offsets=tuple(paragraph.break_offsets),
                 region_kind=paragraph.region_kind,
                 page_index=paragraph.page_id,
+                body_text_at_top=getattr(paragraph, "body_text_at_top", False),
             )
             if segment_index in already_english:
                 plans.append(SegmentPlan(source, (SegmentPart(ROLE_PRESERVE, text),)))
                 continue
             if (
                 (
-                    paragraph.region_kind == "figure_caption"
+                    paragraph.region_kind in {"figure_caption", "table_cell", "table_footnote"}
                     or (paragraph.layout_class <= 1 and paragraph.region_kind == "")
                 )
                 and re.fullmatch(r"[A-Za-z]", text.strip())
@@ -7858,6 +8155,13 @@ class TranslateConverter(PDFConverterEx):
             region_types,
             {object_id(char) for char in code_chars | identity_chars},
         )
+        caption_classes = _recover_supplementary_caption_lines(
+            [child for child in ltpage if isinstance(child, LTChar)],
+            region_types,
+            {object_id(char) for char in code_chars | identity_chars},
+        )
+        recovered_region_classes.update(caption_classes)
+        split_header_chars.difference_update(caption_classes)
         footnote_operators = _bridge_recovered_footnote_math(
             [child for child in ltpage if isinstance(child, LTChar)],
             recovered_region_classes,

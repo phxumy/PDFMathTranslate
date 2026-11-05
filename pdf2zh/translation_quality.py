@@ -6,6 +6,7 @@ import difflib
 import re
 import unicodedata
 from collections import Counter
+from decimal import Decimal
 
 from pdf2zh.line_breaking import iter_protected_literals
 from pdf2zh.source_segmentation import statistical_abbreviation_spans
@@ -70,6 +71,8 @@ _NMR_MULTIPLICITIES = frozenset(
         "tdt",
         "sept",
         "quint",
+        "hept",
+        "tq",
     }
 )
 
@@ -97,7 +100,115 @@ def has_changed_author_scope(source: str, target: str) -> bool:
 
 
 def has_suspicious_biomedical_translation(source: str, target: str) -> bool:
-    """Reject two context-supported terminology errors, not synonym choices."""
+    """Reject context-supported terminology errors, not synonym choices."""
+    if not re.search(r"\bnumbered\b", source, re.I):
+        for count in re.finditer(r"\b0\s*(?:to|[-–])\s*(\d+)\s+cells\b", source, re.I):
+            if re.search(
+                rf"0\s*(?:至|到|[-–~～])\s*{re.escape(count[1])}\s*[号號]\s*[细細]胞",
+                target,
+            ):
+                return True
+    # A compound name beginning with paired IUPAC locants does not introduce
+    # an additional compound label. Reject only the explicit duplicated shape
+    # "compound 5, 5,5-..."; ordinary independent compound numbers stay valid.
+    normalized_target = unicodedata.normalize("NFKC", target)
+    for name in re.finditer(
+        r"\bcompound\s+(\d{1,2})\s*,\s*(\d{1,2})\s*[-‐‑–—]\s*(?:di|tri|tetra)[A-Za-z]+",
+        source,
+        re.I,
+    ):
+        first, second = (re.escape(name[index]) for index in (1, 2))
+        if re.search(
+            rf"化合物\s*{first}\s*[,:(]\s*{first}\s*,\s*{second}\s*[-‐‑–—]",
+            normalized_target,
+        ):
+            return True
+    if (
+        re.match(r"\s*Table\s+\d+\.", source, re.I)
+        and re.search(r"\brat\b", source, re.I)
+        and re.search(r"\bhuman\s+in\s+vitro\s+metabolism\b", source, re.I)
+        and not re.search(r"\b(?:microsom\w*|RLM|HLM)\b", source, re.I)
+        and re.search(r"肝微粒[体體]", target)
+    ):
+        return True
+    number = r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+    quantity_pair = re.compile(
+        rf"\(\s*(?P<quantity>{number})\s*"
+        r"(?:[munµμ]?g|kg|[mµμu]?L)\s*[,;]\s*"
+        rf"(?P<amount>{number})\s*(?:[munµμ]?mol)\s*\)",
+        re.I,
+    )
+    clean_source = _INTERNAL_MARKER_RE.sub(
+        " ", _FORMULA_PLACEHOLDER_RE.sub(" ", unicodedata.normalize("NFKC", source))
+    )
+    pairs = list(quantity_pair.finditer(clean_source))
+    if pairs:
+        clean_target = _INTERNAL_MARKER_RE.sub(
+            " ", _FORMULA_PLACEHOLDER_RE.sub(" ", unicodedata.normalize("NFKC", target))
+        )
+        target_values = {
+            Decimal(match[0])
+            for match in re.finditer(rf"(?<![A-Za-z0-9.]){number}(?![\d.])", clean_target)
+        }
+        if any(
+            Decimal(pair[key]) not in target_values
+            for pair in pairs
+            for key in ("quantity", "amount")
+        ):
+            # Explicit parenthesized reagent mass/volume plus molar amount must
+            # survive. Compare values, allowing 123.0 and Chinese unit names;
+            # protected formula/style IDs must not masquerade as retained data.
+            return True
+    standalone = r"(?<![A-Za-z-]){}(?![A-Za-z0-9-])"
+    if re.search(standalone.format("dichloromethane"), source, re.I) and not re.search(
+        standalone.format("chloromethane"), source, re.I
+    ):
+        # Dropping the chlorine count changes the solvent. Preserve opaque
+        # formulas/standard abbreviations, and do not confuse a legitimately
+        # co-mentioned chloroform reagent with a mistranslated dichloromethane.
+        visible_target = _INTERNAL_MARKER_RE.sub("", target)
+        for solvent in re.finditer(r"([一二三四单單]?)氯甲烷", visible_target):
+            count = solvent[1]
+            if count in {"", "一", "单", "單"}:
+                return True
+            if count == "三" and not re.search(
+                standalone.format("(?:trichloromethane|chloroform)"), source, re.I
+            ):
+                return True
+            if count == "四" and not re.search(
+                standalone.format(r"(?:tetrachloromethane|carbon\s+tetrachloride)"),
+                source,
+                re.I,
+            ):
+                return True
+    if (
+        re.search(r"\bdesign(?:ing)?\s+(?:new|novel)\s+targets\b", source, re.I)
+        and re.search(r"\b(?:physical|physicochemical)\s+properties\b", source, re.I)
+        and re.search(r"\b(?:substituents?|heterocycles?|cLogD)\b", source, re.I)
+        and re.search(r"靶[标標点點]", target)
+    ):
+        # Synthetic targets whose substituents/properties are being designed
+        # are target compounds, not biological binding targets.
+        return True
+    solvent_word = r"(?<![A-Za-z])dioxane(?![A-Za-z0-9-])"
+    if re.search(solvent_word, target) and re.search(r"[\u3400-\u9fff]", target):
+        for solvent in re.finditer(solvent_word, source):
+            before = source[max(0, solvent.start() - 80) : solvent.start()]
+            after = source[solvent.end() :]
+            if (
+                re.search(r"\b(?:in|solvent)\s+(?:1,4-)?$", before)
+                or re.search(
+                    r"\b(?:dissolved|diluted|suspended|stirred|heated)\b[^.;!?]*$",
+                    before,
+                    re.I,
+                )
+                or re.match(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:mL|ml|L|[µμ]L)\b", after)
+                or re.match(r"\s*,\s*\d+(?:\.\d+)?\s*°\s*C\b", after)
+            ):
+                # A standalone solvent name in a procedure is ordinary prose.
+                # Do not match benzodioxane, dioxane-yl names or capitalized
+                # company/product names; protected formula glyphs stay intact.
+                return True
     if (
         re.search(r"\b(?:WRN|helicase)\b", source, re.I)
         and re.search(r"\bapo(?:protein|\s+protein)\b", source, re.I)
@@ -140,7 +251,10 @@ def _is_mass_spectrometry_readout(text: str) -> bool:
     """Recognize an m/z readout, including protected ion/adduct punctuation."""
     visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
     visible = _INTERNAL_MARKER_RE.sub(" ", visible)
-    if re.match(r"^\s*(?:(?:HRMS|MS)\s*[:;,]?\s*)?m\s*/\s*z\b", visible) is None:
+    if (
+        re.match(r"^\s*(?:(?:HRMS|MS|APCI\s+MS)\s*[:;,]?\s*)?m\s*/\s*z\b", visible)
+        is None
+    ):
         return False
     if (
         re.search(r"\d", visible) is None
@@ -170,6 +284,7 @@ def _is_mass_spectrometry_readout(text: str) -> bool:
         "NH",
         "Cl",
         "tBu",
+        "tBu",
     }
     return (
         all(word in allowed for word in words)
@@ -192,6 +307,13 @@ def is_spectroscopy_peak_list(text: str) -> bool:
     """
     if _is_mass_spectrometry_readout(text):
         return True
+    combined = re.search(r";\s*(?=(?:[A-Z][A-Z -]*\s+)?m\s*/\s*z\b)", text)
+    if combined is not None:
+        # A short NMR tail and its following MS readout can share one sentence
+        # chunk. Each side must independently satisfy the closed data grammar.
+        return is_spectroscopy_peak_list(
+            text[: combined.start()]
+        ) and _is_mass_spectrometry_readout(text[combined.end() :])
     visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
     visible = _INTERNAL_MARKER_RE.sub(" ", visible)
     multiple_shifts = len(re.findall(r"\d+\.\d+", visible)) >= 2
@@ -263,6 +385,18 @@ def is_spectroscopy_peak_list(text: str) -> bool:
         bool(words)
         and all(word in allowed for word in words)
         and re.search(r"[^\d\s.,;:()\[\]{}°=+−\-–—±/δ×]", nonwords) is None
+    )
+
+
+def is_measurement_unit_fragment(text: str) -> bool:
+    """Recognize closed velocity and CYP-abundance units with outer punctuation."""
+    punctuation = r"[\s()[\]{},.;:!?（）［］，。；：！？]*"
+    return (
+        re.fullmatch(
+            rf"{punctuation}(?:(?:mm|cm|m)\s*/\s*s|pmol\s+CYP\s*/\s*mg\s+HLM){punctuation}",
+            text,
+        )
+        is not None
     )
 
 
@@ -364,6 +498,8 @@ def is_assay_measurement_label(text: str) -> bool:
     anchors = {
         "ADP-Glo",
         "CellTiter-Glo",
+        "hPBMC",
+        "PBMC",
         "Caco-2",
         "CTG",
         "IC",
@@ -602,7 +738,58 @@ def has_changed_numeric_citations(source: str, target: str) -> bool:
                     result.update([int(bounds[0])])
         return result
 
-    return numbers(source) != numbers(target)
+    source_numbers = numbers(source)
+    if source_numbers != numbers(target):
+        return True
+    # Drug/compound labels are not bibliographic references. Only infer this
+    # distinction when the source explicitly binds a parenthesized number to a
+    # compound or a drug code in biomedical prose; an unbound bare number alone
+    # is insufficient evidence. Genuine source citations with that number exempt
+    # this narrow check, including bracketed ranges and explicit Ref./Reference.
+    prose = unicodedata.normalize("NFKC", _strip_non_prose(source))
+    translated = unicodedata.normalize("NFKC", _strip_non_prose(target))
+    bound_compounds = set(
+        re.findall(
+            r"\b(?:compound|drug|inhibitor|ligand|molecule)\s*\(\s*(\d{1,3}[a-z]?)\s*\)",
+            prose,
+            re.I,
+        )
+    )
+    if re.search(
+        r"\b(?:compounds?|drugs?|inhibitors?|ligands?|molecules?)\b", prose, re.I
+    ):
+        bound_compounds.update(
+            re.findall(
+                r"\b[A-Z]{2,8}[-‐‑–—]?\d[A-Za-z0-9-]*\s*\(\s*(\d{1,3}[a-z]?)\s*\)",
+                prose,
+            )
+        )
+    explicit_references = {
+        match["identifier"]
+        for match in _SOURCE_CROSS_REFERENCE_RE.finditer(prose)
+        if match["label"].casefold().startswith("ref")
+    }
+    for _, _, kind, identifiers, separators in _source_reference_groups(prose):
+        if kind != "reference":
+            continue
+        explicit_references.update(identifiers)
+        for left, right, relation in zip(identifiers, identifiers[1:], separators):
+            if relation == "range" and left.isdecimal() and right.isdecimal():
+                start, end = int(left), int(right)
+                if 0 <= end - start <= 1000:
+                    explicit_references.update(
+                        str(number) for number in range(start, end + 1)
+                    )
+    for number in bound_compounds:
+        if number in explicit_references or (
+            number.isdecimal() and int(number) in source_numbers
+        ):
+            continue
+        if re.search(
+            rf"文[献獻]\s*[\[(]?\s*{re.escape(number)}(?![A-Za-z0-9])", translated
+        ):
+            return True
+    return False
 
 
 def has_reversed_not_only_condition(source: str, target: str) -> bool:
@@ -737,6 +924,111 @@ def _has_premature_sequence_result(source: str, target: str) -> bool:
     )
 
 
+def _has_reversed_half_life_exception(source: str, target: str) -> bool:
+    """Keep a measured half-life attached to the explicitly named exception."""
+    for match in re.finditer(
+        r"\bexcept\s+for\s+(?:compound\s+)?(?P<id>\d+[a-z]?)\s*,\s*"
+        r"(?:the\s+)?half[-\s]life\s*(?:=\s*)?"
+        r"(?P<value>\{\{?v\d+\}?\}|\d+(?:\.\d+)?)",
+        source,
+        re.I,
+    ):
+        wrong_scope = re.search(
+            rf"除(?:化合物)?\s*{re.escape(match['id'])}(?![A-Za-z0-9])"
+            rf"(?:以|之)?外\s*[,，]?\s*(?P<claim>[^。；;]{{0,120}}?"
+            rf"半衰期[^。；;]{{0,50}}?{re.escape(match['value'])})",
+            target,
+        )
+        if wrong_scope and not re.search(
+            r"其(?!余|餘|他)|它|该化合物|該化合物|此化合物",
+            wrong_scope['claim'],
+        ):
+            return True
+    return False
+
+
+def _has_invented_dioxane_addition(source: str, target: str) -> bool:
+    """Reject turning an existing dioxane medium into a later addition step.
+
+    Require the same explicit volume on both sides and a mixture/stirring
+    clause. This does not infer order from unspecified solvents or quantities.
+    """
+    from pdf2zh.source_segmentation import scientific_sentence_parts
+
+    for sentence in scientific_sentence_parts(source):
+        if not re.search(r"\bwas\s+added\s+to\b", sentence, re.I):
+            continue
+        medium = re.search(
+            r"\bin\s+dioxane\s*\((?P<volume>\d+(?:\.\d+)?)\s*(?P<unit>mL|L)\)"
+            r"\s+and\s+(?:the\s+)?(?:resulting\s+)?mixture\s+(?:was\s+)?"
+            r"(?:stirred|heated)\b",
+            sentence,
+            re.I,
+        )
+        if medium and re.search(
+            r"(?:再|随后|隨後|然后|然後|接着|接著)\s*加入\s*"
+            rf"(?:二氧六环|二氧六環|二氧杂环己烷|dioxane)\s*\(\s*"
+            rf"{re.escape(medium['volume'])}\s*{re.escape(medium['unit'])}\s*\)",
+            target,
+            re.I,
+        ):
+            return True
+    return False
+
+
+def _has_omitted_permeability_improvement(source: str, target: str) -> bool:
+    """Retain an observed permeability result, including in prose-gap retries.
+
+    A numerical comparison may be split around protected measurements. The
+    opening gap still contains the result predicate; translating it as only
+    ``for`` loses that result. Compound labels also let a complete paragraph
+    check the corresponding sentence instead of borrowing another improvement.
+    """
+    claims = re.finditer(
+        r"\b(?:(?:significant|substantial|marked|dramatic|further)\s+)?"
+        r"(?:improvement|increase)\s+in\s+(?:(?:passive|membrane)\s+)?"
+        r"permeabil(?:-\s*)?ity\s+(?:was|is|has\s+been|had\s+been)\s+"
+        r"(?:(?:also|clearly)\s+)?(?:observed|seen|found|achieved|demonstrated)\b",
+        source,
+        re.I,
+    )
+    quantity = r"(?:渗|滲|通)透(?:性|率|能力)?"
+    improvement = r"(?:提高|提升|改善|增加|增强|增強|增大|升高|更高|更好|更佳)"
+    result = re.compile(
+        rf"{quantity}[^。；;!?]{{0,48}}?{improvement}|"
+        rf"{improvement}[^。；;!?]{{0,48}}?{quantity}"
+    )
+    sentences = re.split(r"[。！？!?]|(?<=[A-Za-z)\]])\.(?:\s+|$)", target)
+    for claim in claims:
+        if re.search(
+            r"\b(?:no|without|absence\s+of)\s+(?:[a-z-]+\s+){0,2}$",
+            source[max(0, claim.start() - 40) : claim.start()],
+            re.I,
+        ):
+            continue
+        tail = re.split(r"[.!?](?:\s|$)", source[claim.end() :], maxsplit=1)[0]
+        labels = re.findall(r"(?<![A-Za-z0-9])([0-9]+[a-z]?)\s*\(", tail)
+        scopes = [target]
+        if labels:
+            # The first measured compound identifies this claim. Include the
+            # following comparison sentence when a translator splits it there.
+            label = rf"(?<![A-Za-z0-9]){re.escape(labels[0])}(?![A-Za-z0-9])"
+            scopes = []
+            for index, sentence in enumerate(sentences):
+                if re.search(label, sentence):
+                    scope = sentence
+                    if len(labels) > 1 and index + 1 < len(sentences):
+                        other = (
+                            rf"(?<![A-Za-z0-9]){re.escape(labels[1])}(?![A-Za-z0-9])"
+                        )
+                        if re.search(other, sentences[index + 1]):
+                            scope += "。" + sentences[index + 1]
+                    scopes.append(scope)
+        if not any(result.search(scope) for scope in scopes):
+            return True
+    return False
+
+
 def has_omitted_scientific_content(source: str, target: str) -> bool:
     """Reject clear loss of a scientific object, without prescribing a sentence.
 
@@ -745,9 +1037,17 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     formula placeholders survived. New ellipses cannot stand in for an object
     supplied by the PDF's following displayed expression.
     """
-    source = unicodedata.normalize("NFKC", _strip_non_prose(source))
-    target = unicodedata.normalize("NFKC", _strip_non_prose(target))
+    source = unicodedata.normalize("NFKC", source)
+    target = unicodedata.normalize("NFKC", target)
+    if _has_reversed_half_life_exception(source, target) or _has_invented_dioxane_addition(
+        source, target
+    ):
+        return True
+    source = _strip_non_prose(source)
+    target = _strip_non_prose(target)
     if _has_premature_sequence_result(source, target):
+        return True
+    if _has_omitted_permeability_improvement(source, target):
         return True
     washed = re.search(
         r"\bwashed\s+(?:(?:sequentially|successively|further|repeatedly|thoroughly)\s+)?"
@@ -1156,6 +1456,54 @@ def normalize_cjk_structural_repetitions(text: str) -> str:
     return _DUPLICATE_ATTRIBUTE_PARTICLE_RE.sub("的", normalized)
 
 
+def _chemical_reference_spans(source: str):
+    """Identify reference compounds only from explicit structure/activity relations."""
+    spans = []
+    for match in re.finditer(
+        r"\breference\s+(\d{1,3}[a-z]?)(?![A-Za-z0-9])", source, re.I
+    ):
+        prefix = re.split(
+            r"[.!?]", source[max(0, match.start() - 400) : match.start()]
+        )[-1]
+        compound = re.search(
+            r"\b(?:compound|drug|inhibitor)\s+\d+[a-z]?\b", prefix, re.I
+        )
+        relation = re.search(
+            r"\b(?:analogue|analog|homologue|homolog)\s+of\s*$|"
+            r"\b(?:activity|potency)\s+(?:to|with|than)\s*$",
+            prefix,
+            re.I,
+        )
+        property_comparison = re.search(
+            r"\bpotency\b[^.!?]{0,100}\bphysicochemical\b[^.!?]{0,80}"
+            r"\bprofile\b[^.!?]{0,80}\b(?:from|to|with)\s*$",
+            prefix,
+            re.I,
+        )
+        after = source[match.end() :]
+        benchmark = re.match(
+            r"\s+was\s+(?:first\s+)?bench[- ]?marked\s*\.\s*", after, re.I
+        )
+        prior_context = source[max(0, match.start() - 500) : match.start()]
+        benchmark_compound = bool(
+            benchmark
+            and (
+                re.match(r"This\s+compound\b", after[benchmark.end() :], re.I)
+                or (
+                    re.search(r"\b(?:analogues?|compounds?)\b", prior_context, re.I)
+                    and re.search(
+                        r"\b(?:DMPK|hepatocytes?|pharmacokinetic\w*)\b",
+                        prior_context,
+                        re.I,
+                    )
+                )
+            )
+        )
+        if (compound and relation) or property_comparison or benchmark_compound:
+            spans.append((match.start(), match.end(), match[1]))
+    return spans
+
+
 def normalize_scientific_cross_reference_placement(
     source: str,
     target: str,
@@ -1172,6 +1520,24 @@ def normalize_scientific_cross_reference_placement(
     """
 
     masked_source = _mask_cross_reference_opaque_text(source)
+    # In an explicit compound analogue/activity comparison, "reference 3"
+    # means the reference compound, not publication number 3. Validate its
+    # chemical role and number separately, then leave it out of bibliography
+    # placement rules. Ordinary "as reported in reference 3" remains a citation.
+    compound_label = (
+        r"(?:(?:参考|參考|参照|參照|参比|參比|对照|對照)?"
+        r"(?:化合物|药物|藥物|抑制剂|抑制劑)|"
+        r"(?:参考|參考|参照|參照|参比|參比|对照|對照)(?:物)?)"
+    )
+    for start, end, number in _chemical_reference_spans(masked_source):
+        if (
+            re.search(rf"{compound_label}\s*{re.escape(number)}(?![A-Za-z0-9])", target)
+            is None
+        ):
+            return None
+        masked_source = (
+            masked_source[:start] + " " * (end - start) + masked_source[end:]
+        )
     # "equation (Y = Bottom + ... , where Y ...)" introduces the expression
     # itself, not an equation number. A split-font Y= may be one opaque token.
     # Require several formula tokens, visible algebra, and a variable-definition

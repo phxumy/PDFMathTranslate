@@ -40,6 +40,7 @@ from pdf2zh.codex_errors import (
     codex_cli_error,
 )
 from pdf2zh.source_segmentation import (
+    catalog_abbreviation_spans,
     chemical_abbreviation_spans,
     scientific_sentence_parts,
     safe_chunk_boundary,
@@ -58,6 +59,7 @@ from pdf2zh.translation_quality import (
     has_changed_author_scope,
     is_spectroscopy_peak_list,
     is_reaction_condition_label,
+    is_measurement_unit_fragment,
     chemical_formula_elements,
     is_math_expression_only,
     is_assay_measurement_label,
@@ -1299,9 +1301,15 @@ class ScientificTranslator(BaseTranslator):
         return (
             "Preserve every measured quantity, qualifier, condition, and citation, "
             "including bare numbered citations such as [12]. "
+            "Keep compound labels distinct from bibliography citations: when a drug "
+            "is introduced as CODE-123 (1), a later description 'for 1' refers to "
+            "that compound, not Reference 1 unless the source explicitly says so. "
             "A citation token attached to a named effect must stay with that "
             "effect's clause, not move after the next sentence. Do not summarize "
             "captions or drop a sensitivity, maximum, or comparison. "
+            "Retain the predicate of measured improvements: 'an improvement in "
+            "permeability was observed for ...' must state that permeability "
+            "improved, not merely introduce the compared compounds with 'for'. "
             "Figure-panel letters a, b, c are case labels, not indefinite articles "
             "or electrical destinations. A measured quantity's fluctuations under "
             "an optimized field are not fluctuations of that applied field itself. "
@@ -1335,6 +1343,13 @@ class ScientificTranslator(BaseTranslator):
             "For split chemical formulas, retain the original adjacent element-symbol "
             "prefixes and suffixes. Never copy even part of a read-only formula "
             "context beside its placeholder: those glyphs are already preserved. "
+            "Translate ordinary solvent names, such as dioxane, even when they "
+            "touch a protected formula suffix. In synthetic design of new targets "
+            "with improved physical properties and chosen substituents, targets "
+            "means target compounds, not biological targets (靶标/靶点). "
+            "A range such as '0 to 4 cells' is a count, not numbered cells. "
+            "In 'compound 5,5-diethyl...', both 5s are chemical locants; do not "
+            "add a separate compound number before repeating the full name. "
             "Keep purely numerical spectroscopy peak lists and their units unchanged. "
             "In ligand-binding experiments, apo protein/apoprotein means protein "
             "without the tested ligand (无配体蛋白), unless loss of a cofactor or "
@@ -1614,6 +1629,8 @@ class ScientificTranslator(BaseTranslator):
             cache_payload["sentence_chunking"] = "complete-sentences-v2"
         if chemical_abbreviation_spans(source):
             cache_payload["chemical_abbreviation_chunking"] = "v1"
+        if catalog_abbreviation_spans(source):
+            cache_payload["catalog_abbreviation_chunking"] = "v1"
         payload = json.dumps(
             cache_payload,
             ensure_ascii=True,
@@ -1636,6 +1653,8 @@ class ScientificTranslator(BaseTranslator):
         cache_payload = {"formula_context": normalized, "source": source}
         if chemical_abbreviation_spans(source):
             cache_payload["chemical_abbreviation_chunking"] = "v1"
+        if catalog_abbreviation_spans(source):
+            cache_payload["catalog_abbreviation_chunking"] = "v1"
         payload = json.dumps(
             cache_payload,
             ensure_ascii=True,
@@ -2003,6 +2022,7 @@ class ScientificTranslator(BaseTranslator):
             or is_protected_literal_only(text)
             or is_spectroscopy_peak_list(text)
             or is_reaction_condition_label(text)
+            or is_measurement_unit_fragment(text)
             or is_quantum_gate_label(text)
             or is_math_expression_only(text)
             or is_assay_measurement_label(text)
@@ -2221,6 +2241,8 @@ class ScientificTranslator(BaseTranslator):
     def _prose_cache_key(cls, source: str) -> str:
         # Only paragraphs that the previous splitter could sever need new keys;
         # ordinary short prose, references and unrelated caches remain reusable.
+        if catalog_abbreviation_spans(source):
+            return "pdf2zh:catalog-abbreviation-sentences:v1\n" + source
         if chemical_abbreviation_spans(source):
             return "pdf2zh:chemical-abbreviation-sentences:v1\n" + source
         if cls._has_long_scientific_sentence(source):
@@ -2445,6 +2467,8 @@ class ScientificTranslator(BaseTranslator):
     ) -> str | None:
         """Retry one failed chunk without discarding other valid chunk results."""
 
+        if is_measurement_unit_fragment(source):
+            return source
         if not (self.ignore_cache or ignore_cache):
             cached = self.cache.get(self._prose_cache_key(source))
             accepted = self._accepted_contextual_translation(
@@ -2509,14 +2533,16 @@ class ScientificTranslator(BaseTranslator):
         for match in self.FORMULA_TOKEN_RE.finditer(source):
             gap = source[cursor : match.start()]
             parts.append(gap)
-            if re.search(r"[A-Za-z]{2,}", gap):
+            if re.search(r"[A-Za-z]{2,}", gap) and not is_measurement_unit_fragment(
+                gap
+            ):
                 prose_indices.append(len(parts) - 1)
                 prose_spans.append(gap)
             parts.append(match.group(0))
             cursor = match.end()
         tail = source[cursor:]
         parts.append(tail)
-        if re.search(r"[A-Za-z]{2,}", tail):
+        if re.search(r"[A-Za-z]{2,}", tail) and not is_measurement_unit_fragment(tail):
             prose_indices.append(len(parts) - 1)
             prose_spans.append(tail)
 
@@ -4167,6 +4193,7 @@ class ScientificTranslator(BaseTranslator):
         if (
             is_spectroscopy_peak_list(source)
             or is_reaction_condition_label(source)
+            or is_measurement_unit_fragment(source)
             or is_math_expression_only(source)
             or is_assay_measurement_label(source)
         ):
@@ -4991,6 +5018,7 @@ class ScientificTranslator(BaseTranslator):
             "optim",
             "inform",
             "intell",
+            "invest",
             "microsyst",
             "learn",
             "mach",
@@ -5397,6 +5425,11 @@ class ScientificTranslator(BaseTranslator):
         if re.fullmatch(
             rf"(?:U\.S\.|US|European|International)\s+Patent\s+No\.\s*"
             rf"[\d,]+(?:\s+[A-Z]\d)?\s*\({year}\)\.?",
+            remaining,
+        ):
+            return True
+        if re.fullmatch(
+            rf"PCT\s+Int\.\s+Appl\.\s+WO\d{{10}},\s*{year}\.?",
             remaining,
         ):
             return True

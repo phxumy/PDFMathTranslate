@@ -9,6 +9,7 @@ from pdf2zh.converter import (
     _collect_readonly_formula_contexts,
     _formula_context_for_text,
     _serialize_safe_inline_formula,
+    _decode_formula_glyph,
 )
 from pdf2zh.translation_policy import DocumentTranslationPolicy
 from pdf2zh.translator import CodexTranslator
@@ -78,6 +79,18 @@ def translator_stub() -> CodexTranslator:
 
 
 class SafeFormulaSerializationTests(unittest.TestCase):
+    def test_legacy_math_pi_ascii_mappings_are_not_semantic_context(self):
+        for visible, name in (("P", "AdvPSMP4"), ("D", "AdvPSMP13")):
+            font = FakeFormulaFont({80: visible})
+            char = FakeFormulaChar(visible, 80, font, 0, 5)
+            char.fontname = name
+            self.assertIsNone(_decode_formula_glyph(char))
+            self.assertEqual(char.cid, 80)
+            self.assertIs(char.font, font)
+        mapped = FakeFormulaChar("≥", 80, FakeFormulaFont({80: "≥"}), 0, 5)
+        mapped.fontname = "AdvPSMP4"
+        self.assertEqual(_decode_formula_glyph(mapped), "≥")
+
     def test_short_inline_unicode_formula_gets_script_hints(self) -> None:
         font = FakeFormulaFont({1: "ω", 2: "c"})
         chars = [

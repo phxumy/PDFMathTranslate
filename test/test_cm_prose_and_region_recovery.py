@@ -80,7 +80,14 @@ def test_publisher_text_faces_do_not_hide_prose_as_tex_formulas():
         _mark_prose_words(chars)
         symbol = run("μ", font="STIXTwoMath-Regular", size=10)
         assert not _should_extend_formula_run(symbol, chars[0])
-    for font in ("TeX-Math", "MTEX10", "STIXTwoMath-Regular", "CMMI10"):
+    for font in (
+        "TeX-Math",
+        "MTEX10",
+        "STIXTwoMath-Regular",
+        "CMMI10",
+        "AdvPSMP4",
+        "AdvPSMP13",
+    ):
         assert _MATH_FONT_RE.search(font)
 
 

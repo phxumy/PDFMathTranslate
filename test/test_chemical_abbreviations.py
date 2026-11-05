@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from pdf2zh.source_segmentation import (
+    catalog_abbreviation_spans,
     chemical_abbreviation_spans,
     safe_chunk_boundary,
     scientific_sentence_parts,
@@ -140,6 +141,57 @@ class LaboratoryWashValidationTests(unittest.TestCase):
         self.assertFalse(
             has_omitted_scientific_content(source, "该固体依次用水和乙醇洗涤。")
         )
+
+
+class CatalogAbbreviationTests(unittest.TestCase):
+    def test_supplier_suffix_does_not_sever_antibody_catalog_identifier(self):
+        first = (
+            "Membranes were incubated with antibodies A{v0} Vendor Labs. "
+            "#123456) and B (Vendor #234567). "
+        )
+        source = first + "The bands were quantified."
+        self.assertEqual(
+            scientific_sentence_parts(source), [first, "The bands were quantified."]
+        )
+        self.assertEqual("".join(scientific_sentence_parts(source)), source)
+        for limit in range(source.index("Labs."), source.index("123456") + 6):
+            cut = safe_chunk_boundary(source, limit, ())
+            self.assertFalse(
+                any(
+                    start < cut < end
+                    for start, end in catalog_abbreviation_spans(source)
+                )
+            )
+
+    def test_real_company_sentence_ends_and_ordinary_numbers_stay_separate(self):
+        for suffix in ("Labs.", "Inc.", "Ltd.", "Corp.", "Co."):
+            for continuation in ("The next step followed.", "2025 was a good year."):
+                first = "Equipment was supplied by Vendor " + suffix + " "
+                source = first + continuation
+                self.assertEqual(
+                    scientific_sentence_parts(source), [first, continuation]
+                )
+                self.assertEqual(catalog_abbreviation_spans(source), ())
+
+    def test_all_split_sentence_cache_routes_expire_only_catalog_sources(self):
+        source = "Antibody A (Vendor Labs. #123-456) was added."
+        self.assertEqual(
+            CodexTranslator._prose_cache_key(source),
+            "pdf2zh:catalog-abbreviation-sentences:v1\n" + source,
+        )
+        for key_builder in (
+            CodexTranslator._formula_context_cache_key,
+            CodexTranslator._styled_cache_key,
+        ):
+            self.assertIn(
+                '"catalog_abbreviation_chunking":"v1"', key_builder(source, {})
+            )
+            self.assertNotIn(
+                "catalog_abbreviation_chunking",
+                key_builder(
+                    "Equipment was supplied by Vendor Labs. The assay followed.", {}
+                ),
+            )
 
 
 if __name__ == "__main__":

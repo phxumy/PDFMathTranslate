@@ -30,6 +30,8 @@ def test_broad_peak_multiplicity_and_counts_are_preserved(broad, multiplier):
         "1.16 - 1.24 and 1.32 (9H, 2 x bs), 7.95 (1H, s);",
         "[[PDF2ZH_FLOW_0]] NMR [[PDF2ZH_FLOW_1]] 1.16 and 1.32 (9H, 2 x bs), 7.95 (1H, s);",
         "1.30 (9H, 2 x s), 2.20 (2H, dd), 2.50 (1H, dt), 3.00 (1H, td), 3.50 (1H, tt), 7.95 (1H, ddd);",
+        "1.25 (d, 6H), 3.21 (hept, 1H), 7.08 (t, 1H);",
+        "0.93 (t, 3H), 1.66 (tq, 2H), 2.61 (t, 2H);",
     ],
 )
 def test_numeric_shift_conjunctions_and_observed_multiplicities_are_data(source):
@@ -48,6 +50,7 @@ def test_numeric_shift_conjunctions_and_observed_multiplicities_are_data(source)
         "1.16 (9H, bs), 1.32 (1H, m, partially obscured by DMSO peak);",
         "NMR at 1.16 and 1.32 ppm confirms the structure.",
         "1.16 (9H, broad singlet), 1.32 (1H, m);",
+        "1.25 (d, 6H), 3.21 (hept, 1H), measured at room temperature.",
     ],
 )
 def test_multiplicity_allowlist_does_not_release_prose_or_unscoped_operators(source):
@@ -68,3 +71,9 @@ def test_multiplicity_allowlist_does_not_release_prose_or_unscoped_operators(sou
 def test_data_validation_retains_every_shift_count_multiplicity_and_symbol(target):
     source = "1.16 and 1.32 (9H, 2 x bs), 7.56 (1H, bt);"
     assert translator_stub()._accepted_translation(source, target) is None
+
+
+def test_hept_and_tq_multiplicities_cannot_be_changed():
+    source = "1.25 (d, 6H), 3.21 (hept, 1H), 4.12 (tq, 2H);"
+    for target in (source.replace("hept", "t"), source.replace("tq", "q")):
+        assert translator_stub()._accepted_translation(source, target) is None

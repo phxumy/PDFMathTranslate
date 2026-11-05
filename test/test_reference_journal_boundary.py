@@ -48,3 +48,39 @@ def test_real_title_before_abbreviated_journal_still_translates(venue):
     assert translator_stub()._apply_reference_title_replacements(
         entry, [ExactReplacement(title, "量子控制的新方法")]
     ) == (entry.replace(title, "量子控制的新方法"), True)
+
+
+def test_invest_journal_with_protected_issue_and_page_tail():
+    title = "Akt inhibitors in clinical development for the treatment of cancer"
+    entry = (
+        f"(12) Pal, S. K.; Reckamp, K.; Yu, H.; Figlin, R. A. {title}. "
+        "Expert Opin. Invest. Drugs 2010, 19 (11{v102} "
+    )
+    assert CodexTranslator._reference_venue_name_is_plausible(
+        "Expert Opin. Invest. Drugs"
+    )
+    assert CodexTranslator._reference_title_boundary_is_safe(
+        entry, title, formula_context={"{v102}": "),1355−1366."}
+    )
+
+
+def test_complete_pct_wo_metadata_allows_the_work_title():
+    title = "Preparation of cyclopenta[d]pyrimidine derivatives as Akt protein kinase inhibitors"
+    entry = f"(11) J. Smith, {title}. PCT Int. Appl. WO2008006040, 2008."
+    assert CodexTranslator._reference_complete_metadata_tail_is_safe(
+        "PCT Int. Appl. WO2008006040, 2008."
+    )
+    assert CodexTranslator._structured_reference_title_spans(entry) == (title,)
+    assert CodexTranslator._reference_title_boundary_is_safe(entry, title)
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "PCT Int. Appl. WO2008006040, 2008. Untranslated title words",
+        "PCT Int. Appl. WO2008006040",
+        "PCT Int. Appl. WO2008oops, 2008.",
+    ],
+)
+def test_pct_publication_tail_must_be_complete(tail):
+    assert not CodexTranslator._reference_complete_metadata_tail_is_safe(tail)

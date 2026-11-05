@@ -44,6 +44,11 @@ _CONTINUING_CHEMICAL_ABBREVIATION = re.compile(
     rf"(?:[A-Z][a-z]?\d*){{2,}}(?:{_FORMULA})*|"
     rf"[A-Z][a-z]?{_FORMULA})(?![A-Za-z0-9])))"
 )
+_CATALOG_COMPANY_ABBREVIATION = re.compile(
+    r"\b(?:Labs?|Inc|Ltd|Corp|Co)\."
+    r"(?=\s+(?P<catalog>\#\s*\d+(?:-\d+)*(?:[A-Za-z])?)(?![A-Za-z0-9]))",
+    re.IGNORECASE,
+)
 _BIBLIOGRAPHIC_PARENTHETICAL = re.compile(
     r"\([^()\r\n]{0,900}\b(?:18|19|20)\d{2}\b[^()\r\n]{0,100}\)"
 )
@@ -85,6 +90,7 @@ def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
         tuple(match.span() for match in _CONTINUING_ABBREVIATION.finditer(text))
         + statistical_abbreviation_spans(text)
         + chemical_abbreviation_spans(text)
+        + catalog_abbreviation_spans(text)
         + tuple(match.span() for match in _DEFINED_TABLE_ABBREVIATION.finditer(text))
         + tuple(
             match.span("name")
@@ -106,6 +112,14 @@ def chemical_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(
         (match.start(), match.end("operand"))
         for match in _CONTINUING_CHEMICAL_ABBREVIATION.finditer(text)
+    )
+
+
+def catalog_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Keep a supplier suffix with its explicit following catalog identifier."""
+    return tuple(
+        (match.start(), match.end("catalog"))
+        for match in _CATALOG_COMPANY_ABBREVIATION.finditer(text)
     )
 
 

@@ -57,6 +57,7 @@ class SourceSegment:
     region_kind: str = ""
     page_height: float = 0.0
     page_index: int = 0
+    body_text_at_top: bool = False
 
 
 def is_running_header_segment(segment: SourceSegment) -> bool:
@@ -69,7 +70,10 @@ def is_running_header_segment(segment: SourceSegment) -> bool:
     places them near the top of a page.
     """
 
-    if segment.region_kind not in _RUNNING_HEADER_SOURCE_REGION_KINDS:
+    if (
+        segment.body_text_at_top
+        or segment.region_kind not in _RUNNING_HEADER_SOURCE_REGION_KINDS
+    ):
         return False
     page_height = float(segment.page_height)
     if page_height <= 0.0:
@@ -201,6 +205,15 @@ def _formula_marker_number(
     except (IndexError, TypeError, ValueError):
         return None
     normalized = _compact_digits(formula_text)
+    wrapped = re.fullmatch(
+        r"(?:\((\d{1,3})\)|\[(\d{1,3})\]|（(\d{1,3})）|［(\d{1,3})］)", normalized
+    )
+    if wrapped is not None:
+        # Publishers may place an entire bibliography label in one protected
+        # font run. Keep its token/glyphs intact while recovering the number for
+        # sequence detection; author/volume exclusions and citation confidence
+        # are still enforced by the caller.
+        normalized = next(value for value in wrapped.groups() if value is not None)
     if not normalized.isdecimal():
         return None
     return int(normalized)
@@ -476,6 +489,19 @@ def _reference_sequence_is_confident(
             return strong_entries >= 2
         if len(markers) == 2:
             return strong_entries == 2 and (heading_hint or expected_match)
+        if expected_match and starts_entry:
+            # A bibliography can finish with unpublished observations or a
+            # software catalogue rather than a journal/year/volume record.
+            # Require the exact next number established by real references,
+            # plus substantial author or version/publisher evidence.
+            if scores[0] >= 4 and _count_author_names(entries[0]) >= 3:
+                return True
+            if scores[0] >= 3 and re.search(
+                r"\bv\d+\.\d+(?:\.\d+)?\s*;\s*[^:\n]{3,100}:",
+                entries[0],
+                re.I,
+            ):
+                return True
         return scores[0] >= 5 and (heading_hint or expected_match)
     if first.kind == "formula":
         if len(markers) >= 3:

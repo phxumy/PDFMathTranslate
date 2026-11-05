@@ -20,6 +20,7 @@ from pdfminer.pdffont import PDFFont
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdftypes import (
     PDFObjRef,
+    PDFStream,
     dict_value,
     list_value,
     resolve1,
@@ -74,6 +75,54 @@ def _serialize_pdf_operand(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:f}"
     return str(value).replace("'", "")
+
+
+def _serialize_inline_image(image: PDFStream) -> str:
+    """Keep inline image bytes in the retained graphics stream, safely as ASCII.
+
+    Prefix ASCIIHexDecode to the original filter chain rather than re-encoding
+    decoded pixels. This keeps predictor/JPEG/mask data and the current CTM and
+    color state intact, while avoiding binary EI sequences in the patched PDF.
+    """
+
+    def operand(value):
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, bytes):
+            return "<" + value.hex() + ">"
+        if isinstance(value, PDFObjRef):
+            return f"{value.objid} 0 R"
+        if isinstance(value, dict):
+            return (
+                "<< "
+                + " ".join(
+                    _serialize_pdf_operand(PSLiteral(str(key))) + " " + operand(item)
+                    for key, item in value.items()
+                )
+                + " >>"
+            )
+        if isinstance(value, (list, tuple)):
+            return "[" + " ".join(operand(item) for item in value) + "]"
+        return _serialize_pdf_operand(value)
+
+    attributes = dict(image.attrs)
+    data = image.rawdata
+    filters = image.get_filters()
+    if data is None:
+        data = image.get_data()
+        filters = []
+    for key in ("F", "Filter", "DP", "DecodeParms", "FDecodeParms", "Length"):
+        attributes.pop(key, None)
+    attributes["F"] = [PSLiteral("ASCIIHexDecode")] + [item[0] for item in filters]
+    if any(item[1] for item in filters):
+        attributes["DP"] = [None] + [item[1] for item in filters]
+    header = " ".join(
+        _serialize_pdf_operand(PSLiteral(str(key))) + " " + operand(value)
+        for key, value in attributes.items()
+    )
+    return "BI " + header + "\nID\n" + data.hex() + ">\nEI\n"
 
 
 class PDFPageInterpreterEx(PDFPageInterpreter):
@@ -507,6 +556,13 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         args = self.pop(nargs)
                         # log.debug("exec: %s %r", name, args)
                         if len(args) == nargs:
+                            if name == "EI" and isinstance(args[0], PDFStream):
+                                # Capture raw bytes before the device can decode
+                                # the stream and discard its original rawdata.
+                                inline_image = _serialize_inline_image(args[0])
+                                func(*args)
+                                ops += inline_image
+                                continue
                             replacement = func(*args)
                             if name == "Do" and replacement == "n":
                                 ops += "n "
