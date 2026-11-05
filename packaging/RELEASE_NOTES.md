@@ -1,3 +1,22 @@
+## v1.9.11-codex.7.4 — 科学公式、参考文献与译文完整性修复
+
+- 修复部分数学字体将根号、横线和被开方数分别绘制时，行内公式被拆开并出现重叠的问题。根据原始字形位置恢复完整公式，保留数字及数学符号。
+- 无题名的参考文献保留完整期刊名称，避免将 `New J. Phys.` 等期刊缩写的前半段误作论文题名翻译；旧缓存中的相应替换也会重新校验。
+- 补充材料说明里的 `Ref. [n]` 与 `Refs. [n]` 保留在完整说明句内，不再抢占后续参考文献的条目编号，避免说明断句与编号挤在一起。
+- 增加对“净效应为零”等关键科学结论的漏译检查，拒绝遗漏结论的译文，并继续使用现有重试与缓存复验流程。
+- 保留由化学式、温度和时长组成的完整反应条件标签，避免将元素符号误判为未翻译的英文而中断翻译；一般实验说明仍需翻译。
+- 区分整个多步反应序列与其中单一步骤的作用，检查将最终引入的官能团错误归因于首步中间体的译文。
+- 将斜体 `tert-`、`sec-` 与紧随的烷基名称一起翻译，避免化学名称被拆成公式与正文后产生残留；数学函数和独立标号继续保留。
+- 识别包含 `m/z`、离子式和实测值的纯质谱数据，以及纯 NMR 峰表中的宽峰/多重峰标记、积分与耦合常数，避免将这些数据误判为未译英文而反复重试；带解释性文字的分析段落仍按正文翻译。
+- 根据原始公式上下文检查拆分后的简单化学式，拦截重复补写元素片段、删除或改写相邻元素的译文，避免形成错误试剂名；已有缓存也逐项重新校验。
+- 将 `aq.`、`sat.`、`conc.` 等实验缩写与后面的试剂保持在同一语句中，避免缩写句点造成错误断句，并检查“用水或其他实验溶液洗涤”等步骤中的动作漏译。
+
+内置 Codex CLI 保持 `0.166.0`。升级沿用软件独立账号、设置、翻译历史和已有译文。
+
+This release repairs split inline radicals, preserves abbreviated journal metadata and citations within supplemental notes, and rejects translations that omit explicit zero-effect conclusions. It also preserves complete reaction-condition labels, checks the scope of multistep synthesis descriptions, and keeps italic alkyl prefixes with their chemical names.
+
+Pure mass-spectrometry readouts and numerical NMR peak lists, including broad-peak multiplicities, integration counts and coupling constants, no longer trigger untranslated-English retries. Formula context detects duplicated or altered pieces of simple chemical formulas, including in cached translations. Laboratory abbreviations such as `aq.`, `sat.`, and `conc.` stay with their reagents, and omitted washing actions are rejected.
+
 ## v1.9.11-codex.7.3 — Codex CLI 0.166.0 与取消更新下载
 
 - 内置官方稳定版 Codex CLI 从 `0.163.0` 升级到 `0.166.0`，保留官方 Windows 完整包中的执行服务和运行资源，并锁定官方附件 SHA-256。

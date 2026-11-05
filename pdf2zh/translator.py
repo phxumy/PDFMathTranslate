@@ -39,7 +39,11 @@ from pdf2zh.codex_errors import (
     CodexTranslationValidationError,
     codex_cli_error,
 )
-from pdf2zh.source_segmentation import scientific_sentence_parts, safe_chunk_boundary
+from pdf2zh.source_segmentation import (
+    chemical_abbreviation_spans,
+    scientific_sentence_parts,
+    safe_chunk_boundary,
+)
 from pdf2zh.config import ConfigManager
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START, is_protected_literal_only
 from pdf2zh.translation_quality import (
@@ -53,6 +57,8 @@ from pdf2zh.translation_quality import (
     has_suspicious_biomedical_translation,
     has_changed_author_scope,
     is_spectroscopy_peak_list,
+    is_reaction_condition_label,
+    chemical_formula_elements,
     is_math_expression_only,
     is_assay_measurement_label,
     has_detached_norm_relation,
@@ -1309,6 +1315,13 @@ class ScientificTranslator(BaseTranslator):
             "(增加了 N 倍). Preserve the factor token without arithmetic rewriting. "
             "Preserve the "
             "scope of negation and of constructions such as 'not only ... but ...'. "
+            "Retain zero-effect conclusions: 'produce null effect' means that the "
+            "net effect vanishes or cancels. Keep that result as well as its "
+            "condition; translating only the condition drops the scientific claim. "
+            "If a functionality is introduced 'in a sequence of' several reactions, "
+            "preserve that whole-sequence scope. Do not claim the functionality "
+            "was introduced by the first step merely because that step gives "
+            "a named intermediate. "
             "Keep distribution adjectives attached to the random variables they "
             "describe, even when abbreviations contain periods. In particular, "
             "'i.i.d. Gaussian random variables' is one noun phrase; "
@@ -1319,6 +1332,9 @@ class ScientificTranslator(BaseTranslator):
             "Translate written chemical compound names using target-language scientific "
             "nomenclature while preserving locants, stereochemistry, and protected tokens; "
             "do not mistake a complete compound name for a mathematical formula. "
+            "For split chemical formulas, retain the original adjacent element-symbol "
+            "prefixes and suffixes. Never copy even part of a read-only formula "
+            "context beside its placeholder: those glyphs are already preserved. "
             "Keep purely numerical spectroscopy peak lists and their units unchanged. "
             "In ligand-binding experiments, apo protein/apoprotein means protein "
             "without the tested ligand (无配体蛋白), unless loss of a cofactor or "
@@ -1470,7 +1486,9 @@ class ScientificTranslator(BaseTranslator):
             ):
                 prefix_start -= 1
             prefix = text[prefix_start:token_start]
-            if len(prefix) == 1:
+            if len(prefix) == 1 or (
+                prefix.isupper() and len(chemical_formula_elements(prefix)) >= 2
+            ):
                 start = prefix_start
 
             suffix_end = token_end
@@ -1594,6 +1612,8 @@ class ScientificTranslator(BaseTranslator):
         cache_payload = {"formula_context": normalized, "source": source}
         if cls._has_long_scientific_sentence(source):
             cache_payload["sentence_chunking"] = "complete-sentences-v2"
+        if chemical_abbreviation_spans(source):
+            cache_payload["chemical_abbreviation_chunking"] = "v1"
         payload = json.dumps(
             cache_payload,
             ensure_ascii=True,
@@ -1613,8 +1633,11 @@ class ScientificTranslator(BaseTranslator):
             if isinstance(formula_context, dict) or formula_context is None
             else formula_context
         )
+        cache_payload = {"formula_context": normalized, "source": source}
+        if chemical_abbreviation_spans(source):
+            cache_payload["chemical_abbreviation_chunking"] = "v1"
         payload = json.dumps(
-            {"formula_context": normalized, "source": source},
+            cache_payload,
             ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),
@@ -1979,6 +2002,7 @@ class ScientificTranslator(BaseTranslator):
             or re.match(r"^\{v\d+\}$", text) is not None
             or is_protected_literal_only(text)
             or is_spectroscopy_peak_list(text)
+            or is_reaction_condition_label(text)
             or is_quantum_gate_label(text)
             or is_math_expression_only(text)
             or is_assay_measurement_label(text)
@@ -2197,6 +2221,8 @@ class ScientificTranslator(BaseTranslator):
     def _prose_cache_key(cls, source: str) -> str:
         # Only paragraphs that the previous splitter could sever need new keys;
         # ordinary short prose, references and unrelated caches remain reusable.
+        if chemical_abbreviation_spans(source):
+            return "pdf2zh:chemical-abbreviation-sentences:v1\n" + source
         if cls._has_long_scientific_sentence(source):
             return "pdf2zh:complete-scientific-sentences:v2\n" + source
         return source
@@ -2309,6 +2335,48 @@ class ScientificTranslator(BaseTranslator):
             )
 
     @classmethod
+    def _validate_chemical_formula_shells(cls, source, target, values):
+        """Keep split chemical formula affixes outside read-only tokens intact.
+
+        A context such as ``_{3}CN`` reveals that ``CH{v0}`` is one chemical
+        formula. Repeating only its CN suffix bypasses whole-context expansion
+        checks. Require an element-only chain with at least two element atoms;
+        nearby ordinary words, mathematical symbols and units are not affixes.
+        """
+
+        def shells(text):
+            result = {}
+            for match in cls.FORMULA_TOKEN_RE.finditer(text):
+                before = re.search(r"[A-Za-z0-9]+$", text[: match.start()])
+                after = re.match(r"[A-Za-z0-9]+", text[match.end() :])
+                affixes = tuple(m.group() if m else "" for m in (before, after))
+                result.setdefault(match.group(), []).append(
+                    tuple(
+                        (
+                            affix
+                            if chemical_formula_elements(affix) or affix.isdecimal()
+                            else ""
+                        )
+                        for affix in affixes
+                    )
+                )
+            return result
+
+        source_shells, target_shells = shells(source), shells(target)
+        for placeholder, source_affixes in source_shells.items():
+            value = values.get(placeholder)
+            if not isinstance(value, str):
+                continue
+            value = unicodedata.normalize("NFKC", value)
+            value = re.sub(r"[_^]\{(\d+)\}|[_^](\d+)", lambda m: m[1] or m[2], value)
+            for index, (prefix, suffix) in enumerate(source_affixes):
+                if len(chemical_formula_elements(prefix + value + suffix)) < 2:
+                    continue
+                if target_shells.get(placeholder, [])[index] != (prefix, suffix):
+                    return False
+        return True
+
+    @classmethod
     def _validate_contextual_translation(
         cls,
         source: str,
@@ -2324,6 +2392,8 @@ class ScientificTranslator(BaseTranslator):
         values = {
             item["placeholder"]: item["unicode_formula"] for item in formula_context
         }
+        if not cls._validate_chemical_formula_shells(source, target, values):
+            return False
 
         def unmatched_parentheses(text):
             expanded = (
@@ -3732,6 +3802,11 @@ class ScientificTranslator(BaseTranslator):
             return ()
 
         tail = entry[title_start:]
+        # Some styles omit the work title altogether.  A complete venue /
+        # volume / pages / year tail must stay intact: otherwise a period in
+        # ``New J. Phys.`` looks like the end of a fictitious title ``New J``.
+        if cls._reference_complete_metadata_tail_is_safe(tail):
+            return ()
         boundaries: list[int] = []
         protected_metadata = re.search(
             r"(?P<punct>[.!?])\s+(?:In\s+)?"
@@ -4091,6 +4166,7 @@ class ScientificTranslator(BaseTranslator):
             return None
         if (
             is_spectroscopy_peak_list(source)
+            or is_reaction_condition_label(source)
             or is_math_expression_only(source)
             or is_assay_measurement_label(source)
         ):
@@ -5593,6 +5669,11 @@ class ScientificTranslator(BaseTranslator):
             )
         title_start = entry.find(source_title)
         title_end = title_start + len(source_title)
+        if cls._reference_complete_metadata_tail_is_safe(entry[title_start:]):
+            # Revalidate model proposals and old cached replacements too.  A
+            # leading piece of an already complete publication tail is not a
+            # work title, even when the remaining abbreviation is also a venue.
+            return False
         complete_titles = (
             cls._quoted_reference_title_spans(entry)
             or cls._styled_reference_title_spans(entry)

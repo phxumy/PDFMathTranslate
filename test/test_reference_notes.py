@@ -9,6 +9,7 @@ from pdf2zh.translation_policy import (
     ROLE_REFERENCE,
     ROLE_TRANSLATE,
     SourceSegment,
+    find_reference_markers,
 )
 from test_converter_continuation import (
     FakeContinuationTranslator,
@@ -28,6 +29,51 @@ CONTINUED = (
     "which includes Refs. [11,57,64,66–69]. "
 )
 NEXT = "[66] B. Jones, Quantum gates, Phys. Rev. 101, 456 (2021)."
+
+
+@pytest.mark.parametrize("citation", ["Ref. [29]", "Refs. [29]", "Ref.[29]"])
+def test_note_citation_does_not_steal_the_following_reference_number(citation):
+    note = (
+        "See Supplemental Material at https://example.org/supplement "
+        f"for more experimental data, which includes {citation}. "
+    )
+    following = "[29] H. Ball and M. J. Biercuk, Phys. Rev. A 93, 022303 (2016). "
+    source = (
+        "[27] I. Solomon, Phys. Rev. Lett. 2, 301 (1959). "
+        + "[28] "
+        + note
+        + following
+        + "[30] C. Song et al., Phys. Rev. Lett. 119, 180511 (2017)."
+    )
+    markers = find_reference_markers(source)
+    assert [marker.number for marker in markers] == [27, 28, 29, 30]
+    plan = DocumentTranslationPolicy().plan_segment(
+        SourceSegment(index=0, text=source, page_width=612)
+    )
+    assert any(
+        part.role == ROLE_TRANSLATE and part.text.strip() == note.strip()
+        for part in plan.parts
+    )
+    assert any(
+        part.role == ROLE_REFERENCE and part.text == following for part in plan.parts
+    )
+
+
+def test_reference_heading_and_supplemental_entries_remain_markers():
+    assert [
+        marker.number
+        for marker in find_reference_markers(
+            "References [1] A. Smith, Phys. Rev. 1, 2 (2020)."
+        )
+    ] == [1]
+    markers = find_reference_markers(
+        "[S1] See Supplemental Material, which includes Ref. [S2]. "
+        "[S2] B. Jones, Phys. Rev. 2, 3 (2021)."
+    )
+    assert [(marker.prefix, marker.number) for marker in markers] == [
+        ("S", 1),
+        ("S", 2),
+    ]
 
 
 def columns():

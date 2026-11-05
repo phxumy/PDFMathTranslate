@@ -539,6 +539,63 @@ class ItalicClassifierTests(unittest.TestCase):
             "approximation theory",
         )
 
+    def test_italic_alkyl_prefix_in_numbered_reagent_list_is_translatable(self):
+        for prefix in ("tert-", "sec-"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    _is_high_confidence_prose_italic(fake_run(prefix), 10.0),
+                    prefix,
+                )
+                self.assertTrue(
+                    _has_inline_prose_context("(iv) {v0}butyl alcohol;", 0, prefix)
+                )
+                self.assertTrue(
+                    _has_inline_prose_context(
+                        "1,1-Di-{v0}butoxy-N,N-dimethylmethanamine", 0, prefix
+                    )
+                )
+                self.assertEqual(
+                    _collect_translatable_italic_runs(
+                        [fake_run(prefix)],
+                        [0],
+                        [paragraph()],
+                        ["(iv) {v0}butyl alcohol;"],
+                    ),
+                    {0: prefix},
+                )
+        for prefix, source in (
+            ("N-", "(iv) {v0}butyl"),
+            ("S-", "(iv) {v0}butyl"),
+            ("tert-", "(iv) {v0}value"),
+            ("sec-", "x={v0}butyl"),
+            ("sec-", "(iv) {v0}butylated"),
+            ("sec-", "The {v0}value is unchanged."),
+            ("tert-", "The {v0}value is unchanged."),
+        ):
+            with self.subTest(prefix=prefix, source=source):
+                self.assertFalse(_has_inline_prose_context(source, 0, prefix))
+
+    def test_chemical_prefix_allows_only_its_hyphen_in_roman_type(self):
+        for prefix in ("tert", "Tert", "sec"):
+            mixed = fake_mixed_run([(prefix, "Times-Italic"), ("-", "Times-Roman")])
+            self.assertEqual(
+                _is_high_confidence_prose_italic(mixed, 10.0), prefix + "-"
+            )
+            self.assertEqual(
+                _collect_translatable_italic_runs(
+                    [mixed], [0], [paragraph()], ["(iv) {v0}butyl alcohol;"]
+                ),
+                {0: prefix + "-"},
+            )
+        for parts in (
+            [("tert", "Times-Roman"), ("-", "Times-Italic")],
+            [("tert", "Times-Italic"), ("-", "Symbol")],
+            [("other", "Times-Italic"), ("-", "Times-Roman")],
+        ):
+            self.assertIsNone(
+                _is_high_confidence_prose_italic(fake_mixed_run(parts), 10.0)
+            )
+
     def test_math_names_products_and_protected_regions_are_not_released(self) -> None:
         self.assertIsNone(_is_high_confidence_prose_italic(fake_run("sin"), 10.0))
         self.assertIsNone(_is_high_confidence_prose_italic(fake_run("et al."), 10.0))

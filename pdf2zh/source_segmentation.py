@@ -34,6 +34,16 @@ _DEFINED_TABLE_ABBREVIATION = re.compile(
     r"(?:not\s+(?:determined|detected|available|applicable)|no\s+data)\b)",
     re.IGNORECASE,
 )
+_CONTINUING_CHEMICAL_ABBREVIATION = re.compile(
+    r"\b(?:[Aa]q|[Ss]at|[Cc]onc)\."
+    # Lower-case reagent names, concentrations and formula tokens provide a
+    # dependent operand. A new ordinary sentence such as ``conc. The ...``
+    # must retain its stop; a calendar abbreviation such as ``Sat. Next ...``
+    # must not be mistaken for saturated solution notation either.
+    rf"(?=\s+(?P<operand>(?:[a-z0-9][A-Za-z0-9{{}}_\-]*|{_FORMULA}|"
+    rf"(?:[A-Z][a-z]?\d*){{2,}}(?:{_FORMULA})*|"
+    rf"[A-Z][a-z]?{_FORMULA})(?![A-Za-z0-9])))"
+)
 _BIBLIOGRAPHIC_PARENTHETICAL = re.compile(
     r"\([^()\r\n]{0,900}\b(?:18|19|20)\d{2}\b[^()\r\n]{0,100}\)"
 )
@@ -74,6 +84,7 @@ def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
     return (
         tuple(match.span() for match in _CONTINUING_ABBREVIATION.finditer(text))
         + statistical_abbreviation_spans(text)
+        + chemical_abbreviation_spans(text)
         + tuple(match.span() for match in _DEFINED_TABLE_ABBREVIATION.finditer(text))
         + tuple(
             match.span("name")
@@ -83,6 +94,18 @@ def scientific_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
                 text,
             )
         )
+    )
+
+
+def chemical_abbreviation_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Keep an aqueous/saturated/concentrated qualifier with its reagent.
+
+    The lookahead allows adjacent qualifiers (``sat. aq. NaCl``) to overlap,
+    so hard chunk boundaries also retain the first following reagent token.
+    """
+    return tuple(
+        (match.start(), match.end("operand"))
+        for match in _CONTINUING_CHEMICAL_ABBREVIATION.finditer(text)
     )
 
 

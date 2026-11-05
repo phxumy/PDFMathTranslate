@@ -3064,6 +3064,85 @@ _ENCLOSING_SPLIT_MATH_RE = re.compile(
 )
 
 
+def _merge_split_radical_numbers(
+    segments: list[str],
+    formulas: list[list[LTChar]],
+    formula_lines: list[list[LTLine]],
+    formula_paragraphs: list[int],
+    paragraph_text_chars: list[list[LTChar]],
+) -> None:
+    """Keep a number under an out-of-order radical in its original formula.
+
+    Some math fonts draw the overbar before the ordinary-font radicand and
+    the radical sign afterwards. Serializing these as two placeholders with
+    a prose number between them duplicates their overlapping horizontal span.
+    Rejoin only numbers visibly enclosed by matching raised math glyphs.
+    """
+    pattern = re.compile(r"\{v(\d+)\}([0-9]+)\{v(\d+)\}")
+    for paragraph_id, text in enumerate(segments):
+        for match in list(pattern.finditer(text))[::-1]:
+            left_id, right_id = int(match[1]), int(match[3])
+            if max(left_id, right_id) >= len(formulas) or left_id == right_id:
+                continue
+            if any(formula_paragraphs[i] != paragraph_id for i in (left_id, right_id)):
+                continue
+            left, right = formulas[left_id], formulas[right_id]
+            if (
+                not left
+                or not right
+                or any(
+                    getattr(char, "_pdf2zh_layout_class", None) == 0
+                    for char in left + right
+                )
+            ):
+                continue
+            em = max(float(char.size) for char in left + right)
+            if em <= 0:
+                continue
+            overlap_left = min(float(char.x0) for char in right)
+            overlap_right = max(float(char.x1) for char in left)
+            if not 0.3 * em <= overlap_right - overlap_left <= 5 * em:
+                continue
+            candidates = [
+                char
+                for char in paragraph_text_chars[paragraph_id]
+                if char.get_text().isdigit()
+                and overlap_left <= float(char.x0) < overlap_right
+                and float(char.x1) <= overlap_right + 0.15 * em
+                and 0.9 * em <= float(char.size) <= 1.1 * em
+                and any(
+                    abs(float(other.y0) - float(char.y0)) <= 0.15 * em
+                    for other in right
+                )
+            ]
+            candidates.sort(key=lambda char: float(char.x0))
+            if "".join(char.get_text() for char in candidates) != match[2]:
+                continue
+            number_left = float(candidates[0].x0)
+            number_right = float(candidates[-1].x1)
+            baseline = float(candidates[0].y0)
+            bars = [
+                char
+                for char in left
+                if _MATH_FONT_RE.search(_formula_font_name(char))
+                and 0.4 * em <= float(char.y0) - baseline <= 1.1 * em
+                and float(char.x0) >= number_left - 0.15 * em
+                and float(char.x1) <= number_right + 0.15 * em
+            ]
+            if not bars or not any(
+                _MATH_FONT_RE.search(_formula_font_name(char))
+                and float(char.x0) < number_left
+                and abs(float(char.x1) - number_left) <= 0.20 * em
+                and abs(float(char.y0) - float(bars[0].y0)) <= 0.15 * em
+                for char in right
+            ):
+                continue
+            formulas[left_id] = left + candidates + right
+            formula_lines[left_id].extend(formula_lines[right_id])
+            text = text[: match.start()] + f"{{v{left_id}}}" + text[match.end() :]
+        segments[paragraph_id] = text
+
+
 def _merge_overlapping_split_math_islands(
     segments: list[str],
     formulas: list[list[LTChar]],
@@ -5156,6 +5235,7 @@ def _is_high_confidence_prose_italic(
     subsection_label = bool(_SUBSECTION_ITALIC_LABEL_RE.fullmatch(text))
     runin_heading = bool(_RUNIN_ITALIC_HEADING_RE.fullmatch(text))
     structural_label = front_matter_label or subsection_label or runin_heading
+    alkyl_prefix = re.fullmatch(r"(?:tert|sec)[-‐‑–—]", text, re.IGNORECASE)
     all_italic = all(_is_prose_italic_font(char.fontname) for char in visible)
     if not all_italic and not (
         (
@@ -5166,6 +5246,12 @@ def _is_high_confidence_prose_italic(
             runin_heading
             and any(_is_prose_italic_font(char.fontname) for char in visible)
             and all(_is_non_math_text_font(char.fontname) for char in visible)
+        )
+        or (
+            alkyl_prefix
+            and all(_is_prose_italic_font(char.fontname) for char in visible[:-1])
+            and visible[-1].get_text() in "-‐‑–—"
+            and _is_non_math_text_font(visible[-1].fontname)
         )
     ):
         # Ordinary bold text is not generally interchangeable with prose:
@@ -5190,7 +5276,7 @@ def _is_high_confidence_prose_italic(
         and any(getattr(char, _FORCED_STYLED_PROSE_ATTR, False) for char in visible)
     )
     if len(letters) < (2 if parenthetical_connector else 4) and not (
-        forced_short_prose
+        forced_short_prose or alkyl_prefix
     ):
         return None
     words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
@@ -5205,7 +5291,7 @@ def _is_high_confidence_prose_italic(
         return None
     if parenthetical_connector:
         return text
-    if not structural_label and words[0].casefold() in _MATH_WORDS:
+    if not structural_label and not alkyl_prefix and words[0].casefold() in _MATH_WORDS:
         return None
     if not structural_label and len(words) >= 2 and len(words[0]) == 1:
         # A one-letter leading atom is much more likely to be a variable label
@@ -5235,7 +5321,7 @@ def _is_high_confidence_prose_italic(
     if len(words) == 1:
         word = words[0]
         lowered = word.casefold()
-        if lowered in _MATH_WORDS or word.isupper():
+        if (lowered in _MATH_WORDS and not alkyl_prefix) or word.isupper():
             return None
         if word != word.lower() and word != word.capitalize():
             return None
@@ -5293,11 +5379,32 @@ def _has_inline_prose_context(
         return False
     left = segment[: match.start()].rstrip()
     right = segment[match.end() :].lstrip()
+    chemical_prefix = bool(
+        styled_text and re.fullmatch(r"(?:tert|sec)[-‐‑–—]", styled_text, re.IGNORECASE)
+    )
+    chemical_tail = re.match(
+        r"(?:(?:prop|but|pent|hex|hept|oct|non|dec)(?:yl|oxy)|amyl)\b",
+        segment[match.end() :],
+        re.IGNORECASE,
+    )
     blocked = "=+−-*/×÷<>[]_"
-    if left and left[-1] in blocked:
+    if (
+        left
+        and left[-1] in blocked
+        and not (
+            chemical_prefix
+            and chemical_tail
+            and re.search(r"\b(?:di|tri|tetra|bis|tris)-$", left, re.IGNORECASE)
+        )
+    ):
         return False
     if right and right[0] in blocked:
         return False
+    if chemical_prefix:
+        # Italic chemical prefixes belong to the following alkyl name even
+        # at the start of an enumerated reagent list, e.g. ``(iv) tert-butyl``.
+        # Site labels and stereochemical descriptors are deliberately excluded.
+        return chemical_tail is not None
     prose_boundary_punctuation = r"[\s,;:.!?“”\"'‘’]*"
     left_is_prose = (
         re.search(rf"[A-Za-z]{{2,}}{prose_boundary_punctuation}$", left) is not None
@@ -8210,6 +8317,9 @@ class TranslateConverter(PDFConverterEx):
                 getattr(self, "source_spelling", None),
             )
             paragraph.break_offsets = list(offsets)
+        _merge_split_radical_numbers(
+            sstk, var, varl, varp, paragraph_text_chars
+        )
         _merge_overlapping_split_math_islands(
             sstk,
             var,

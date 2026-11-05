@@ -58,6 +58,12 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.7.4
+
+- Preserve complete inline radicals, abbreviated journal names, and citations within supplemental-material notes.
+- Reject translations that omit explicit zero-effect conclusions, including previously cached output. See the [release notes](./packaging/RELEASE_NOTES.md) for details.
+- Keep the bundled Codex CLI at `0.166.0` and retain the app's independent login, settings and saved translations during upgrades.
+
 ### New in v1.9.11-codex.6.1
 
 - Fix the `Parameter interrupted is not a valid keyword argument` error when opening translation history and local file management in newer Edge / WebView2 versions. Automatic scrolling now runs entirely in the frontend without passing browser scroll results to a backend callback.
@@ -105,7 +111,7 @@ for account and sign-in details.
 
 ### Codex fields and model IDs (checked October 28, 2026)
 
-These field rules apply to desktop releases codex.5 through codex.7.3. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
+These field rules apply to desktop releases codex.5 through codex.7.4. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
 
 Starting with codex.7.2, the bundled CLI uses independent credentials under `%USERPROFILE%\.config\PDFMathTranslate\codex`, including when `CODEX_BIN` explicitly points to the bundled executable. Login, logout, account/model queries, and translation all use this scope; inherited OpenAI credentials are not reused. Upgrading requires signing in once, without copying or modifying personal Codex credentials. An external CLI selected by the user retains its existing `CODEX_HOME` and credential store. The account panel displays email, plan, quota remaining percentages and reset times from the official account RPCs when available. Failed queries show unavailable, and API-key billing balances are not supplied by this interface. Separate sign-ins do not create extra account quota.
 

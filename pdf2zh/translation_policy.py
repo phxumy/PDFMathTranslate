@@ -268,6 +268,13 @@ def find_reference_markers(
     for pattern, kind in numbered_patterns:
         prefix = "S" if kind.startswith("supplement") else ""
         for match in re.finditer(pattern, text):
+            if kind in {"bracket", "supplement-bracket"} and re.search(
+                r"\bRefs?\.\s*$", text[: match.start()], re.IGNORECASE
+            ):
+                # A supplemental-material note can cite the next reference
+                # before its actual bibliography entry.  Do not let that inline
+                # ``Ref. [29]`` consume the next number in the entry sequence.
+                continue
             markers.append(_numbered_marker(match, kind, prefix))
 
     for match in _FORMULA_RE.finditer(text):

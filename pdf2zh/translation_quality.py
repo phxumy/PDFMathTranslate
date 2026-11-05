@@ -36,6 +36,53 @@ _DOI_RE = re.compile(
 _ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
 _VISIBLE_SEPARATOR_RE = re.compile(r"[^\w]+", re.UNICODE)
 _CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;。！？；\r\n]")
+_CHEMICAL_ELEMENTS = frozenset(
+    "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe "
+    "Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In "
+    "Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu "
+    "Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np "
+    "Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl "
+    "Mc Lv Ts Og".split()
+)
+_NMR_MULTIPLICITIES = frozenset(
+    {
+        "s",
+        "d",
+        "t",
+        "q",
+        "m",
+        "br",
+        "bs",
+        "bd",
+        "bt",
+        "bq",
+        "bm",
+        "dd",
+        "dt",
+        "td",
+        "tt",
+        "qd",
+        "dq",
+        "ddd",
+        "ddt",
+        "dtd",
+        "dtt",
+        "tdt",
+        "sept",
+        "quint",
+    }
+)
+
+
+def chemical_formula_elements(text: str) -> tuple[str, ...]:
+    """Parse only a plain element/stoichiometry chain, never chemical prose."""
+    text = unicodedata.normalize("NFKC", text)
+    if re.fullmatch(r"(?:[A-Z][a-z]?\d*)+", text) is None:
+        return ()
+    elements = tuple(re.findall(r"[A-Z][a-z]?", text))
+    return (
+        elements if all(element in _CHEMICAL_ELEMENTS for element in elements) else ()
+    )
 
 
 def has_changed_author_scope(source: str, target: str) -> bool:
@@ -89,8 +136,53 @@ def has_suspicious_biomedical_translation(source: str, target: str) -> bool:
     )
 
 
+def _is_mass_spectrometry_readout(text: str) -> bool:
+    """Recognize an m/z readout, including protected ion/adduct punctuation."""
+    visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
+    visible = _INTERNAL_MARKER_RE.sub(" ", visible)
+    if re.match(r"^\s*(?:(?:HRMS|MS)\s*[:;,]?\s*)?m\s*/\s*z\b", visible) is None:
+        return False
+    if (
+        re.search(r"\d", visible) is None
+        and _FORMULA_PLACEHOLDER_RE.search(text) is None
+    ):
+        return False
+    words = re.findall(r"[A-Za-z]+", visible)
+    allowed = {
+        "m",
+        "z",
+        "MS",
+        "HRMS",
+        "ES",
+        "ESI",
+        "EI",
+        "CI",
+        "APCI",
+        "APPI",
+        "MALDI",
+        "TOF",
+        "FAB",
+        "M",
+        "H",
+        "Na",
+        "K",
+        "Li",
+        "NH",
+        "Cl",
+        "tBu",
+    }
+    return (
+        all(word in allowed for word in words)
+        and re.search(
+            r"[^\d\s.,;:()\[\]{}=+−\-–—±/%⁺⁻]",
+            re.sub(r"[A-Za-z]+", "", visible),
+        )
+        is None
+    )
+
+
 def is_spectroscopy_peak_list(text: str) -> bool:
-    """Recognize numerical NMR peak data without admitting chemical prose.
+    """Recognize numerical NMR/MS data without admitting chemical prose.
 
     A page continuation can begin in the middle of an NMR list. Its multiplicity
     letters and Hz units are data, not untranslated English. Require several
@@ -98,6 +190,8 @@ def is_spectroscopy_peak_list(text: str) -> bool:
     unit/integration signal and a closed vocabulary;
     even a single natural-language or solvent word keeps the normal prose route.
     """
+    if _is_mass_spectrometry_readout(text):
+        return True
     visible = _FORMULA_PLACEHOLDER_RE.sub(" ", text)
     visible = _INTERNAL_MARKER_RE.sub(" ", visible)
     multiple_shifts = len(re.findall(r"\d+\.\d+", visible)) >= 2
@@ -110,6 +204,33 @@ def is_spectroscopy_peak_list(text: str) -> bool:
         return False
     if not re.search(r"\b(?:MHz|Hz|ppm)\b|\d+H\b", visible):
         return False
+    # Conjunctions between numeric shifts and a count before a multiplicity
+    # are data notation (e.g. 1.16 and 1.32 (9H, 2 x bs)), not free prose.
+    # Validate each occurrence before extending the otherwise closed vocabulary.
+    number = r"(?:\d+(?:\.\d+)?|\.\d+)"
+    multiplicity = "|".join(
+        sorted(_NMR_MULTIPLICITIES, key=lambda word: (-len(word), word))
+    )
+    if re.search(r"\band\b", visible) and not any(
+        re.search(r"\d+\s*H\b", group) and re.search(rf"\b(?:{multiplicity})\b", group)
+        for group in re.findall(r"\([^()]*\)", visible)
+    ):
+        # A pair of values with a unit ("6.43 and 5.07 ppm") is still prose.
+        # The special conjunction allowance needs an actual peak integration
+        # and multiplicity record, not just NMR-looking units or decimals.
+        return False
+    for match in re.finditer(r"\band\b", visible):
+        if (
+            re.search(rf"(?<![\w.]){number}\s*$", visible[: match.start()]) is None
+            or re.match(rf"\s*{number}(?![\w.])", visible[match.end() :]) is None
+        ):
+            return False
+    for match in re.finditer(r"\bx\b|×", visible):
+        if (
+            re.search(r"(?<![\w.])\d+\s*$", visible[: match.start()]) is None
+            or re.match(rf"\s*(?:{multiplicity})\b", visible[match.end() :]) is None
+        ):
+            return False
     words = re.findall(r"[A-Za-z]+", visible)
     allowed = {
         "H",
@@ -134,31 +255,14 @@ def is_spectroscopy_peak_list(text: str) -> bool:
         "CD",
         "D",
         "O",
-        "s",
-        "d",
-        "t",
-        "q",
-        "m",
-        "br",
-        "dd",
-        "dt",
-        "td",
-        "tt",
-        "qd",
-        "dq",
-        "ddd",
-        "ddt",
-        "dtd",
-        "dtt",
-        "tdt",
-        "sept",
-        "quint",
-    }
+        "and",
+        "x",
+    } | _NMR_MULTIPLICITIES
     nonwords = re.sub(r"[A-Za-z]+", "", visible)
     return (
         bool(words)
         and all(word in allowed for word in words)
-        and re.search(r"[^\d\s.,;:()\[\]{}°=+−\-–—±/δ]", nonwords) is None
+        and re.search(r"[^\d\s.,;:()\[\]{}°=+−\-–—±/δ×]", nonwords) is None
     )
 
 
@@ -221,6 +325,30 @@ def is_math_expression_only(text: str) -> bool:
         return False
     remaining = re.sub(r"[A-Za-z]+", "", visible)
     return re.search(r"[^\d\s.,;:()\[\]{}=+−\-–—±/×·*^_<>≤≥≈≃≡|]", remaining) is None
+
+
+def is_reaction_condition_label(text: str) -> bool:
+    """Keep a formula, numeric temperature, and duration as unchanged data.
+
+    Scheme labels may leave only an element symbol visible beside a protected
+    formula suffix. Require the complete three-field grammar; compound names,
+    instructions and reaction prose still need translation.
+    """
+    label = re.sub(r"^\s*\((?:[ivxlcdm]+|\d{1,2})\)\s*", "", text)
+    fields = re.split(r"\s*[,;]\s*", label.strip().rstrip(";, "))
+    if len(fields) != 3:
+        return False
+    number = r"[+−-]?(?:\d+(?:\.\d+)?|\.\d+)"
+    protected_unit = r"(?:\{\{v\d+\}\}|\{v\d+\}|\[\[PDF2ZH_FLOW_\d+\]\])"
+    if re.fullmatch(rf"{number}\s*(?:°\s*C|K|{protected_unit})", fields[1]) is None:
+        return False
+    if re.fullmatch(rf"{number}\s*(?:h|min|s)", fields[2]) is None:
+        return False
+    formula, protected = _FORMULA_PLACEHOLDER_RE.subn("", fields[0])
+    formula, flow_guards = re.subn(r"\[\[PDF2ZH_FLOW_\d+\]\]", "", formula)
+    if not formula.strip():
+        return bool(protected or flow_guards)
+    return bool(chemical_formula_elements(formula))
 
 
 def is_assay_measurement_label(text: str) -> bool:
@@ -557,6 +685,58 @@ def has_new_unbalanced_prose_parentheses(source: str, target: str) -> bool:
     return after > max(0, before) or after < min(0, before)
 
 
+def _has_premature_sequence_result(source: str, target: str) -> bool:
+    """Reject assigning a sequence-wide introduction to its first intermediate.
+
+    Require named intermediate/final compound identifiers and explicit later
+    steps in both languages. This does not prescribe where an overall summary
+    belongs, or infer reaction mechanisms from compound names.
+    """
+    sequence = re.search(
+        r"\bintroduced\s+(?:in|by|through|via)\s+(?:a|the)\s+sequence\s+of\b",
+        source,
+        re.I,
+    )
+    if sequence is None:
+        return False
+    tail = re.split(r"[.!?](?:\s|$)", source[sequence.end() :], maxsplit=1)[0]
+    products = list(
+        re.finditer(
+            r"\bto\s+(?:give|afford|yield)\s+"
+            r"(?:(?:the|a|an|intermediate|compound|scaffold|novel|target|product)\s+){0,5}"
+            r"(?P<id>\d+[a-z]?)\b",
+            tail,
+            re.I,
+        )
+    )
+    if len(products) < 2 or products[0]["id"] == products[-1]["id"]:
+        return False
+    if (
+        re.search(r",|\band\b", tail[products[0].end() : products[-1].start()], re.I)
+        is None
+    ):
+        return False
+    intermediate = re.escape(products[0]["id"])
+    final = re.escape(products[-1]["id"])
+    early_result = re.search(
+        r"(?:通过|通過|经|經|由)[^。；;!?]{1,80}(?:引入|引进|引進)"
+        r"[^。；;!?]{0,100}(?:得到|获得|獲得|生成|制得)\s*"
+        rf"{intermediate}(?![A-Za-z0-9])",
+        target,
+    )
+    if early_result is None:
+        return False
+    if re.search(
+        r"系列|序列|依次|先后|先後|[二三四两兩多]步|\d+\s*步", early_result[0]
+    ):
+        return False
+    later = re.split(r"[。!?]", target[early_result.end() :], maxsplit=1)[0]
+    return bool(
+        re.search(r"随后|隨後|然后|然後|接着|接著|继而|繼而|再", later)
+        and re.search(rf"(?<![A-Za-z0-9]){final}(?![A-Za-z0-9])", later)
+    )
+
+
 def has_omitted_scientific_content(source: str, target: str) -> bool:
     """Reject clear loss of a scientific object, without prescribing a sentence.
 
@@ -567,6 +747,50 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     """
     source = unicodedata.normalize("NFKC", _strip_non_prose(source))
     target = unicodedata.normalize("NFKC", _strip_non_prose(target))
+    if _has_premature_sequence_result(source, target):
+        return True
+    washed = re.search(
+        r"\bwashed\s+(?:(?:sequentially|successively|further|repeatedly|thoroughly)\s+)?"
+        r"with\s+(?:[^.;!?]{0,80}\b)?"
+        r"(?:water|brine|aqueous|aq\.|saturated|sat\.|buffer|saline|"
+        r"methanol|ethanol|ether|acetate|hexane|dichloromethane|acetonitrile|"
+        r"hydrochloric\s+acid|sodium\s+(?:hydroxide|bicarbonate|carbonate)|"
+        r"HCl|NaOH|NaHCO|NH4Cl)(?![A-Za-z])",
+        source,
+        re.I,
+    )
+    if washed and re.search(r"洗|[冲沖][净淨淋刷]", target) is None:
+        # An aqueous abbreviation used to split the action from its reagent,
+        # admitting a dangling translation such as "then with saturated ...".
+        # Require a laboratory liquid; physical "washed out" is not this verb.
+        return True
+    zero_effect = re.search(
+        r"\b(?:null|zero|no)(?:\s+net)?\s+effects?\b|"
+        r"\bnet\s+effects?\s+(?:is|are|was|were|becomes?|remains?)\s+(?:zero|null)\b",
+        source,
+        re.I,
+    )
+    if zero_effect:
+        # Check affirmative zero-effect statements only. A negated statement
+        # can legitimately be paraphrased as a positive, nonzero effect.
+        prefix = re.split(r"[.;:!?]", source[: zero_effect.start()])[-1]
+        negated = re.search(
+            r"\b(?:not|never|cannot|can't|doesn't|don't|isn't|aren't)\b", prefix, re.I
+        )
+        zero_result = re.search(
+            r"(?:无|無|没有|沒有)(?:任何|净|淨)?(?:效应|效應|影响|影響|作用|效果)|"
+            r"(?:零|0)(?:净|淨)?(?:效应|效應|影响|影響|作用|效果)|"
+            r"不(?:会|會)?影[响響]|"
+            r"(?:不|未)(?:会|會|再)?(?:产生|產生|造成|起|发挥|發揮)(?:任何|净|淨)?"
+            r"(?:效应|效應|影响|影響|作用|效果)|"
+            r"(?:效应|效應|影响|影響|作用|效果)(?:为|為|等于|等於|是|变为|變為|变成|歸|归)?"
+            r"(?:零|0)(?![\d.])|"
+            r"(?:效应|效應|影响|影響|作用|效果)(?:完全)?消失|"
+            r"(?<!不)(?<!未)(?<!不能)(?<!无法)(?<!無法)(?<!没有)(?<!沒有)(?:抵消|抵銷|相消)",
+            re.sub(r"\s+", "", target),
+        )
+        if not negated and zero_result is None:
+            return True
     if re.search(r"…|⋯|\.{3}", target) and not re.search(r"…|⋯|\.{3}", source):
         return True
     # A displayed function follows this source fragment. Ending the Chinese
