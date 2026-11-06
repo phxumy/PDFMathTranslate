@@ -1,4 +1,5 @@
 import logging
+import math
 from asyncio import CancelledError
 from typing import Any, Dict, Optional, Sequence, Tuple, cast
 import numpy as np
@@ -56,6 +57,17 @@ def safe_float(o: Any) -> Optional[float]:
         return float(o)
     except (TypeError, ValueError):
         return None
+
+
+def _page_linewidth(ctm, start, end, linewidth):
+    """Convert a stroke's width to the page-space normal of its direction."""
+    a, b, c, d, _, _ = ctm
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dy)
+    transformed_length = math.hypot(a * dx + c * dy, b * dx + d * dy)
+    if length == 0 or transformed_length == 0:
+        return float(linewidth)
+    return float(linewidth) * abs(a * d - b * c) * length / transformed_length
 
 
 def _serialize_pdf_operand(value: Any) -> str:
@@ -267,7 +279,17 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             and not (self.graphicstate.dash and self.graphicstate.dash[0])
         ):  # 独立直线，水平，黑色
             # print(apply_matrix_pt(self.ctm,self.curpath[0][-2:]),apply_matrix_pt(self.ctm,self.curpath[1][-2:]),self.graphicstate.scolor)
-            self.device.paint_path(self.graphicstate, True, False, False, self.curpath)
+            # pdfminer transforms the path points but leaves linewidth in user
+            # space. Our later renderer has an identity CTM, so it needs the
+            # perpendicular page-space width as well (including anisotropy).
+            state = self.graphicstate.copy()
+            state.linewidth = _page_linewidth(
+                self.ctm,
+                self.curpath[0][-2:],
+                self.curpath[1][-2:],
+                state.linewidth,
+            )
+            self.device.paint_path(state, True, False, False, self.curpath)
             self.curpath = []
             return "n"
         else:
@@ -278,6 +300,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
     def do_f(self) -> None:
         """Fill path using nonzero winding number rule"""
         # self.device.paint_path(self.graphicstate, False, True, False, self.curpath)
+        self._record_filled_horizontal_rule()
         self._pending_orcid_badge_marker = ""
         marker = getattr(self.device, "mark_orcid_badge_path", None)
         if callable(marker):
@@ -296,6 +319,51 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                     )
                 )
         self.curpath = []
+
+    def _record_filled_horizontal_rule(self):
+        """Record thin black source rectangles without removing their fill."""
+        color = self.graphicstate.ncolor
+        if color not in (None, 0) and not (
+            isinstance(color, (tuple, list))
+            and (
+                tuple(color) == (0, 0, 0, 1) or len(color) in (1, 3) and not any(color)
+            )
+        ):
+            return
+        if (
+            len(self.curpath) not in (4, 5, 6)
+            or self.curpath[0][0] != "m"
+            or any(item[0] not in {"m", "l", "h"} for item in self.curpath)
+            or sum(item[0] == "m" for item in self.curpath) != 1
+        ):
+            return
+        points = [
+            apply_matrix_pt(self.ctm, item[-2:])
+            for item in self.curpath
+            if item[0] in {"m", "l"}
+        ]
+        if len(points) == 5 and all(
+            abs(a - b) <= 1e-6 for a, b in zip(points[0], points[-1])
+        ):
+            points.pop()
+        if len(points) != 4:
+            return
+        x0, y0 = min(p[0] for p in points), min(p[1] for p in points)
+        x1, y1 = max(p[0] for p in points), max(p[1] for p in points)
+        if not (0.05 <= y1 - y0 <= 2 and x1 - x0 >= max(4, 4 * (y1 - y0))):
+            return
+        if any(
+            abs(p[0] - q[0]) > 1e-6 and abs(p[1] - q[1]) > 1e-6
+            for p, q in zip(points, points[1:] + points[:1])
+        ):
+            return
+        if len({(round(x, 6), round(y, 6)) for x, y in points}) != 4:
+            return
+        item = getattr(self.device, "cur_item", None)
+        if item is not None:
+            if not hasattr(item, "_pdf2zh_filled_rules"):
+                item._pdf2zh_filled_rules = []
+            item._pdf2zh_filled_rules.append((x0, y0, x1, y1))
 
     def do_F(self) -> None:
         """Fill path using nonzero winding number rule (obsolete)"""

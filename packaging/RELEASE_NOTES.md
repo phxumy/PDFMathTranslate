@@ -10,12 +10,20 @@
 - 识别包含 `m/z`、离子式和实测值的纯质谱数据，以及纯 NMR 峰表中的宽峰/多重峰标记、积分与耦合常数，避免将这些数据误判为未译英文而反复重试；带解释性文字的分析段落仍按正文翻译。
 - 根据原始公式上下文检查拆分后的简单化学式，拦截重复补写元素片段、删除或改写相邻元素的译文，避免形成错误试剂名；已有缓存也逐项重新校验。
 - 将 `aq.`、`sat.`、`conc.` 等实验缩写与后面的试剂保持在同一语句中，避免缩写句点造成错误断句，并检查“用水或其他实验溶液洗涤”等步骤中的动作漏译。
+- 恢复被误判为页眉的页首正文、拆散的补充方案标题和混合字体化学名称；实验方法标题及带目录号的厂家缩写不再被跳过或错误断句。
+- 保留传统数学字体中的原始符号，以及由大量内联单行图像组成的公式；不向翻译模型提供不可信的数学字体字符映射。
+- 增加对成组试剂用量、溶剂名称、细胞计数、IUPAC 位次及半衰期例外关系的保真检查，区分化合物编号与文献编号，并保留表格中的单字脚注和标准测定缩写。
+- 识别括号包裹的参考文献编号及连续编号中的软件目录引用，兼容专利和期刊元数据，避免把作者与期刊缩写当作普通正文反复翻译。
+- 按原始位置保留多行公式、分数线和运算符，变量释义按行排版；行内公式图像与两侧正文使用各自的位置，避免中文覆盖公式。
+- 使用可信的卷期页码信息判定完整参考文献题名，兼容受保护的页码减号、期刊限定语、多句题名和跨栏题名；软件目录及药物专名仍保留原名。
 
 内置 Codex CLI 保持 `0.166.0`。升级沿用软件独立账号、设置、翻译历史和已有译文。
 
 This release repairs split inline radicals, preserves abbreviated journal metadata and citations within supplemental notes, and rejects translations that omit explicit zero-effect conclusions. It also preserves complete reaction-condition labels, checks the scope of multistep synthesis descriptions, and keeps italic alkyl prefixes with their chemical names.
 
 Pure mass-spectrometry readouts and numerical NMR peak lists, including broad-peak multiplicities, integration counts and coupling constants, no longer trigger untranslated-English retries. Formula context detects duplicated or altered pieces of simple chemical formulas, including in cached translations. Laboratory abbreviations such as `aq.`, `sat.`, and `conc.` stay with their reagents, and omitted washing actions are rejected.
+
+Display equations keep their original operators and fraction rules, variable definitions retain separate rows, and inline formula images reserve space beside translated prose. Trusted volume/page metadata identifies complete bibliography titles without translating author names, journal names, software catalogues, or drug proper names.
 
 ## v1.9.11-codex.7.3 — Codex CLI 0.166.0 与取消更新下载
 

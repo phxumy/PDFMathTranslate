@@ -2747,6 +2747,14 @@ class ScientificTranslator(BaseTranslator):
         if accepted is None:
             return None
         if (
+            self._checks_english_residue()
+            and context
+            and context.get("position") == "before-math"
+            and re.search(r"\b(?:is|are|was|were)\s+calculated\s+(?:through|from|using)\s*$", source, re.I)
+            and re.search(r"计算|計算|算得|算出|求得|求出|给出|給出|下式|公式|表达式|表達式", accepted) is None
+        ):
+            return None
+        if (
             (re.search(r"…|\.{3}|⋯", accepted) and not re.search(r"…|\.{3}|⋯", source))
             or (
                 re.search(r"[\r\n。！？]", accepted)
@@ -3724,7 +3732,9 @@ class ScientificTranslator(BaseTranslator):
         )
 
     @classmethod
-    def _structured_reference_title_spans(cls, entry: str) -> tuple[str, ...]:
+    def _structured_reference_title_spans(
+        cls, entry: str, *, formula_context: dict[str, str] | None = None
+    ) -> tuple[str, ...]:
         """Find a common author/title/metadata boundary without model guessing.
 
         The deterministic path is intentionally narrower than the structured
@@ -3737,7 +3747,10 @@ class ScientificTranslator(BaseTranslator):
         subentries = cls._reference_subentries(entry)
         if subentries:
             titles = [
-                cls._structured_reference_title_spans(item) for item in subentries
+                cls._structured_reference_title_spans(
+                    item, formula_context=formula_context
+                )
+                for item in subentries
             ]
             return (
                 tuple(title for group in titles for title in group)
@@ -3831,7 +3844,9 @@ class ScientificTranslator(BaseTranslator):
         # Some styles omit the work title altogether.  A complete venue /
         # volume / pages / year tail must stay intact: otherwise a period in
         # ``New J. Phys.`` looks like the end of a fictitious title ``New J``.
-        if cls._reference_complete_metadata_tail_is_safe(tail):
+        if cls._reference_metadata_tail_is_safe(
+            tail, formula_context=formula_context, require_complete=True
+        ):
             return ()
         boundaries: list[int] = []
         protected_metadata = re.search(
@@ -3839,20 +3854,31 @@ class ScientificTranslator(BaseTranslator):
             r"(?=(?:\{\{?v\d+\}?\}|\[\[PDF2ZH_ITALIC_\d+_BEGIN\]\]))",
             tail,
         )
-        if protected_metadata is not None:
+        if protected_metadata is not None and (
+            not formula_context
+            or cls._reference_metadata_tail_is_safe(
+                tail[protected_metadata.end("punct") :].strip(),
+                formula_context=formula_context,
+                require_complete=True,
+            )
+        ):
             boundaries.append(protected_metadata.start("punct"))
         bare_year = re.search(
             r"(?P<punct>[.!?,])\s+(?=(?:19|20)\d{2}\b)",
             tail,
         )
-        if bare_year is not None and cls._reference_complete_metadata_tail_is_safe(
-            tail[bare_year.end("punct") :].strip()
+        if bare_year is not None and cls._reference_metadata_tail_is_safe(
+            tail[bare_year.end("punct") :].strip(),
+            formula_context=formula_context,
+            require_complete=True,
         ):
             boundaries.append(bare_year.start("punct"))
         for punctuation in re.finditer(r"[.!?,]\s+", tail):
             metadata_tail = tail[punctuation.end() :].strip()
             if cls._reference_metadata_tail_is_safe(
-                metadata_tail, require_complete=True
+                metadata_tail,
+                formula_context=formula_context,
+                require_complete=True,
             ):
                 boundaries.append(punctuation.start())
         # Author/year citations need no punctuation between the title and a
@@ -3867,8 +3893,27 @@ class ScientificTranslator(BaseTranslator):
         if (
             len(re.findall(r"[A-Za-z]+", title)) < 2
             or entry.count(title) != 1
-            or re.search(r"[.!?]\s+[A-Za-z]", title) is not None
-            or "{v" in title
+            or (
+                re.search(r"[.!?]\s+[A-Za-z]", title) is not None
+                and (
+                    not formula_context
+                    or re.search(
+                        r"\b(?:19|20)\d{2}\s*,\s*[A-Z]?\d{1,4}\s*,\s*\d|"
+                        r"\(\d{1,3}\)\s+[A-Z][A-Za-z'’\-]+,\s+[A-Z]\.",
+                        title,
+                    )
+                )
+            )
+            or (
+                cls.FORMULA_TOKEN_RE.search(title)
+                and (
+                    not formula_context
+                    or any(
+                        marker[0] not in formula_context
+                        for marker in cls.FORMULA_TOKEN_RE.finditer(title)
+                    )
+                )
+            )
             or re.search(
                 r"https?://|\b(?:doi|isbn|issn|arxiv)\b|10\.\d{4,9}/",
                 title,
@@ -3943,11 +3988,18 @@ class ScientificTranslator(BaseTranslator):
         return normalized
 
     def _run_reference_title_batch(
-        self, entries: list[str]
+        self,
+        entries: list[str],
+        *,
+        formula_contexts: list[dict[str, str]] | None = None,
     ) -> list[list[ExactReplacement] | None]:
         """Translate titles using PDF-provided quote boundaries when available."""
 
         results: list[list[ExactReplacement] | None] = [None] * len(entries)
+        if formula_contexts is None:
+            formula_contexts = [{} for _ in entries]
+        if len(formula_contexts) != len(entries):
+            raise ValueError("reference formula contexts must match entries")
         exact_items: list[tuple[int, str]] = []
         discovery_items: list[tuple[int, str]] = []
         for index, entry in enumerate(entries):
@@ -3955,7 +4007,9 @@ class ScientificTranslator(BaseTranslator):
             if not exact_titles:
                 exact_titles = self._styled_reference_title_spans(entry)
             if not exact_titles:
-                exact_titles = self._structured_reference_title_spans(entry)
+                exact_titles = self._structured_reference_title_spans(
+                    entry, formula_context=formula_contexts[index]
+                )
             if exact_titles:
                 exact_items.extend((index, title) for title in exact_titles)
             else:
@@ -4469,7 +4523,9 @@ class ScientificTranslator(BaseTranslator):
             titles = (
                 self._quoted_reference_title_spans(entry)
                 or self._styled_reference_title_spans(entry)
-                or self._structured_reference_title_spans(entry)
+                or self._structured_reference_title_spans(
+                    entry, formula_context=formula_context
+                )
             )
             # A plain translated entry does not record discovery boundaries.
             # Only an unambiguous complete title can be recovered safely.
@@ -4596,7 +4652,7 @@ class ScientificTranslator(BaseTranslator):
             if (
                 not looks_like_reference_title_prefix(logical_entry[:title_start])
                 or not self._reference_title_boundary_is_safe(
-                    logical_entry, source_title
+                    logical_entry, source_title, formula_context=formula_context
                 )
                 or not self._reference_metadata_tail_is_safe(
                     metadata, require_complete=True
@@ -4944,9 +5000,9 @@ class ScientificTranslator(BaseTranslator):
             return self._rebalance_reference_continuation(validated)
         return None
 
-    @staticmethod
+    @classmethod
     def _reference_venue_name_is_plausible(
-        candidate: str, *, allow_foreign_connector: bool = False
+        cls, candidate: str, *, allow_foreign_connector: bool = False
     ) -> bool:
         """Recognize a bibliographic container without enumerating journal names.
 
@@ -4968,11 +5024,25 @@ class ScientificTranslator(BaseTranslator):
             "Quantum",
             "PRX Quantum",
             "Biometrika",
+            "Drugs",
+            "Drugs Future",
+            "Drug Discovery Today",
+            "Drug Safety",
+            "Xenobiotica",
             # This established journal subtitle includes punctuation that the
             # general venue grammar must reject in leftover work-title prose.
             "Sci. China: Phys., Mech. Astron",
         }:
             return True
+        qualified = re.fullmatch(
+            r"(?P<venue>[^,;:!?]+),\s*(?:Int\.?\s+Ed\.?|Synop\.?|"
+            r"[A-Z][a-z]+\.\s+Trans\.\s+\d{1,2})",
+            compact,
+        )
+        if qualified is not None:
+            return cls._reference_venue_name_is_plausible(
+                qualified["venue"], allow_foreign_connector=allow_foreign_connector
+            )
         # A title fragment followed by a comma and the real journal must not
         # become one large venue merely because the final abbreviation is valid.
         if re.search(r"[,;:!?]", compact):
@@ -5026,6 +5096,18 @@ class ScientificTranslator(BaseTranslator):
             "res",
             "statist",
             "zhurnal",
+            "angew",
+            "bioorg",
+            "biomol",
+            "chem",
+            "crystallogr",
+            "heterocycl",
+            "metab",
+            "pharm",
+            "pharmacol",
+            "princ",
+            "synth",
+            "toxicol",
             "j",
             "journal",
             "lett",
@@ -5170,6 +5252,29 @@ class ScientificTranslator(BaseTranslator):
             source_title, translated_title
         ) or has_suspicious_biomedical_translation(source_title, translated_title):
             return True
+        if re.search(
+            r"\blipophil\w*\b|\bhydrophob\w*\b|"
+            r"\b(?:partition|distribution)\s+coefficients?\b",
+            source_title,
+            re.I,
+        ):
+            measurement = re.compile(
+                r"(?<![A-Za-z0-9])(?:[cC]?[lL]og)\s*[PD](?![A-Za-z0-9])"
+            )
+
+            def measurement_labels(text):
+                return [
+                    re.sub(r"\s+", "", match[0])[:-1].lower() + match[0][-1]
+                    for match in measurement.finditer(text)
+                ]
+
+            source_labels = measurement_labels(source_title)
+            target_labels = measurement_labels(translated_title)
+            if source_labels or target_labels:
+                if source_labels != target_labels:
+                    return True
+                source_title = measurement.sub("", source_title)
+                translated_title = measurement.sub("", translated_title)
         # "Low-rank" is one source word to the general English detector, so
         # the partial translation "低-rank" otherwise escapes its exact-word
         # comparison.  Rank in these mathematical constructions is ordinary
@@ -5392,6 +5497,34 @@ class ScientificTranslator(BaseTranslator):
         volume.  Every accepted route must consume the complete metadata tail.
         """
         remaining = remaining.strip()
+        # A font-isolated page-range dash may decode as a mathematical minus.
+        # Normalize only numeric range typography for this read-only check;
+        # the original entry and its PDF glyphs are never rewritten.
+        remaining = re.sub(r"(?<=\d)\s*[−‒–—]\s*(?=\d)", "-", remaining)
+        software_catalogue = re.fullmatch(
+            r"(?P<label>[A-Z][^;\n{}\[\]]{1,160});\s*"
+            r"(?P<publisher>[^:;\n{}\[\]]{3,160}):\s*"
+            r"[^:;\n{}\[\]]{2,250}",
+            remaining,
+        )
+        if software_catalogue is not None and re.search(
+            r"\b(?:Inc\.?|Ltd\.?|L\.L\.C\.?)",
+            software_catalogue["publisher"],
+            re.I,
+        ):
+            label = software_catalogue["label"]
+            versioned = re.search(r"\bv\d+(?:\.\d+)*(?=\s*(?:,|$))", label, re.I)
+            branded_version = re.fullmatch(
+                r"(?P<brand>[A-Z][A-Za-z0-9.-]+)\s+\d{2,4}(?:\.\d+)*", label
+            )
+            if versioned or (
+                branded_version
+                and re.match(
+                    re.escape(branded_version["brand"]) + r"(?:\s|,)",
+                    software_catalogue["publisher"],
+                )
+            ):
+                return True
         from pdf2zh.translation_policy import is_publication_catalogue
 
         if is_publication_catalogue(remaining):
@@ -5403,6 +5536,15 @@ class ScientificTranslator(BaseTranslator):
         number = r"\d{1,7}[A-Za-z]?(?:[-–]\d{1,7})?"
         issue = r"\d{1,4}(?:[_\s-]*(?:[Ss]uppl(?:ement)?|[Pp]art|[Pp]t)\.?[_\s-]*\d*)?"
         terminal_year = rf"(?:\({year}\)|{year})\.?\s*"
+        sectioned_journal = re.fullmatch(
+            rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?\bTrans\.\s+\d{{1,2}})"
+            rf"\s+{year},\s*\d{{1,4}},\s*{number}\.?\s*",
+            remaining,
+        )
+        if sectioned_journal and cls._reference_venue_name_is_plausible(
+            sectioned_journal["venue"]
+        ):
+            return True
         dense_journal = re.fullmatch(
             rf"(?P<venue>[A-Z][A-Za-z.]{{3,160}})\s*{year},\s*\d{{1,4}}"
             rf"(?:\s*\({issue}\))?,\s*{number}\.?",
@@ -5414,7 +5556,7 @@ class ScientificTranslator(BaseTranslator):
             return True
         chemistry_fields = re.fullmatch(
             rf"(?P<venue>[^{{}}\[\]!?\d]{{1,160}}?)\s+{year},\s*"
-            rf"\d{{1,4}}(?:\s*\({issue}\))?,\s*(?:No\.\s*)?"
+            rf"[A-Z]?\d{{1,4}}(?:\s*\({issue}\))?,\s*(?:No\.\s*)?"
             rf"{number}\.?\s*(?:DOI:\s*10\.\d{{4,9}}/\S+\.?)?\s*",
             remaining,
         )
@@ -5600,6 +5742,28 @@ class ScientificTranslator(BaseTranslator):
         """Return whether text after a selected title begins bibliography metadata."""
 
         complete = cls._reference_complete_metadata_tail_is_safe(remaining)
+        context_markers = tuple(cls.FORMULA_TOKEN_RE.finditer(remaining))
+        if (
+            not complete
+            and formula_context
+            and context_markers
+            and all(
+                marker[0] in formula_context
+                and re.fullmatch(
+                    r"(?:[A-Za-z]?\d+[A-Za-z]?|[\s.,;:()\[\]−‒–—+\-])+",
+                    formula_context[marker[0]],
+                )
+                for marker in context_markers
+            )
+        ):
+            # This stronger automatic-boundary route may resolve only numeric
+            # volume/issue/page atoms and their delimiters. A hidden alphabetic
+            # phrase must not manufacture a plausible venue or truncate a title.
+            resolved = cls.FORMULA_TOKEN_RE.sub(
+                lambda match: formula_context.get(match[0], match[0]), remaining
+            )
+            if not cls.FORMULA_TOKEN_RE.search(resolved):
+                complete = cls._reference_complete_metadata_tail_is_safe(resolved)
         if require_complete or complete:
             return complete
         if remaining[:1].isdigit():
@@ -5702,7 +5866,11 @@ class ScientificTranslator(BaseTranslator):
             )
         title_start = entry.find(source_title)
         title_end = title_start + len(source_title)
-        if cls._reference_complete_metadata_tail_is_safe(entry[title_start:]):
+        if cls._reference_metadata_tail_is_safe(
+            entry[title_start:],
+            formula_context=formula_context,
+            require_complete=True,
+        ):
             # Revalidate model proposals and old cached replacements too.  A
             # leading piece of an already complete publication tail is not a
             # work title, even when the remaining abbreviation is also a venue.
@@ -5710,7 +5878,9 @@ class ScientificTranslator(BaseTranslator):
         complete_titles = (
             cls._quoted_reference_title_spans(entry)
             or cls._styled_reference_title_spans(entry)
-            or cls._structured_reference_title_spans(entry)
+            or cls._structured_reference_title_spans(
+                entry, formula_context=formula_context
+            )
         )
         if complete_titles and not any(
             source_title in complete_title for complete_title in complete_titles
@@ -5942,11 +6112,20 @@ class ScientificTranslator(BaseTranslator):
             pending_items.append((idx, entry))
 
         batches = self._chunk_batch(pending_items)
+
+        def run_reference_batch(batch):
+            contexts = [
+                self._reference_formula_context(cache_contexts[index])
+                for index, _ in batch
+            ]
+            options = {"formula_contexts": contexts} if any(contexts) else {}
+            return self._run_reference_title_batch(
+                [entry for _, entry in batch], **options
+            )
+
         all_title_replacements = self._map_batches(
             batches,
-            lambda batch: self._run_reference_title_batch(
-                [entry for _, entry in batch]
-            ),
+            run_reference_batch,
         )
         for batch, title_replacements in zip(
             batches,
@@ -5966,10 +6145,15 @@ class ScientificTranslator(BaseTranslator):
                 known_titles = (
                     self._quoted_reference_title_spans(entry)
                     or self._styled_reference_title_spans(entry)
-                    or self._structured_reference_title_spans(entry)
+                    or self._structured_reference_title_spans(
+                        entry,
+                        formula_context=self._reference_formula_context(
+                            cache_contexts[entry_idx]
+                        ),
+                    )
                 )
                 if not is_valid and (replacements or known_titles):
-                    replacements = self._run_reference_title_batch([entry])[0]
+                    replacements = run_reference_batch([(entry_idx, entry)])[0]
                     translated_entry, is_valid = (
                         self._apply_reference_title_replacements(
                             entry,

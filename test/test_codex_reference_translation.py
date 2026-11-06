@@ -794,7 +794,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
             with self.subTest(tail=tail):
                 entry = f"[2] Jane Smith. {title}. {tail}"
                 translator = translator_stub()
-                translator._run_reference_title_batch = lambda entries: [
+                translator._run_reference_title_batch = lambda entries, **kwargs: [
                     [ExactReplacement(title, "完整的科研作品")]
                 ]
                 self.assertEqual(
@@ -819,7 +819,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
                 with self.subTest(tail=tail, value=value):
                     entry = f"[1] Jane Smith. A first sentence. {tail}"
                     translator = translator_stub()
-                    translator._run_reference_title_batch = lambda entries: [
+                    translator._run_reference_title_batch = lambda entries, **kwargs: [
                         [ExactReplacement("A first sentence", "第一句话")]
                     ]
                     self.assertEqual(
@@ -887,7 +887,7 @@ class CodexReferenceTranslationTests(unittest.TestCase):
             with self.subTest(tail=tail):
                 entry = f"[1] Jane Smith. A first sentence, {tail}"
                 translator = translator_stub()
-                translator._run_reference_title_batch = lambda entries: [
+                translator._run_reference_title_batch = lambda entries, **kwargs: [
                     [ExactReplacement("A first sentence", "前半句")]
                 ]
                 self.assertRejectedReference(

@@ -13,7 +13,7 @@ from typing import Callable, Dict
 
 import numpy as np
 from pdfminer.converter import PDFConverter
-from pdfminer.layout import LTChar, LTFigure, LTLine, LTPage
+from pdfminer.layout import LTChar, LTFigure, LTImage, LTLine, LTPage
 from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 from pdfminer.utils import Matrix, apply_matrix_pt, mult_matrix
@@ -24,6 +24,8 @@ from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.identity_layout import author_byline_chars, orcid_list_chars
 from pdf2zh.codex_errors import CodexPermanentError, CodexTranslationValidationError
+from pdf2zh.display_math import detect_display_math
+from pdf2zh.formula_prose import definition_rows, image_adjacent_prose, image_clusters
 from pdf2zh.source_spelling import normalize_source_wraps
 from pdf2zh.line_breaking import (
     CJK_PROHIBITED_LINE_END,
@@ -343,6 +345,53 @@ def _release_chemical_direction_qualifiers(
             marker, marker + " " + match.group("suffix"), 1
         )
         paragraph_text_chars[paragraph_id].extend(suffix)
+
+
+def _release_private_punctuation_articles(
+    texts, formulas, owners, paragraphs, text_chars
+):
+    """Keep an unknown punctuation glyph but release a following prose article."""
+    for index, chars in enumerate(formulas):
+        if any(len(char.get_text()) != 1 for char in chars):
+            continue
+        match = re.search(r"(?:An|an|A|a)$", "".join(c.get_text() for c in chars))
+        if match is None or match.start() == 0:
+            continue
+        prefix, article = chars[: match.start()], chars[match.start() :]
+        if not all(unicodedata.category(c.get_text()) == "Co" for c in prefix):
+            continue
+        pid = owners[index]
+        if paragraphs[pid].region_kind not in {
+            "plain text",
+            "title",
+            "figure_caption",
+            "table_caption",
+        }:
+            continue
+        marker = f"{{v{index}}}"
+        if texts[pid].count(marker) != 1:
+            continue
+        _, following = texts[pid].split(marker)
+        if re.match(r"\s+[a-z]{3,}\b", following) is None:
+            continue
+        em = max(float(c.size) for c in article)
+        if em <= 0 or any(
+            getattr(c, "_pdf2zh_layout_class", None) == 0
+            or _is_non_horizontal_text_matrix(c.matrix)
+            or abs(_char_baseline(c) - _char_baseline(prefix[-1])) > 0.15 * em
+            for c in chars
+        ):
+            continue
+        if any(
+            not _is_non_math_text_font(c.fontname)
+            or _is_prose_italic_font(c.fontname)
+            or abs(float(c.size) - em) > 0.1 * em
+            for c in article
+        ):
+            continue
+        formulas[index] = prefix
+        texts[pid] = texts[pid].replace(marker, marker + " " + match[0], 1)
+        text_chars[pid].extend(article)
 
 
 def _release_parenthetical_prose_articles(
@@ -2351,6 +2400,38 @@ def _paragraph_first_line_origin(index, sources, paragraphs):
         ):
             return paragraph.x
     return paragraph.x0
+
+
+def _repair_leading_whitespace_anchors(sources, paragraphs, formulas, text_chars):
+    """Do not let an earlier invisible space anchor a following prose block."""
+    for source, paragraph, prose_chars in zip(sources, paragraphs, text_chars):
+        if (
+            paragraph.region_kind
+            not in {"plain text", "formula_prose", "formula_definition"}
+            or not source[:1].isspace()
+            or source.lstrip().startswith("{v")
+        ):
+            continue
+        visible = [char for char in prose_chars if char.get_text().strip()]
+        if not visible or not source.lstrip().startswith(visible[0].get_text()):
+            continue
+        first = visible[0]
+        em = max(first.size, paragraph.size)
+        definition_indent = (
+            paragraph.region_kind == "formula_definition"
+            and first.x0 - paragraph.x > 0.5 * em
+        )
+        if abs(first.y0 - paragraph.y) <= 0.4 * em and not definition_indent:
+            continue
+        for formula_id in _formula_ids_in_text(source):
+            visible.extend(
+                char for char in formulas[formula_id] if char.get_text().strip()
+            )
+        paragraph.x, paragraph.y = first.x0, first.y0
+        paragraph.x0 = min(char.x0 for char in visible)
+        paragraph.x1 = max(char.x1 for char in visible)
+        paragraph.y0 = min(char.y0 for char in visible)
+        paragraph.y1 = max(char.y1 for char in visible)
 
 
 def _split_parenthetical_variable_definitions(
@@ -6831,7 +6912,7 @@ def _collect_formula_annotation_contexts(
     ]
     contexts = {}
     for index, paragraph in enumerate(paragraphs):
-        if paragraph.region_kind != "formula_annotation":
+        if paragraph.region_kind not in {"formula_annotation", "formula_prose"}:
             continue
         em = max(paragraph.size, 1.0)
         row = [
@@ -7543,7 +7624,9 @@ class TranslateConverter(PDFConverterEx):
                     )
                 elif part.role in {ROLE_TRANSLATE, ROLE_AFFILIATION}:
                     if (
-                        pstk[plan_index].region_kind == "formula_annotation"
+                        (pstk[plan_index].region_kind == "formula_annotation"
+                         or (pstk[plan_index].region_kind == "formula_prose"
+                             and pstk[plan_index].formula_annotation_context.get("position") == "before-math"))
                         and _supports_scientific_translation(self.translator)
                         and callable(annotation_translator)
                     ):
@@ -8125,7 +8208,7 @@ class TranslateConverter(PDFConverterEx):
                     and char != " "                                     # 非空格
                     and (
                         unicodedata.category(char[0])
-                        in ["Lm", "Mn", "Sk", "Sm", "Zl", "Zp", "Zs"]   # 文字修饰符、数学符号、分隔符号
+                        in ["Lm", "Mn", "Sk", "Sm", "Zl", "Zp", "Zs", "Co"]   # 包括必须保留原字形的私用码位
                         or ord(char[0]) in range(0x370, 0x400)          # 希腊字母
                         or char in "〈〉⟨⟩"  # preserve expectation-value delimiters
                     )
@@ -8187,6 +8270,48 @@ class TranslateConverter(PDFConverterEx):
             | set(toc_layout.entry_by_char),
             vflag,
         )
+        excluded_chars = {object_id(char) for char in code_chars | identity_chars}
+        display_layout = detect_display_math(
+            [child for child in ltpage if isinstance(child, LTChar) and object_id(child) not in excluded_chars],
+            [child for child in ltpage if isinstance(child, LTLine)],
+            getattr(ltpage, "_pdf2zh_filled_rules", ()),
+            detections=getattr(self, "layout_detections", {}).get(ltpage.pageid, ()),
+        )
+        next_region = max(region_types, default=1) + 1
+        for annotation in display_layout.annotation_groups:
+            region_types[next_region] = "formula_annotation"
+            for char in annotation:
+                recovered_region_classes[object_id(char)] = next_region
+                excluded_chars.add(object_id(char))
+            next_region += 1
+        excluded_chars.update(display_layout.preserved_char_ids)
+        geometry_groups = {}
+        layout = self.layout[ltpage.pageid]
+        h, w = layout.shape
+        for char in (item for item in ltpage if isinstance(item, LTChar)):
+            if object_id(char) in excluded_chars:
+                continue
+            actual_class = recovered_region_classes.get(
+                object_id(char),
+                int(layout[int(np.clip(char.y0, 0, h - 1)), int(np.clip(char.x0, 0, w - 1))]),
+            )
+            if region_types.get(actual_class) == "plain text":
+                geometry_groups.setdefault(actual_class, []).append(char)
+        occupied_images = image_clusters(
+            [item for item in ltpage if isinstance(item, LTFigure) and any(isinstance(child, LTImage) for child in item)]
+        )
+        for chars in geometry_groups.values():
+            slots = definition_rows(chars)
+            selected = {object_id(char) for slot in slots for char in slot.chars}
+            slots += image_adjacent_prose(chars, occupied_images, excluded=selected)
+            for slot in slots:
+                if slot.kind == "fixed_math":
+                    display_layout.preserved_char_ids.update(object_id(char) for char in slot.chars)
+                    continue
+                region_types[next_region] = slot.kind
+                for char in slot.chars:
+                    recovered_region_classes[object_id(char)] = next_region
+                next_region += 1
         for child in ltpage:
             if isinstance(child, LTChar):
                 if object_id(child) in toc_layout.omitted_chars and child not in code_chars:
@@ -8280,7 +8405,7 @@ class TranslateConverter(PDFConverterEx):
                     cls = xt_cls
                 # Source list markers end the preceding item's reflow even
                 # when the detector puts the entire list in one region.
-                if object_id(child) in source_list_markers | algorithm_displays:
+                if object_id(child) in source_list_markers | algorithm_displays | display_layout.preserved_char_ids:
                     cls = 0
                     # The formula renderer must use the original first glyph
                     # anchor for this preserved run. A later list marker may
@@ -8553,7 +8678,9 @@ class TranslateConverter(PDFConverterEx):
                 # 读取当前线条在 layout 中的类别
                 cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
                 cls = layout[cy, cx]
-                if vstk and cls == xt_cls:      # 公式线条
+                if object_id(child) in display_layout.line_ids:
+                    lstk.append(child)
+                elif vstk and cls == xt_cls:      # 公式线条
                     vlstk.append(child)
                 else:                           # 全局线条
                     lstk.append(child)
@@ -8637,6 +8764,7 @@ class TranslateConverter(PDFConverterEx):
             paragraph_text_chars,
         )
         _release_parenthetical_prose_articles(sstk, var, varp, paragraph_text_chars)
+        _release_private_punctuation_articles(sstk, var, varp, pstk, paragraph_text_chars)
         _release_formula_prose_suffixes(sstk, var, varp, pstk, paragraph_text_chars)
         _release_inline_prose_closers(sstk, var, varp, pstk, paragraph_text_chars)
         _merge_encoded_formula_gaps(sstk, var, varp, pstk, paragraph_text_chars, varl)
@@ -8667,6 +8795,7 @@ class TranslateConverter(PDFConverterEx):
         )
         _recover_author_information_affiliations(sstk, var, varp, pstk)
         _release_prose_slash_connectives(sstk, var, varp, pstk)
+        _repair_leading_whitespace_anchors(sstk, pstk, var, paragraph_text_chars)
         for paragraph in pstk:
             if paragraph.region_kind == "toc_entry":
                 entry = toc_layout.entries[paragraph.layout_class - toc_class_start]
@@ -9231,7 +9360,7 @@ class TranslateConverter(PDFConverterEx):
             line_height = vertical_fit.line_height
             render_scale = vertical_fit.render_scale
             if not brk and (
-                scanned_paragraph or pstk[id].region_kind == "formula_annotation"
+                scanned_paragraph or pstk[id].region_kind in {"formula_annotation", "formula_prose", "formula_definition"}
             ):
                 render_scale = min(
                     render_scale,

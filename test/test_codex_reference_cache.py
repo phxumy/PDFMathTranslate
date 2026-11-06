@@ -143,7 +143,7 @@ class CodexReferenceCacheTests(unittest.TestCase):
         translator.cache.set(legacy_key, expected)
         calls = []
 
-        def translate(entries):
+        def translate(entries, **kwargs):
             calls.append(entries)
             return [[ExactReplacement(title, "完整的科研作品")]]
 

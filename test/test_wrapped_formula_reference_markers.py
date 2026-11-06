@@ -61,4 +61,3 @@ def test_exact_continuation_accepts_unpublished_observations_then_software_catal
     for text in (observations, catalog):
         assert split_numbered_reference_region(text) is None
         assert split_numbered_reference_region(text, expected_number=99) is None
-
