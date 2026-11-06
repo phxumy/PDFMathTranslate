@@ -88,9 +88,39 @@ def _fraction_side(chars):
     return bool(words) and all(len(_word_text(word)) <= 3 for word in words)
 
 
+def _on_fraction_row(word, fraction_rules):
+    em = float(word[0].size)
+    return any(
+        x0 - 0.1 * em <= word[0].x0 <= word[-1].x1 <= x1 + 0.1 * em
+        and (
+            y + 0.1 <= word[0].y0 <= y + 1.6 * em
+            or y - 1.6 * em <= word[0].y1 <= y - 0.1
+        )
+        for x0, y, x1, _, _ in fraction_rules
+    )
+
+
 def _annotation_groups(chars, fraction_rules):
     words = _words(chars)
     labels = [word for word in words if _is_label(word)]
+    # A long word inside a fraction can be one mathematical identifier
+    # ("proteinconc"), even when drawn in an ordinary italic text font. Release
+    # only multiword explanatory phrases there; a standalone relation label
+    # such as "Inhibition" remains eligible outside the fraction rows.
+    labels = [
+        word
+        for word in labels
+        if not _on_fraction_row(word, fraction_rules)
+        or any(
+            other is not word
+            and _on_fraction_row(other, fraction_rules)
+            and abs(other[0].y0 - word[0].y0) <= 0.2 * min(other[0].size, word[0].size)
+            and -0.1
+            <= max(word[0].x0 - other[-1].x1, other[0].x0 - word[-1].x1)
+            <= min(other[0].size, word[0].size)
+            for other in labels
+        )
+    ]
     # Keep short connecting prose ("No", "of", "in") with an adjacent label.
     for word in words:
         text = _word_text(word)
@@ -110,14 +140,7 @@ def _annotation_groups(chars, fraction_rules):
         if re.fullmatch(r"[A-Z]{4,}", _word_text(word)) is None:
             continue
         em = float(word[0].size)
-        if not any(
-            x0 - 0.1 * em <= word[0].x0 <= word[-1].x1 <= x1 + 0.1 * em
-            and (
-                y + 0.1 <= word[0].y0 <= y + 1.6 * em
-                or y - 1.6 * em <= word[0].y1 <= y - 0.1
-            )
-            for x0, y, x1, _, _ in fraction_rules
-        ):
+        if not _on_fraction_row(word, fraction_rules):
             continue
         for label in labels:
             previous = label[-1]

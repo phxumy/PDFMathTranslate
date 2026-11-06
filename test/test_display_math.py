@@ -63,6 +63,29 @@ def test_filled_fraction_keeps_conditions_together_and_math_operators_fixed():
     assert before == [(c.x0, c.y0, c.x1, c.y1) for c in chars]
 
 
+@pytest.mark.parametrize("font", ["Times-Italic", "Times-Roman"])
+@pytest.mark.parametrize("last_glyph_first", [False, True])
+def test_single_word_fraction_identifier_retains_source_glyphs(font, last_glyph_first):
+    prefix = run("CL=", x=85, y=100, size=10, font="Times-Italic")
+    numerator = run("1000", x=145, y=110, size=10)
+    half = run("T1/2*", x=110, y=90, size=10)
+    identifier = run("proteinconc", x=140, y=90, size=10, font=font)
+    # The real S8 stream draws the final 'c' before the other ten letters.
+    # A positive annotation class incorrectly reanchors and shrinks that run.
+    emitted_identifier = (
+        identifier[-1:] + identifier[:-1] if last_glyph_first else identifier
+    )
+    chars = prefix + numerator + half + emitted_identifier
+    before = [(id(c), c.x0, c.y0, c.x1, c.y1, c.size) for c in chars]
+    line = LTLine(0.47, (105, 103), (210, 103))
+    result = detect_display_math(chars, [line])
+    assert result.regions
+    assert result.annotation_groups == []
+    assert result.preserved_char_ids == {id(c) for c in chars}
+    assert result.line_ids == {id(line)}
+    assert before == [(id(c), c.x0, c.y0, c.x1, c.y1, c.size) for c in chars]
+
+
 @pytest.mark.parametrize(
     "text,gap,size,baseline,font,separator",
     [
