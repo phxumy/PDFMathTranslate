@@ -59,7 +59,7 @@ An account with tighter rate limits may work better with lower concurrency.
 
 WHAT IS INCLUDED
 - The Windows desktop shell and command-line/browser launchers.
-- Official stable Codex CLI 0.166.0, Node.js 24.19.0, and locked browser bridge packages.
+- Official stable Codex CLI 0.171.0, Node.js 24.19.0, and locked browser bridge packages.
 - Python and pinned dependencies, plus offline layout/OCR/font assets.
 - Source references and third-party license notices.
 No account, allowance, API key, credentials, or personal documents are bundled.
@@ -76,3 +76,5 @@ Repository: https://github.com/phxumy/PDFMathTranslate
 Releases: https://github.com/phxumy/PDFMathTranslate/releases/latest
 Issues: https://github.com/phxumy/PDFMathTranslate/issues
 This is an unofficial community fork, not an OpenAI or upstream release.
+
+OpenAI API: Enter the base URL and key, refresh the model list, and choose a model or enter its ID. Test Connection sends a short chat request capped at 16 output tokens. The desktop app masks keys and supports named local profiles. Windows stores them with per-user DPAPI encryption.

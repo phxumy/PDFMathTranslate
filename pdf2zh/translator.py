@@ -46,6 +46,7 @@ from pdf2zh.source_segmentation import (
     safe_chunk_boundary,
 )
 from pdf2zh.config import ConfigManager
+from pdf2zh import openai_access
 from pdf2zh.line_breaking import CJK_PROHIBITED_LINE_START, is_protected_literal_only
 from pdf2zh.translation_quality import (
     has_omitted_scientific_content,
@@ -79,11 +80,6 @@ from pdf2zh.translation_policy import (
     looks_like_reference_author_block,
     looks_like_reference_title_prefix,
 )
-
-
-from tenacity import retry, retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 logger = logging.getLogger(__name__)
 
@@ -546,37 +542,29 @@ class OpenAITranslator(BaseTranslator):
         if not model:
             model = self.envs["OPENAI_MODEL"]
         super().__init__(lang_in, lang_out, model, ignore_cache)
-        self.options = {"temperature": 0}  # 随机采样可能会打断公式标记
-        self.client = openai.OpenAI(
-            base_url=base_url or self.envs["OPENAI_BASE_URL"],
-            api_key=api_key or self.envs["OPENAI_API_KEY"],
+        url = base_url or self.envs.get("OPENAI_BASE_URL")
+        key = api_key or self.envs.get("OPENAI_API_KEY")
+        if self.name == "openai":
+            key = ConfigManager.openai_keys().resolve(url, key)
+        self.options = (
+            openai_access.chat_options(model)
+            if self.name in {"openai", "openailiked"}
+            else {"temperature": 0}
         )
+        self.client = openai_access.client_for(url, key)
         self.prompttext = prompt
-        self.add_cache_impact_parameters("temperature", self.options["temperature"])
+        self.add_cache_impact_parameters(
+            "temperature", self.options.get("temperature", "model-default")
+        )
         self.add_cache_impact_parameters("prompt", self.prompt("", self.prompttext))
         think_filter_regex = r"^<think>.+?\n*(</think>|\n)*(</think>)\n*"
         self.add_cache_impact_parameters("think_filter_regex", think_filter_regex)
         self.think_filter_regex = re.compile(think_filter_regex, flags=re.DOTALL)
 
-    @retry(
-        retry=retry_if_exception_type(openai.RateLimitError),
-        stop=stop_after_attempt(100),
-        wait=wait_exponential(multiplier=1, min=1, max=15),
-        before_sleep=lambda retry_state: logger.warning(
-            f"RateLimitError, retrying in {retry_state.next_action.sleep} seconds... "
-            f"(Attempt {retry_state.attempt_number}/100)"
-        ),
-    )
     def do_translate(self, text) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            **self.options,
-            messages=self.prompt(text, self.prompttext),
+        content = openai_access.chat_request(
+            self.client, self.model, self.prompt(text, self.prompttext), self.options
         )
-        if not response.choices:
-            if hasattr(response, "error"):
-                raise ValueError("Error response from Service", response.error)
-        content = response.choices[0].message.content.strip()
         content = self.think_filter_regex.sub("", content).strip()
         return content
 
@@ -619,24 +607,25 @@ class AzureOpenAITranslator(BaseTranslator):
         if api_key is None:
             api_key = self.envs["AZURE_OPENAI_API_KEY"]
         super().__init__(lang_in, lang_out, model, ignore_cache)
-        self.options = {"temperature": 0}
+        self.options = openai_access.chat_options(model)
         self.client = openai.AzureOpenAI(
+            max_retries=0,
+            timeout=120,
             azure_endpoint=base_url,
             azure_deployment=model,
             api_version=api_version,
             api_key=api_key,
         )
         self.prompttext = prompt
-        self.add_cache_impact_parameters("temperature", self.options["temperature"])
+        self.add_cache_impact_parameters(
+            "temperature", self.options.get("temperature", "model-default")
+        )
         self.add_cache_impact_parameters("prompt", self.prompt("", self.prompttext))
 
     def do_translate(self, text) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            **self.options,
-            messages=self.prompt(text, self.prompttext),
+        return openai_access.chat_request(
+            self.client, self.model, self.prompt(text, self.prompttext), self.options
         )
-        return response.choices[0].message.content.strip()
 
 
 class ModelScopeTranslator(OpenAITranslator):
@@ -2750,8 +2739,16 @@ class ScientificTranslator(BaseTranslator):
             self._checks_english_residue()
             and context
             and context.get("position") == "before-math"
-            and re.search(r"\b(?:is|are|was|were)\s+calculated\s+(?:through|from|using)\s*$", source, re.I)
-            and re.search(r"计算|計算|算得|算出|求得|求出|给出|給出|下式|公式|表达式|表達式", accepted) is None
+            and re.search(
+                r"\b(?:is|are|was|were)\s+calculated\s+(?:through|from|using)\s*$",
+                source,
+                re.I,
+            )
+            and re.search(
+                r"计算|計算|算得|算出|求得|求出|给出|給出|下式|公式|表达式|表達式",
+                accepted,
+            )
+            is None
         ):
             return None
         if (

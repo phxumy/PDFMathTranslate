@@ -48,8 +48,12 @@ from pdf2zh.source_font import (
     repair_stix_replacement_mapping,
 )
 from pdf2zh.translator import TranslationAbortedError
+from pdf2zh.openai_access import OpenAIServiceError
 
 log = logging.getLogger(__name__)
+
+MAX_FORM_EXPANSION_DEPTH = 64
+MAX_CONTENT_FILTER_LAYERS = 16
 
 
 def safe_float(o: Any) -> Optional[float]:
@@ -149,6 +153,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         self.rsrcmgr = rsrcmgr
         self.device = device
         self.obj_patch = obj_patch
+        self.form_path = ()
 
     def dup(self) -> "PDFPageInterpreterEx":
         return self.__class__(self.rsrcmgr, self.device, self.obj_patch)
@@ -431,7 +436,17 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         # log.debug("Processing xobj: %r", xobj)
         subtype = xobj.get("Subtype")
         if subtype is LITERAL_FORM and "BBox" in xobj:
+            # Match BabelDOC 0.7's active Form expansion depth limit. Sibling
+            # invocations are independent and can legitimately reuse a Form.
+            ref = getattr(xobj, "objid", None) or id(xobj)
+            if ref in self.form_path:
+                raise PDFInterpreterError("PDF Form XObject 引用成环，已停止解析。")
+            if len(self.form_path) >= MAX_FORM_EXPANSION_DEPTH:
+                raise PDFInterpreterError(
+                    f"PDF Form XObject 嵌套超过 {MAX_FORM_EXPANSION_DEPTH} 层，已停止解析。"
+                )
             interpreter = self.dup()
+            interpreter.form_path = (*self.form_path, ref)
             bbox = cast(Rect, list_value(xobj["BBox"]))
             matrix = cast(Matrix, list_value(xobj.get("Matrix", MATRIX_IDENTITY)))
             # According to PDF reference 1.7 section 4.9.1, XObjects in
@@ -470,6 +485,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             except (
                 CancelledError,
                 TranslationAbortedError,
+                OpenAIServiceError,
                 CodexExecutionError,
                 CodexOutputError,
                 CodexTimeoutError,
@@ -601,6 +617,12 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
     def execute(self, streams: Sequence[object]) -> None:
         # 重载返回指令流
         ops = ""
+        for stream in streams:
+            filters = resolve1(stream_value(stream).get_any(("F", "Filter"), []))
+            if isinstance(filters, list) and len(filters) > MAX_CONTENT_FILTER_LAYERS:
+                raise PDFInterpreterError(
+                    f"PDF 内容流过滤器超过 {MAX_CONTENT_FILTER_LAYERS} 层，已停止解析。"
+                )
         try:
             parser = PDFContentParser(streams)
         except PSEOF:

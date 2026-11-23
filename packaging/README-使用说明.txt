@@ -51,7 +51,7 @@ PDFMathTranslate Codex 增强桌面版（非官方）
 升级和卸载不删除这些用户数据。卸载入口在 Windows 设置的“已安装的应用”中。
 
 五、发行内容
-内含官方稳定版 Codex CLI 0.166.0、Node.js 24.19.0、锁定版本的运行依赖及离线版面/OCR/字体资源。
+内含官方稳定版 Codex CLI 0.171.0、Node.js 24.19.0、锁定版本的运行依赖及离线版面/OCR/字体资源。
 不包含任何人的账号、凭据、API Key、套餐或免费额度。云端翻译仍需网络并消耗服务额度。
 此软件并非 OpenAI 或上游项目的官方发行。
 
@@ -63,3 +63,5 @@ PDFMathTranslate Codex 增强桌面版（非官方）
 仓库：https://github.com/phxumy/PDFMathTranslate
 发行：https://github.com/phxumy/PDFMathTranslate/releases/latest
 反馈：https://github.com/phxumy/PDFMathTranslate/issues
+
+OpenAI API：输入 Base URL 和密钥后，选择“刷新 API 模型列表”或手动填写模型。点击“测试连接”可验证所选模型；测试最多请求 16 个输出 token。桌面端密钥以圆点显示，可在本机保存、命名和切换，Windows 使用当前用户的 DPAPI 加密。

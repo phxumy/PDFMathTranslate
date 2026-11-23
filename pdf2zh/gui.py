@@ -8,6 +8,7 @@ import json
 import html as html_utils
 from urllib.parse import quote
 from dataclasses import replace
+from functools import partial
 from queue import Empty, Queue
 from threading import Event, Thread
 from asyncio import CancelledError
@@ -28,7 +29,8 @@ from pdf2zh.config import ConfigManager
 from pdf2zh.translation_queue import queue_files, queue_signature, queue_summary
 from pdf2zh.translation_history import HistoryStore, TaskRecorder, current_task, now
 from pdf2zh.cache import cache_information, clear_translation_cache
-from pdf2zh import history_ui
+from pdf2zh import history_ui, openai_access
+from pdf2zh.openai_keys import KEY_REF
 from pdf2zh.codex_models import get_codex_models, model_choices, effort_choices
 from pdf2zh.app_update import APP_VERSION, REPOSITORY_URL, update_manager, UpdateError
 from pdf2zh.codex_account import (
@@ -497,6 +499,103 @@ def _codex_settings(env_values, fast_mode, speed, parallel):
     }.items():
         values[keys.index(key)] = value
     return values, workers
+
+
+def _local_openai_profiles():
+    return desktop_mode and not flag_demo and not hidden_gradio_details
+
+
+def _openai_profile_controls(service, key):
+    choices = (
+        ConfigManager.openai_keys().choices()
+        if service == "OpenAI" and _local_openai_profiles()
+        else []
+    )
+    names = {ref: name for name, ref in choices}
+    return (
+        gr.update(visible=service == "OpenAI" and not hidden_gradio_details),
+        gr.update(choices=choices, value=key if key in names else None),
+        gr.update(value=names.get(key, "")),
+        gr.update(value=""),
+    )
+
+
+def save_openai_profile(service, url, key, model, name="", *, automatic=False):
+    if (
+        service != "OpenAI"
+        or not _local_openai_profiles()
+        or (automatic and (not key or key.startswith(KEY_REF)))
+    ):
+        return (gr.skip(),) * 4
+    vault = ConfigManager.openai_keys()
+    try:
+        ref = vault.remember(url, key, name)
+        ConfigManager.set_translator_by_name(
+            "openai",
+            {"OPENAI_BASE_URL": url, "OPENAI_API_KEY": ref, "OPENAI_MODEL": model},
+        )
+        title, _url = vault.profile(ref)
+        return (
+            ref,
+            gr.update(choices=vault.choices(), value=ref),
+            title,
+            "密钥已保存到本机。",
+        )
+    except (ValueError, OSError) as exc:
+        raise gr.Error(str(exc)) from None
+
+
+def select_openai_profile(service, ref, model):
+    if service != "OpenAI" or not _local_openai_profiles() or not ref:
+        return (gr.skip(),) * 4
+    try:
+        name, url = ConfigManager.openai_keys().profile(ref)
+        ConfigManager.set_translator_by_name(
+            "openai",
+            {"OPENAI_BASE_URL": url, "OPENAI_API_KEY": ref, "OPENAI_MODEL": model},
+        )
+        return url, ref, name, ""
+    except (ValueError, OSError) as exc:
+        raise gr.Error(str(exc)) from None
+
+
+def openai_model_action(service, url, key, model, *, test=False):
+    # These controls are shared with Codex. Keep the service and credentials
+    # fixed for the duration of the request so late results cannot cross accounts.
+    if service != "OpenAI" or hidden_gradio_details or flag_demo or not key:
+        if test and service == "OpenAI" and not key:
+            yield (*[gr.skip() for _ in range(8)], "请先输入或选择 API 密钥。")
+        else:
+            yield (gr.skip(),) * 9
+        return
+    yield (
+        *[gr.update(interactive=False) for _ in range(8)],
+        "正在测试模型连接…" if test else "正在读取模型目录…",
+    )
+    model_update = gr.update(interactive=True)
+    try:
+        secret = ConfigManager.openai_keys().resolve(url, key)
+        if test:
+            openai_access.test_model_connection(url, secret, model)
+            message = f"连接成功，模型 {model} 已接受 Chat Completions 请求。"
+        else:
+            choices = openai_access.model_ids(url, secret)
+            model_update = gr.update(
+                interactive=True,
+                choices=choices,
+                value=model or (choices[0] if choices else None),
+            )
+            message = f"已读取 {len(choices)} 个模型。可选择或手动填写模型 ID。"
+    except (ValueError, OSError, openai_access.OpenAIServiceError) as exc:
+        message = str(exc)
+    except Exception:
+        message = "无法读取接口响应，请检查服务地址后重试。"
+    yield (
+        *[gr.update(interactive=True) for _ in range(3)],
+        model_update,
+        *[gr.update(interactive=True) for _ in range(4)],
+        message,
+    )
 
 
 def refresh_codex_model_catalog(service, configured_bin, profile, model, effort):
@@ -1743,6 +1842,23 @@ with gr.Blocks(
                             interactive=True,
                         )
                     )
+                with gr.Column(visible=False) as openai_panel:
+                    with gr.Column(visible=_local_openai_profiles()):
+                        openai_profile = gr.Dropdown(
+                            label="已保存的 API 密钥", choices=[], interactive=True
+                        )
+                        openai_name = gr.Textbox(
+                            label="密钥名称", placeholder="例如：科研项目"
+                        )
+                        openai_save = gr.Button("保存密钥 / 重命名")
+                    with gr.Row():
+                        openai_refresh = gr.Button("刷新 API 模型列表")
+                        openai_test = gr.Button("测试连接")
+                    openai_status = gr.Textbox(
+                        label="连接状态",
+                        interactive=False,
+                        info="测试会向所选模型发送一个最多 16 个输出 token 的请求。",
+                    )
             with gr.Column(
                 visible=desktop_mode and "Codex" in enabled_services
             ) as codex_panel:
@@ -1924,7 +2040,26 @@ with gr.Blocks(
                         value=(
                             str(value) if i in (2, 3) and value is not None else value
                         ),
-                        **({"choices": []} if i in (2, 3) else {}),
+                        **(
+                            {"choices": []}
+                            if i in (2, 3)
+                            else {
+                                "type": (
+                                    "password"
+                                    if any(
+                                        word in label.upper()
+                                        for word in (
+                                            "API_KEY",
+                                            "APIKEY",
+                                            "SECRET",
+                                            "PASSWORD",
+                                            "TOKEN",
+                                        )
+                                    )
+                                    else "text"
+                                )
+                            }
+                        ),
                     )
                     if translator.name == "codex" and label in {
                         "CODEX_MODEL",
@@ -1936,7 +2071,11 @@ with gr.Blocks(
                             else "选择当前模型的档位，也可手动填写。翻译后端支持 none 至 max，暂不支持 ultra。"
                         )
                     elif i in (2, 3):
-                        _envs[i]["info"] = None
+                        _envs[i]["info"] = (
+                            "可从当前 API 读取模型，也可手动输入。"
+                            if label == "OPENAI_MODEL"
+                            else None
+                        )
                 return [
                     *_envs,
                     gr.update(visible=translator.CustomPrompt),
@@ -1960,6 +2099,9 @@ with gr.Blocks(
                         _chatgpt_action(get_chatgpt_status)
                         if is_chatgpt
                         else (gr.update(), gr.update(), gr.update())
+                    ),
+                    *_openai_profile_controls(
+                        service, _envs[1].get("value") if len(_envs) > 1 else None
                     ),
                 ]
 
@@ -2053,6 +2195,53 @@ with gr.Blocks(
                 envs[3],
                 codex_models_refresh,
             ]
+            openai_inputs = [service, envs[0], envs[1], envs[2]]
+            openai_outputs = [
+                *openai_inputs,
+                openai_profile,
+                openai_save,
+                openai_refresh,
+                openai_test,
+                openai_status,
+            ]
+            openai_event = dict(
+                concurrency_id="openai-settings",
+                concurrency_limit=1,
+                show_progress="hidden",
+                api_name=False,
+            )
+            profile_outputs = [envs[1], openai_profile, openai_name, openai_status]
+            openai_refresh.click(
+                openai_model_action, openai_inputs, openai_outputs, **openai_event
+            )
+            openai_test.click(
+                partial(openai_model_action, test=True),
+                openai_inputs,
+                openai_outputs,
+                **openai_event,
+            )
+            openai_save.click(
+                save_openai_profile,
+                [*openai_inputs, openai_name],
+                profile_outputs,
+                **openai_event,
+            ).success(
+                openai_model_action, openai_inputs, openai_outputs, **openai_event
+            )
+            envs[1].blur(
+                partial(save_openai_profile, automatic=True),
+                openai_inputs,
+                profile_outputs,
+                **openai_event,
+            )
+            openai_profile.input(
+                select_openai_profile,
+                [service, openai_profile, envs[2]],
+                [envs[0], envs[1], openai_name, openai_status],
+                **openai_event,
+            ).success(
+                openai_model_action, openai_inputs, openai_outputs, **openai_event
+            )
             service.select(
                 on_select_service,
                 service,
@@ -2066,7 +2255,13 @@ with gr.Blocks(
                     chatgpt_status,
                     chatgpt_model,
                     chatgpt_effort,
+                    openai_panel,
+                    openai_profile,
+                    openai_name,
+                    openai_status,
                 ],
+            ).then(
+                openai_model_action, openai_inputs, openai_outputs, **openai_event
             ).then(
                 refresh_codex_model_catalog,
                 catalog_inputs,
@@ -2359,8 +2554,12 @@ with gr.Blocks(
             chatgpt_status,
             chatgpt_model,
             chatgpt_effort,
+            openai_panel,
+            openai_profile,
+            openai_name,
+            openai_status,
         ],
-    ).then(
+    ).then(openai_model_action, openai_inputs, openai_outputs, **openai_event).then(
         refresh_codex_account,
         inputs=[envs[0], envs[1]],
         outputs=codex_status,

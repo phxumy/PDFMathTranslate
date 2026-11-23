@@ -19,6 +19,7 @@ from pdf2zh.codex_errors import (
 from pdf2zh.converter import PDFConverterEx
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.translator import TranslationAbortedError
+from pdf2zh.openai_access import OpenAIServiceError
 
 
 def document_with_masthead_form():
@@ -59,6 +60,7 @@ def process_document(data, translate):
 @pytest.mark.parametrize(
     "error",
     [
+        OpenAIServiceError("OpenAI HTTP 400"),
         TranslationAbortedError("Original ChatGPT answer is still pending"),
         CodexPermanentError("Authentication required"),
         CodexTranslationValidationError("Incomplete translated paragraph"),
@@ -109,3 +111,24 @@ def test_resuming_page_visits_pending_form_before_later_batch():
         ("recover", "nature physics"),
         ("translate", "Later page body"),
     ]
+
+
+def test_form_depth_limit_applies_to_the_standard_page_path(monkeypatch):
+    from pdf2zh import pdfinterp
+    from pdfminer.pdfinterp import PDFInterpreterError
+
+    monkeypatch.setattr(pdfinterp, "MAX_FORM_EXPANSION_DEPTH", 1)
+    with pytest.raises(PDFInterpreterError, match="Form XObject"):
+        process_document(document_with_masthead_form(), lambda _: "")
+
+
+def test_content_filter_limit_is_checked_before_decoding(monkeypatch):
+    from pdf2zh import pdfinterp
+    from pdfminer.pdfinterp import PDFInterpreterError
+    from pdfminer.pdftypes import PDFStream
+    from pdfminer.psparser import LIT
+
+    monkeypatch.setattr(pdfinterp, "MAX_CONTENT_FILTER_LAYERS", 1)
+    stream = PDFStream({"Filter": [LIT("ASCIIHexDecode"), LIT("FlateDecode")]}, b"")
+    with pytest.raises(PDFInterpreterError, match="过滤器"):
+        PDFPageInterpreterEx(None, None, {}).execute([stream])

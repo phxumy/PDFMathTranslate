@@ -148,7 +148,9 @@ def has_suspicious_biomedical_translation(source: str, target: str) -> bool:
         )
         target_values = {
             Decimal(match[0])
-            for match in re.finditer(rf"(?<![A-Za-z0-9.]){number}(?![\d.])", clean_target)
+            for match in re.finditer(
+                rf"(?<![A-Za-z0-9.]){number}(?![\d.])", clean_target
+            )
         }
         if any(
             Decimal(pair[key]) not in target_values
@@ -941,7 +943,7 @@ def _has_reversed_half_life_exception(source: str, target: str) -> bool:
         )
         if wrong_scope and not re.search(
             r"其(?!余|餘|他)|它|该化合物|該化合物|此化合物",
-            wrong_scope['claim'],
+            wrong_scope["claim"],
         ):
             return True
     return False
@@ -1039,9 +1041,9 @@ def has_omitted_scientific_content(source: str, target: str) -> bool:
     """
     source = unicodedata.normalize("NFKC", source)
     target = unicodedata.normalize("NFKC", target)
-    if _has_reversed_half_life_exception(source, target) or _has_invented_dioxane_addition(
+    if _has_reversed_half_life_exception(
         source, target
-    ):
+    ) or _has_invented_dioxane_addition(source, target):
         return True
     source = _strip_non_prose(source)
     target = _strip_non_prose(target)

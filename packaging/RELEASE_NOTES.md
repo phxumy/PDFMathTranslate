@@ -1,3 +1,12 @@
+## v1.9.11-codex.7.5 — OpenAI 模型兼容、本地密钥管理与 Codex CLI 更新
+
+- OpenAI 会从当前 Base URL 的 `/models` 读取模型，也可手动输入 ID。“测试连接”使用当前密钥和选中的模型发送简短的 Chat Completions 请求，最多请求 16 个输出 token。
+- GPT‑6.2 等新模型使用服务端默认采样参数。经典 GPT 聊天模型保留零温度。无效参数、认证和额度错误会结束任务并显示原因，暂时性网络或服务错误最多尝试三次。
+- Windows 桌面版的 OpenAI 密钥以密码框显示，可自动保存在本机、命名和切换。旧版活动配置中的明文密钥首次读取时迁移到当前 Windows 用户的 DPAPI 加密存储，保存的密钥绑定各自的 API 地址。
+- 内置官方稳定版 Codex CLI 0.171.0，Windows 完整附件按官方 SHA-256 校验。[官方发行](https://github.com/openai/codex/releases/tag/rust-v0.171.0)
+- 标准引擎移植 Form 嵌套最多 64 层和内容流过滤器最多 16 层的解析保护，并移除版面分析的一次整页像素复制。Codex 后端与参考文献逐条分行仍使用现有流水线。
+- 本版继续使用锁定的 BabelDOC 0.2.33。实验性 BabelDOC 后端仍使用旧解析器。两个局部保护仅作用于本分支标准引擎；完整 Rust 流水线及上游两份安全公告的正式修复位于 BabelDOC 0.7 系列。需要该引擎时可独立使用上游 Windows 版本。[PDFMathTranslate-next 2.10.2](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next/releases/tag/v2.10.2) · [BabelDOC 0.7.0](https://github.com/funstory-ai/BabelDOC/releases/tag/v0.7.0) · [BabelDOC 0.7.1](https://github.com/funstory-ai/BabelDOC/releases/tag/v0.7.1)
+
 ## v1.9.11-codex.7.4 — 科学公式、参考文献与译文完整性修复
 
 - 修复部分数学字体将根号、横线和被开方数分别绘制时，行内公式被拆开并出现重叠的问题。根据原始字形位置恢复完整公式，保留数字及数学符号。

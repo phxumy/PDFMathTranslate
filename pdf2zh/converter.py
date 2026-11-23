@@ -20,6 +20,7 @@ from pdfminer.utils import Matrix, apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, retry_if_exception, wait_fixed, stop_after_attempt
 
+from pdf2zh.openai_access import OpenAIServiceError
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.identity_layout import author_byline_chars, orcid_list_chars
@@ -109,7 +110,12 @@ log = logging.getLogger(__name__)
 def _retryable_translation_error(error: BaseException) -> bool:
     return isinstance(error, Exception) and not isinstance(
         error,
-        (CodexPermanentError, CodexTranslationValidationError, TranslationAbortedError),
+        (
+            CodexPermanentError,
+            CodexTranslationValidationError,
+            TranslationAbortedError,
+            OpenAIServiceError,
+        ),
     )
 
 
@@ -7296,7 +7302,7 @@ class TranslateConverter(PDFConverterEx):
         sstk, literal_replacements = self._mask_protected_literal_batch(sstk)
 
         @retry(
-            wait=wait_fixed(1), retry=retry_if_exception(_retryable_translation_error)
+            wait=wait_fixed(1), stop=stop_after_attempt(3), retry=retry_if_exception(_retryable_translation_error), reraise=True,
         )
         def worker(s: str):
             self._check_cancelled()
@@ -7407,8 +7413,14 @@ class TranslateConverter(PDFConverterEx):
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.thread
         ) as executor:
-            futures = [executor.submit(copy_context().run, worker, item) for item in sstk]
-            results = [future.result() for future in futures]
+            futures = {executor.submit(copy_context().run, worker, item): index for index, item in enumerate(sstk)}
+            results = list(sstk)
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    results[futures[future]] = future.result()
+            finally:
+                for future in futures:
+                    future.cancel()
         if len(results) != len(sstk):
             raise ValueError(
                 f"translate returned {len(results)} items for {len(sstk)} source items"

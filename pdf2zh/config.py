@@ -3,6 +3,9 @@ from pathlib import Path
 from threading import RLock  # 改成 RLock
 import os
 import copy
+import tempfile
+
+from pdf2zh.openai_keys import KEY_REF, OpenAIKeys
 
 
 class ConfigManager:
@@ -19,13 +22,17 @@ class ConfigManager:
                     cls._instance = cls()
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, config_path=None):
         # 防止重复初始化
         if hasattr(self, "_initialized") and self._initialized:
             return
         self._initialized = True
 
-        self._config_path = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
+        self._config_path = (
+            Path(config_path)
+            if config_path
+            else Path.home() / ".config" / "PDFMathTranslate" / "config.json"
+        )
         self._config_data = {}
 
         # 这里不要再加锁，因为外层可能已经加了锁 (get_instance), RLock也无妨
@@ -50,31 +57,68 @@ class ConfigManager:
         with self._lock:  # 加锁确保线程安全
             with self._config_path.open("r", encoding="utf-8") as f:
                 self._config_data = json.load(f)
+            for provider in self._config_data.get("translators", []):
+                if provider.get("name") == "openai":
+                    envs = provider.get("envs", {})
+                    try:
+                        migrated = self._store_openai_key(envs)
+                    except ValueError:
+                        # An invalid legacy endpoint must remain editable in Settings.
+                        continue
+                    if migrated:
+                        self._save_config()
+
+    @classmethod
+    def openai_keys(cls):
+        return OpenAIKeys(cls.get_instance()._config_path)
+
+    def _store_openai_key(self, envs):
+        value = envs.get("OPENAI_API_KEY")
+        if not value or value == "***" or value.startswith(KEY_REF):
+            return False
+        envs["OPENAI_API_KEY"] = OpenAIKeys(self._config_path).remember(
+            envs.get("OPENAI_BASE_URL"), value
+        )
+        return True
 
     def _save_config(self):
         """保存配置到 config.json"""
         with self._lock:  # 加锁确保线程安全
-            # 移除循环引用并写入
-            cleaned_data = self._remove_circular_references(self._config_data)
-            with self._config_path.open("w", encoding="utf-8") as f:
-                json.dump(cleaned_data, f, indent=4, ensure_ascii=False)
+            # Replace atomically. A crash during migration must leave the old or new config intact.
+            filename = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", dir=self._config_path.parent, delete=False
+                ) as f:
+                    filename = f.name
+                    json.dump(
+                        self._remove_circular_references(self._config_data),
+                        f,
+                        indent=4,
+                        ensure_ascii=False,
+                    )
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(filename, self._config_path)
+            finally:
+                if filename:
+                    Path(filename).unlink(missing_ok=True)
 
     def _remove_circular_references(self, obj, seen=None):
-        """递归移除循环引用"""
-        if seen is None:
-            seen = set()
-        obj_id = id(obj)
-        if obj_id in seen:
-            return None  # 遇到已处理过的对象，视为循环引用
-        seen.add(obj_id)
-
-        if isinstance(obj, dict):
-            return {
-                k: self._remove_circular_references(v, seen) for k, v in obj.items()
-            }
-        elif isinstance(obj, list):
-            return [self._remove_circular_references(i, seen) for i in obj]
-        return obj
+        if not isinstance(obj, (dict, list)):
+            return obj
+        seen = set() if seen is None else seen
+        if id(obj) in seen:
+            return None
+        seen.add(id(obj))
+        try:
+            if isinstance(obj, dict):
+                return {
+                    k: self._remove_circular_references(v, seen) for k, v in obj.items()
+                }
+            return [self._remove_circular_references(v, seen) for v in obj]
+        finally:
+            seen.remove(id(obj))
 
     @classmethod
     def custome_config(cls, file_path):
@@ -84,11 +128,7 @@ class ConfigManager:
             raise ValueError(f"Config file {custom_path} not found!")
         # 加锁
         with cls._lock:
-            instance = cls()
-            instance._config_path = custom_path
-            # 此处传 isInit=False，若不存在则报错；若存在则正常 _load_config()
-            instance._ensure_config_exists(isInit=False)
-            cls._instance = instance
+            cls._instance = cls(custom_path)
 
     @classmethod
     def get(cls, key, default=None):
@@ -131,7 +171,7 @@ class ConfigManager:
         translators = instance._config_data.get("translators", [])
         for translator in translators:
             if translator.get("name") == name:
-                return translator["envs"]
+                return copy.deepcopy(translator["envs"])
         return None
 
     @classmethod
@@ -139,10 +179,13 @@ class ConfigManager:
         """根据 name 设置或更新 translator 配置"""
         instance = cls.get_instance()
         with instance._lock:
+            new_translator_envs = copy.deepcopy(new_translator_envs)
+            if name == "openai":
+                instance._store_openai_key(new_translator_envs)
             translators = instance._config_data.get("translators", [])
             for translator in translators:
                 if translator.get("name") == name:
-                    translator["envs"] = copy.deepcopy(new_translator_envs)
+                    translator["envs"] = new_translator_envs
                     instance._save_config()
                     return
             translators.append(

@@ -58,6 +58,12 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.7.5
+
+The OpenAI provider reads model IDs from the configured API, tests the selected model with a short Chat Completions request, and supports named local keys protected by Windows DPAPI. GPT-6.2 uses model-default sampling. Permanent request errors stop the job and transient retries are bounded.
+
+The Windows installer bundles Codex CLI 0.171.0. The standard PDF engine adds bounds on Form nesting and content-stream filter chains inspired by BabelDOC 0.7, and avoids copying the full raster for layout detection. The existing Codex backend and reference formatting continue to use this engine.
+
 ### New in v1.9.11-codex.7.4
 
 - Preserve complete inline radicals, abbreviated journal names, and citations within supplemental-material notes.
@@ -101,7 +107,7 @@ Quick start:
 - Remaining time uses a rolling range from actually completed pages, excludes the first cold-start sample and waits for sufficient observations. Font processing and final PDF writing are shown as a separate stage.
 - A Windows EXE installer and explicit in-app GitHub updates, with size and SHA-256 verification before installation. Translation must finish or be cancelled before updating.
 
-The release includes the official stable **Codex CLI 0.166.0 program** so a separate
+The release includes the official stable **Codex CLI 0.171.0 program** so a separate
 Python or Codex installation is unnecessary. It does **not** include an account,
 subscription, free quota, login credentials, API keys, user PDFs, or translation
 caches. The desktop interface is bound to `127.0.0.1`, but text is sent to the
@@ -111,7 +117,7 @@ for account and sign-in details.
 
 ### Codex fields and model IDs (checked October 28, 2026)
 
-These field rules apply to desktop releases codex.5 through codex.7.4. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
+These field rules apply to desktop releases codex.5 through codex.7.5. The program passes an explicit model ID unchanged to `codex exec --model`; it has no model-name allowlist or automatic model substitution.
 
 Starting with codex.7.2, the bundled CLI uses independent credentials under `%USERPROFILE%\.config\PDFMathTranslate\codex`, including when `CODEX_BIN` explicitly points to the bundled executable. Login, logout, account/model queries, and translation all use this scope; inherited OpenAI credentials are not reused. Upgrading requires signing in once, without copying or modifying personal Codex credentials. An external CLI selected by the user retains its existing `CODEX_HOME` and credential store. The account panel displays email, plan, quota remaining percentages and reset times from the official account RPCs when available. Failed queries show unavailable, and API-key billing balances are not supplied by this interface. Separate sign-ins do not create extra account quota.
 

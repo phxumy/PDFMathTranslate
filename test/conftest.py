@@ -66,55 +66,6 @@ def _stub_ollama():
     module.Client = Client
 
 
-def _stub_openai():
-    module = _ensure_module("openai")
-
-    class RateLimitError(Exception):
-        pass
-
-    class BadRequestError(Exception):
-        pass
-
-    class _ChatCompletions:
-        def create(self, **kwargs):
-            content = kwargs.get("messages", [{}])[0].get("content", "")
-            return types.SimpleNamespace(
-                choices=[
-                    types.SimpleNamespace(
-                        message=types.SimpleNamespace(content=content),
-                        delta=types.SimpleNamespace(content=content),
-                    )
-                ]
-            )
-
-    class _Chat:
-        def __init__(self):
-            self.completions = _ChatCompletions()
-
-    class OpenAI:
-        def __init__(self, base_url=None, api_key=None):
-            self.base_url = base_url
-            self.api_key = api_key
-            self.chat = _Chat()
-
-    class AzureOpenAI(OpenAI):
-        def __init__(
-            self,
-            azure_endpoint=None,
-            azure_deployment=None,
-            api_version=None,
-            api_key=None,
-        ):
-            super().__init__(base_url=azure_endpoint, api_key=api_key)
-            self.azure_deployment = azure_deployment
-            self.api_version = api_version
-
-    module.OpenAI = OpenAI
-    module.AzureOpenAI = AzureOpenAI
-    module.RateLimitError = RateLimitError
-    module.BadRequestError = BadRequestError
-
-
 def _stub_xinference_client():
     module = _ensure_module("xinference_client")
 
@@ -301,7 +252,6 @@ def _stub_pdf2zh_high_level():
 
 _stub_deepl()
 _stub_ollama()
-_stub_openai()
 _stub_xinference_client()
 _stub_azure()
 _stub_tencentcloud()

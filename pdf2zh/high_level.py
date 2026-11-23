@@ -1074,7 +1074,7 @@ def translate_patch(
                 tracker.emit("analyzing", pageno + 1)
                 page.pageno = pageno
                 pix = doc_zh[page.pageno].get_pixmap()
-                image = np.frombuffer(pix.samples, np.uint8).reshape(
+                image = np.frombuffer(pix.samples_mv, np.uint8).reshape(
                     pix.height, pix.width, 3
                 )[:, :, ::-1]
                 scan_background = prepare_scan_background(doc_zh[page.pageno], image)
