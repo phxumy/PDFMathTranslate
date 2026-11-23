@@ -46,6 +46,8 @@
 - [查看最新 Release、版本说明和 SHA-256](https://github.com/phxumy/PDFMathTranslate/releases/latest)
 - [桌面版完整安装和故障排查](./DESKTOP_APP_zh-CN.md)
 
+从 `.7.6` 起，排版引擎默认选 Fast。扫描件的纯图片页会自动执行本地 OCR，原生文本页直接翻译。桌面可选 Precise 使用随包的 Next 2.10.2 / BabelDOC 0.7.1，或在命令行执行 `pdf2zh --mode precise 文件.pdf`。对于简单原生文本 PDF，可用 `pdf2zh --ultrafast 文件.pdf` 跳过神经网络版面识别。服务列表中的“ChatGPT 聊天”已废弃，暂停开发。
+
 一分钟上手：
 
 1. 下载并运行上面的 EXE 安装包；已有版本可覆盖安装。

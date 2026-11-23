@@ -103,8 +103,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--thread",
         "-t",
         type=int,
-        default=4,
-        help="The number of threads to execute translation.",
+        default=None,
+        help="Translation workers (default 4, or 16 with --ultrafast).",
     )
     parse_params.add_argument(
         "--interactive",
@@ -176,6 +176,17 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parse_params.add_argument(
+        "--mode",
+        choices=["fast", "precise"],
+        default="fast",
+        help="Use the standard engine or the isolated Next engine.",
+    )
+    parse_params.add_argument(
+        "--ultrafast",
+        action="store_true",
+        help="Use native PDF text positions without OCR or neural layout (fast CLI only).",
+    )
+    parse_params.add_argument(
         "--babeldoc",
         default=False,
         action="store_true",
@@ -208,7 +219,29 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(args: Optional[List[str]]) -> argparse.Namespace:
-    parsed_args = create_parser().parse_args(args=args)
+    parser = create_parser()
+    parsed_args = parser.parse_args(args=args)
+    if parsed_args.thread is None:
+        parsed_args.thread = 16 if parsed_args.ultrafast else 4
+    if parsed_args.thread < 1:
+        parser.error("--thread must be positive")
+    if parsed_args.ultrafast and (
+        parsed_args.mode != "fast"
+        or parsed_args.babeldoc
+        or parsed_args.onnx
+        or parsed_args.desktop
+        or parsed_args.interactive
+        or parsed_args.flask
+        or parsed_args.celery
+        or parsed_args.mcp
+        or parsed_args.sse
+        or parsed_args.share
+    ):
+        parser.error(
+            "--ultrafast requires fast CLI mode without --onnx, --babeldoc or server options"
+        )
+    if parsed_args.mode == "precise" and (parsed_args.babeldoc or parsed_args.onnx):
+        parser.error("--mode precise cannot be combined with --babeldoc or --onnx")
 
     if parsed_args.pages:
         pages = []
@@ -271,6 +304,8 @@ def main(args: Optional[List[str]] = None) -> int:
     if parsed_args.debug:
         log.setLevel(logging.DEBUG)
 
+    if parsed_args.desktop or parsed_args.interactive:
+        os.environ["PDF2ZH_DEFAULT_MODE"] = parsed_args.mode
     if parsed_args.desktop:
         from pdf2zh.desktop import setup_desktop
 
@@ -280,10 +315,14 @@ def main(args: Optional[List[str]] = None) -> int:
             debug=parsed_args.debug,
         )
 
-    if parsed_args.onnx:
-        ModelInstance.value = OnnxModel(parsed_args.onnx)
-    else:
-        ModelInstance.value = OnnxModel.load_available()
+    if not parsed_args.ultrafast and (
+        parsed_args.mode == "fast" or parsed_args.interactive
+    ):
+        ModelInstance.value = (
+            OnnxModel(parsed_args.onnx)
+            if parsed_args.onnx
+            else OnnxModel.load_available()
+        )
 
     if parsed_args.interactive:
         from pdf2zh.gui import setup_gui

@@ -337,6 +337,11 @@ def translate_file(
         - The progress bar
         - The progress bar
     """
+    mode = state.get("translation_mode", "fast")
+    if mode == "precise" and (use_babeldoc or service == "ChatGPT 聊天"):
+        raise gr.Error(
+            "Precise 与旧版 BabelDOC 及已废弃的 ChatGPT 聊天服务不能同时使用。"
+        )
     translator = service_map[service]
     is_chatgpt = translator.name == ChatGPTTranslator.name
     if is_chatgpt:
@@ -447,6 +452,8 @@ def translate_file(
         "model": ModelInstance.value,
     }
 
+    if mode == "precise":
+        param["mode"] = mode
     if not use_babeldoc:
         param["progress_callback"] = progress_callback
         param["preview_callback"] = preview_callback
@@ -745,7 +752,10 @@ def translate_file_stream(
     last_progress_at = started
     latest_status = "**正在准备翻译** · 剩余时间估算中"
     recorder = None
-    if use_babeldoc:
+    precise = state.get("translation_mode") == "precise"
+    if precise:
+        latest_status += " · Precise 将在排版完成后显示完整 PDF"
+    elif use_babeldoc:
         latest_status += " · BabelDOC 模式将在完成后显示完整 PDF"
     try:
         if service_map[service].name == "codex":
@@ -777,7 +787,11 @@ def translate_file_stream(
                         "language_to": lang_to,
                         "pages": page_input if page_range == "Others" else page_range,
                         "ignore_cache": bool(ignore_cache),
-                        "engine": "BabelDOC" if use_babeldoc else "standard",
+                        "engine": (
+                            "precise"
+                            if precise
+                            else "BabelDOC" if use_babeldoc else "standard"
+                        ),
                     },
                     input_at=state.get("input_at"),
                 )
@@ -919,7 +933,7 @@ def translate_file_stream(
                 result = list(value)
                 result[1] = (
                     gr.update(value=result[1], visible=True)
-                    if use_babeldoc
+                    if use_babeldoc or precise
                     else gr.update(visible=True)
                 )
                 yield (
@@ -1066,6 +1080,7 @@ def translate_queue_stream(
         ignore_cache,
         vfont,
         use_babeldoc,
+        state.get("translation_mode", "fast"),
         chatgpt_model,
         chatgpt_effort,
         codex_fast,
@@ -1818,12 +1833,28 @@ with gr.Blocks(
             gr.Markdown("## Option")
             service = gr.Dropdown(
                 label="Service",
-                choices=enabled_services,
+                choices=[
+                    (
+                        ("ChatGPT 聊天（已废弃，暂停开发）", label)
+                        if label == "ChatGPT 聊天"
+                        else (label, label)
+                    )
+                    for label in enabled_services
+                ],
                 value=(
                     "Codex"
                     if desktop_mode and "Codex" in enabled_services
                     else enabled_services[0]
                 ),
+            )
+            mode_selector = gr.Radio(
+                label="排版引擎",
+                choices=[
+                    ("Fast · 标准排版", "fast"),
+                    ("Precise · Next 精细排版", "precise"),
+                ],
+                value=os.environ.get("PDF2ZH_DEFAULT_MODE", "fast"),
+                interactive=True,
             )
             with gr.Accordion("模型与服务设置", open=False):
                 envs = []
@@ -1993,10 +2024,10 @@ with gr.Blocks(
                     label="Custom Prompt for llm", interactive=True, visible=False
                 )
                 use_babeldoc = gr.Checkbox(
-                    label="Use BabelDOC", interactive=True, value=False
+                    label="Use BabelDOC（旧版 0.2.33）", interactive=True, value=False
                 )
 
-            def on_select_service(service, evt: gr.EventData):
+            def on_select_service(service, mode, evt: gr.EventData):
                 translator = service_map[service]
                 is_chatgpt = translator.name == ChatGPTTranslator.name
                 _envs = []
@@ -2092,7 +2123,7 @@ with gr.Blocks(
                     gr.update(visible=translator.name == "codex"),
                     (
                         gr.update(value=False, interactive=False)
-                        if is_chatgpt
+                        if is_chatgpt or mode == "precise"
                         else gr.update(interactive=True)
                     ),
                     *(
@@ -2242,9 +2273,18 @@ with gr.Blocks(
             ).success(
                 openai_model_action, openai_inputs, openai_outputs, **openai_event
             )
+            mode_selector.input(
+                lambda mode, svc: gr.update(
+                    value=False, interactive=(mode == "fast" and svc != "ChatGPT 聊天")
+                ),
+                [mode_selector, service],
+                use_babeldoc,
+                queue=False,
+                api_name=False,
+            )
             service.select(
                 on_select_service,
-                service,
+                [service, mode_selector],
                 [
                     *envs,
                     prompt,
@@ -2488,8 +2528,12 @@ with gr.Blocks(
     )
 
     translate_btn.click(
-        lambda: [gr.update(interactive=False)] * 3,
-        outputs=[file_input, link_input, file_type],
+        lambda state, mode: [
+            *[gr.update(interactive=False) for _ in range(3)],
+            {**state, "translation_mode": mode},
+        ],
+        inputs=[state, mode_selector],
+        outputs=[file_input, link_input, file_type, state],
         queue=False,
         api_name=False,
     ).then(
@@ -2543,7 +2587,7 @@ with gr.Blocks(
 
     demo.load(
         on_select_service,
-        service,
+        [service, mode_selector],
         [
             *envs,
             prompt,

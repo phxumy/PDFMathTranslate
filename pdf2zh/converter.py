@@ -21,6 +21,7 @@ from pymupdf import Font
 from tenacity import retry, retry_if_exception, wait_fixed, stop_after_attempt
 
 from pdf2zh.openai_access import OpenAIServiceError
+from pdf2zh.text_spacing import add_cjk_latin_spacing
 from pdf2zh.toc_layout import detect_toc_layout, toc_leader_op
 from pdf2zh.code_blocks import code_block_chars
 from pdf2zh.identity_layout import author_byline_chars, orcid_list_chars
@@ -7110,6 +7111,69 @@ def _classify_running_header_regions(
     return tuple(classified)
 
 
+def create_translation_service(
+    service,
+    lang_in,
+    lang_out,
+    envs=None,
+    prompt=None,
+    ignore_cache=False,
+    chatgpt_task_id=None,
+):
+    # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
+    param = service.split(":", 1)
+    service_name = param[0]
+    service_model = param[1] if len(param) > 1 else None
+    if not envs:
+        envs = {}
+    translators = [
+        GoogleTranslator,
+        BingTranslator,
+        DeepLTranslator,
+        DeepLXTranslator,
+        OllamaTranslator,
+        XinferenceTranslator,
+        AzureOpenAITranslator,
+        OpenAITranslator,
+        ZhipuTranslator,
+        ModelScopeTranslator,
+        SiliconTranslator,
+        GeminiTranslator,
+        AzureTranslator,
+        TencentTranslator,
+        DifyTranslator,
+        AnythingLLMTranslator,
+        ArgosTranslator,
+        GrokTranslator,
+        GroqTranslator,
+        DeepseekTranslator,
+        OpenAIlikedTranslator,
+        CodexTranslator,
+        QwenMtTranslator,
+    ]
+    if service_name == "chatgpt-browser":
+        from pdf2zh.chatgpt import ChatGPTTranslator
+
+        translators.append(ChatGPTTranslator)
+    for translator in translators:
+        if service_name == translator.name:
+            task_options = (
+                {"task_id": chatgpt_task_id}
+                if service_name == "chatgpt-browser" and chatgpt_task_id is not None
+                else {}
+            )
+            return translator(
+                lang_in,
+                lang_out,
+                service_model,
+                envs=envs,
+                prompt=prompt,
+                ignore_cache=ignore_cache,
+                **task_options,
+            )
+    raise ValueError("Unsupported translation service")
+
+
 # fmt: off
 class TranslateConverter(PDFConverterEx):
     def __init__(
@@ -7136,24 +7200,7 @@ class TranslateConverter(PDFConverterEx):
         self.layout = layout
         self.noto_name = noto_name
         self.noto = noto
-        self.translator: BaseTranslator = None
-        # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
-        param = service.split(":", 1)
-        service_name = param[0]
-        service_model = param[1] if len(param) > 1 else None
-        if not envs:
-            envs = {}
-        translators = [GoogleTranslator, BingTranslator, DeepLTranslator, DeepLXTranslator, OllamaTranslator, XinferenceTranslator, AzureOpenAITranslator,
-                       OpenAITranslator, ZhipuTranslator, ModelScopeTranslator, SiliconTranslator, GeminiTranslator, AzureTranslator, TencentTranslator, DifyTranslator, AnythingLLMTranslator, ArgosTranslator, GrokTranslator, GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator, CodexTranslator, QwenMtTranslator]
-        if service_name == "chatgpt-browser":
-            from pdf2zh.chatgpt import ChatGPTTranslator
-            translators.append(ChatGPTTranslator)
-        for translator in translators:
-            if service_name == translator.name:
-                task_options = {"task_id": chatgpt_task_id} if service_name == "chatgpt-browser" and chatgpt_task_id is not None else {}
-                self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache, **task_options)
-        if not self.translator:
-            raise ValueError("Unsupported translation service")
+        self.translator: BaseTranslator = create_translation_service(service, lang_in, lang_out, envs, prompt, ignore_cache, chatgpt_task_id)
         if _supports_scientific_translation(self.translator):
             self.translator.set_concurrency(self.thread)
         self.translation_policy = DocumentTranslationPolicy()
@@ -8084,6 +8131,8 @@ class TranslateConverter(PDFConverterEx):
         return restored
 
     def _reading_flow_enabled(self) -> bool:
+        if getattr(self, 'ultrafast_pool', None) is not None:
+            return False
         return (
             _supports_scientific_translation(self.translator)
             and not getattr(self.translator, "prompttext", None)
@@ -8938,16 +8987,22 @@ class TranslateConverter(PDFConverterEx):
                 overrides,
                 int(ltpage.pageid),
             )
-        news = self._translate_planned_segments(
-            sstk,
-            pstk,
-            formula_texts,
+        options = dict(
+            formula_texts=formula_texts,
             page_width=ltpage.width,
             page_height=ltpage.height,
             italic_candidates=italic_candidates,
             readonly_formula_contexts=readonly_formula_contexts,
             reference_title_italic_candidates=reference_title_italic_candidates,
         )
+        pool = getattr(self, "ultrafast_pool", None)
+        if pool is None:
+            news = self._translate_planned_segments(sstk, pstk, **options)
+        elif pool.collecting:
+            pool.submit(sstk, pstk, self._translate_planned_segments, options)
+            return ""
+        else:
+            news = pool.take(sstk)
         if replacement_map:
             news = self._restore_fragment_overrides(news, replacement_map)
         if len(source_sstk) != len(news):
@@ -9078,6 +9133,7 @@ class TranslateConverter(PDFConverterEx):
                     # and untranslated text. Its hidden OCR must stay hidden.
                     continue
                 scan_masks.append(scan_line_mask_ops(source_chars, scan_background))
+            new = add_cjk_latin_spacing(new)
             x: float = pstk[id].x                       # 段落初始横坐标
             y: float = pstk[id].y                       # 段落初始纵坐标
             x0: float = pstk[id].x0                     # 段落左边界

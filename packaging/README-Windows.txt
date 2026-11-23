@@ -78,3 +78,5 @@ Issues: https://github.com/phxumy/PDFMathTranslate/issues
 This is an unofficial community fork, not an OpenAI or upstream release.
 
 OpenAI API: Enter the base URL and key, refresh the model list, and choose a model or enter its ID. Test Connection sends a short chat request capped at 16 output tokens. The desktop app masks keys and supports named local profiles. Windows stores them with per-user DPAPI encryption.
+
+Fast is the default layout engine. English and Chinese OCR languages ship in tessdata. Set TESSDATA_PREFIX for your own language data. Use --ultrafast on native-text PDFs or --mode precise for the bundled, isolated Next engine. The legacy Use BabelDOC option runs 0.2.33. ChatGPT browser chat is deprecated.

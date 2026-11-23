@@ -154,6 +154,7 @@ def find_codex_executable(configured: str | None = None) -> str | None:
 
 
 class BaseTranslator:
+    no_cache = False
     name = "base"
     envs = {}
     lang_map: dict[str, str] = {}
@@ -209,13 +210,14 @@ class BaseTranslator:
         :param text: text to translate
         :return: translated text
         """
-        if not (self.ignore_cache or ignore_cache):
+        if not (self.ignore_cache or ignore_cache or self.no_cache):
             cache = self.cache.get(text)
             if cache is not None:
                 return cache
 
         translation = self.do_translate(text)
-        self.cache.set(text, translation)
+        if not self.no_cache:
+            self.cache.set(text, translation)
         return translation
 
     def translate_batch(

@@ -22,6 +22,7 @@ dependencies = [
     "deepl",
     "openai>=1.0.0",
     "httpx>=0.23,<1",
+    "filelock>=3",
     "azure-ai-translation-text<=1.0.1",
     # 5.36 has a bug, webui starts with a white screen
     "gradio<5.36",
@@ -41,7 +42,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ocr = ["pooch>=1.8,<2"]
+ultrafast = ["pdf-inspector>=1.25.2,<2"]
 desktop = [
+    "pooch>=1.8,<2",
+    "pdf-inspector>=1.25.2,<2",
     "pywebview>=6.2,<7; sys_platform == 'win32'",
 ]
 backend = [

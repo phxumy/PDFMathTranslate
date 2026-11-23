@@ -38,6 +38,8 @@ from pdf2zh.link_annotations import (
 )
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.scanned_pdf import prepare_scan_background
+from pdf2zh.ocr import _ocr_pages, translate_ocr_page
+from time import perf_counter
 from pdf2zh.source_spelling import (
     coalesce_source_uri_annotations,
     collect_source_spelling,
@@ -989,6 +991,10 @@ def translate_patch(
     preview_callback: object = None,
     preview_max_dimension: int = 1400,
     _progress_tracker: TranslationProgressTracker = None,
+    ocr_pages=None,
+    text_items=None,
+    perf=None,
+    ultrafast: bool = False,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
@@ -1035,6 +1041,20 @@ def translate_patch(
     preview_renderer = None
     page_numbers_by_xref: dict[int, int] = {}
 
+    pool = None
+    pending_pages = []
+    if ultrafast:
+        from pdf2zh.ultrafast import ParagraphPool, extract_layout, layout_mask
+
+        if text_items is None:
+            inf.seek(0)
+            text_items = extract_layout(inf.read(), pages)
+            inf.seek(0)
+        pool = ParagraphPool(thread or 16)
+        device.ultrafast_pool = pool
+        device.translator.no_cache = ignore_cache
+        if ignore_cache and hasattr(device.translator, "cache"):
+            device.translator.cache.enabled = False
     try:
         if preview_callback:
             preview_renderer = _PagePreviewRenderer(doc_zh, preview_max_dimension)
@@ -1067,40 +1087,87 @@ def translate_patch(
                             )
                         )
 
+            def direct_page_completed(number, source_page):
+                tracker.page_completed(number)
+                progress.update()
+                if callback:
+                    callback(progress)
+                if preview_callback:
+                    scale = preview_renderer.max_dimension / max(
+                        source_page.rect.width, source_page.rect.height
+                    )
+                    png = source_page.get_pixmap(
+                        matrix=Matrix(scale, scale), alpha=False
+                    ).tobytes("png")
+                    preview_callback(
+                        PagePreview(
+                            page_number=number,
+                            completed_pages=tracker.completed_pages,
+                            total_pages=total_pages,
+                            png_bytes=png,
+                        )
+                    )
+
             for pageno, page in enumerate(PDFPage.create_pages(doc)):
                 _check_translation_cancelled(cancellation_event)
                 if pageno not in selected_pages:
                     continue
                 tracker.emit("analyzing", pageno + 1)
                 page.pageno = pageno
-                pix = doc_zh[page.pageno].get_pixmap()
-                image = np.frombuffer(pix.samples_mv, np.uint8).reshape(
-                    pix.height, pix.width, 3
-                )[:, :, ::-1]
-                scan_background = prepare_scan_background(doc_zh[page.pageno], image)
-                if scan_background is not None:
-                    device.scan_backgrounds[page.pageno] = scan_background
-                page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
-                # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
-                box, page_region_types = _build_layout_mask(
-                    page_layout,
-                    pix.height,
-                    pix.width,
-                    doc_zh[page.pageno],
-                )
-                if not hasattr(device, "layout_detections"):
-                    device.layout_detections = {}
-                device.layout_detections[page.pageno] = _layout_detections(
-                    page_layout, pix.height, pix.width, doc_zh[page.pageno]
-                )
-                layout_region_types[page.pageno] = page_region_types
-                layout[page.pageno] = box
-                device.source_closed_box_strokes[page.pageno] = (
-                    _collect_closed_box_strokes(doc_zh[page.pageno])
-                )
-                device.source_orcid_badges[page.pageno] = _collect_orcid_badge_bounds(
-                    doc_zh[page.pageno]
-                )
+                if ultrafast:
+                    if not text_items.get(pageno):
+                        direct_page_completed(pageno + 1, doc_zh[pageno])
+                        continue
+                    page.rotate = 0
+                    mask_started = perf_counter()
+                    layout[pageno] = layout_mask(page, text_items[pageno])
+                    if perf:
+                        perf.add("layout_mask", perf_counter() - mask_started)
+                else:
+                    pix = doc_zh[page.pageno].get_pixmap()
+                    image = np.frombuffer(pix.samples_mv, np.uint8).reshape(
+                        pix.height, pix.width, 3
+                    )[:, :, ::-1]
+                    scan_background = prepare_scan_background(
+                        doc_zh[page.pageno], image
+                    )
+                    if scan_background is not None:
+                        device.scan_backgrounds[page.pageno] = scan_background
+                    page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[
+                        0
+                    ]
+                    if ocr_pages and pageno in ocr_pages:
+                        tracker.emit("translating", pageno + 1)
+                        translate_ocr_page(
+                            doc_zh[pageno],
+                            page_layout,
+                            device.translator,
+                            noto,
+                            thread,
+                            cancellation_event,
+                        )
+                        direct_page_completed(pageno + 1, doc_zh[pageno])
+                        continue
+                    # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
+                    box, page_region_types = _build_layout_mask(
+                        page_layout,
+                        pix.height,
+                        pix.width,
+                        doc_zh[page.pageno],
+                    )
+                    if not hasattr(device, "layout_detections"):
+                        device.layout_detections = {}
+                    device.layout_detections[page.pageno] = _layout_detections(
+                        page_layout, pix.height, pix.width, doc_zh[page.pageno]
+                    )
+                    layout_region_types[page.pageno] = page_region_types
+                    layout[page.pageno] = box
+                    device.source_closed_box_strokes[page.pageno] = (
+                        _collect_closed_box_strokes(doc_zh[page.pageno])
+                    )
+                    device.source_orcid_badges[page.pageno] = (
+                        _collect_orcid_badge_bounds(doc_zh[page.pageno])
+                    )
                 # 新建一个 xref 存放新指令流
                 page.page_xref = doc_zh.get_new_xref()
                 doc_zh.update_object(page.page_xref, "<<>>")
@@ -1109,8 +1176,37 @@ def translate_patch(
                 page_numbers_by_xref[page.page_xref] = pageno + 1
                 _check_translation_cancelled(cancellation_event)
                 tracker.emit("translating", pageno + 1)
+                started = perf_counter()
                 interpreter.process_page(page)
-                publish_completed_pages()
+                if pool is None:
+                    publish_completed_pages()
+                else:
+                    pending_pages.append(page)
+                    device.take_completed_page_xrefs()
+                    if perf:
+                        perf.add("paragraph_parse", perf_counter() - started)
+
+            if pool is not None:
+                started = perf_counter()
+                pool.begin_render(
+                    lambda: _check_translation_cancelled(cancellation_event)
+                )
+                if perf:
+                    perf.add("translation", perf_counter() - started)
+                logger.info(
+                    "[ultrafast perf] translating with %d workers", thread or 16
+                )
+                for page in pending_pages:
+                    _check_translation_cancelled(cancellation_event)
+                    started = perf_counter()
+                    interpreter.process_page(page)
+                    publish_completed_pages()
+                    if perf:
+                        perf.add("typesetting", perf_counter() - started)
+                if pool.pending:
+                    raise ValueError(
+                        "Ultrafast did not render all translated paragraphs"
+                    )
 
             _check_translation_cancelled(cancellation_event)
             for page_xref, translated_ops in device.flush_deferred_pages().items():
@@ -1124,6 +1220,8 @@ def translate_patch(
             obj_patch[xref] = device.resolve_uri_underline_markers(operations)
         return obj_patch
     finally:
+        if pool is not None:
+            pool.close()
         if preview_renderer is not None:
             preview_renderer.close()
         device.close()
@@ -1149,9 +1247,42 @@ def translate_stream(
     progress_callback: object = None,
     preview_callback: object = None,
     preview_max_dimension: int = 1400,
+    ultrafast: bool = False,
+    mode: str = "fast",
     **kwarg: Any,
 ):
     _check_translation_cancelled(cancellation_event)
+    if mode == "precise":
+        if ultrafast:
+            raise ValueError("--ultrafast requires fast mode")
+        from pdf2zh.precise import translate_precise
+
+        return translate_precise(
+            stream,
+            pages,
+            lang_in,
+            lang_out,
+            service,
+            thread,
+            envs,
+            prompt,
+            ignore_cache,
+            vfont,
+            vchar,
+            skip_subset_fonts,
+            cancellation_event,
+            progress_callback,
+        )
+    if mode != "fast":
+        raise ValueError(f"Unknown translation mode: {mode}")
+    text_items = perf = None
+    if ultrafast:
+        from pdf2zh.ultrafast import PerfTimer, extract_layout
+
+        thread = thread or 16
+        perf = PerfTimer()
+        text_items = extract_layout(stream, pages)
+        perf.step("layout_extract")
     doc_en = doc_zh = None
     try:
         doc_en = Document(stream=stream)
@@ -1187,6 +1318,11 @@ def translate_stream(
         stream = io.BytesIO()
         doc_en.save(stream)
         doc_zh = Document(stream=stream)
+        ocr_pages = (
+            set()
+            if ultrafast
+            else _ocr_pages(doc_zh, pages, lang_in, cancellation_event)
+        )
         page_count = doc_zh.page_count
         # font_list = [("GoNotoKurrent-Regular.ttf", font_path), ("tiro", None)]
         font_id = {}
@@ -1244,7 +1380,7 @@ def translate_stream(
         restore_imported_uri_links(doc_zh, doc_en, start_at=page_count)
         for id in range(page_count):
             doc_en.move_page(page_count + id, id * 2 + 1)
-        if not skip_subset_fonts:
+        if not (skip_subset_fonts or ultrafast):
             # Rebuild MuPDF's document/font state after replacing content streams
             # and grafting pages. Subsetting those live edited objects can leave
             # stale native font references and crash during tracing or final save.
@@ -1257,10 +1393,14 @@ def translate_stream(
             doc_zh.subset_fonts(fallback=True)
             doc_en.subset_fonts(fallback=True)
         _check_translation_cancelled(cancellation_event)
+        serialized_at = perf_counter()
         results = (
             doc_zh.write(deflate=True, garbage=3, use_objstms=1),
             doc_en.write(deflate=True, garbage=3, use_objstms=1),
         )
+        if perf:
+            perf.add("pdf_serialize", perf_counter() - serialized_at)
+            perf.report()
         _progress_tracker.emit("complete")
         return results
     finally:
@@ -1339,6 +1479,8 @@ def translate(
     progress_callback: object = None,
     preview_callback: object = None,
     preview_max_dimension: int = 1400,
+    ultrafast: bool = False,
+    mode: str = "fast",
     **kwarg: Any,
 ):
     if not files:
@@ -1357,6 +1499,7 @@ def translate(
     result_files = []
 
     for file in files:
+        downloaded = False
         if type(file) is str and (
             file.startswith("http://") or file.startswith("https://")
         ):
@@ -1370,6 +1513,7 @@ def translate(
                         print(f"Writing the file: {file}...")
                         tmp_file.write(r.content)
                         file = tmp_file.name
+                        downloaded = True
                 else:
                     r.raise_for_status()
             except Exception as e:
@@ -1394,31 +1538,17 @@ def translate(
                 compatible=True,
             )
 
-        # If the commandline has specified converting to PDF/A format
-        # --compatible / -cp
-        if compatible:
-            with tempfile.NamedTemporaryFile(
-                suffix="-pdfa.pdf", delete=False
-            ) as tmp_pdfa:
-                print(f"Converting {file} to PDF/A format...")
-                convert_to_pdfa(file, tmp_pdfa.name)
-                doc_raw = open(tmp_pdfa.name, "rb")
-                os.unlink(tmp_pdfa.name)
-        else:
-            doc_raw = open(file, "rb")
-        s_raw = doc_raw.read()
-        doc_raw.close()
-
-        temp_dir = Path(tempfile.gettempdir())
-        file_path = Path(file)
         try:
-            if file_path.exists() and file_path.resolve().is_relative_to(
-                temp_dir.resolve()
-            ):
-                file_path.unlink(missing_ok=True)
-                logger.debug(f"Cleaned temp file: {file_path}")
-        except Exception as e:
-            logger.warning(f"Failed to clean temp file {file_path}", exc_info=True)
+            if compatible:
+                with tempfile.TemporaryDirectory(prefix="pdf2zh-pdfa-") as folder:
+                    converted = Path(folder) / "input.pdf"
+                    convert_to_pdfa(file, str(converted))
+                    s_raw = converted.read_bytes()
+            else:
+                s_raw = Path(file).read_bytes()
+        finally:
+            if downloaded:
+                Path(file).unlink(missing_ok=True)
 
         s_mono, s_dual = translate_stream(
             s_raw,

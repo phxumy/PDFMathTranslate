@@ -66,14 +66,14 @@ jobs:
           }
           uv lock --check
           if ($LASTEXITCODE -ne 0) { throw "Dependency lock validation failed." }
-          uv sync --locked --python $env:PYTHON_VERSION
+          uv sync --locked --extra desktop --python $env:PYTHON_VERSION
           if ($LASTEXITCODE -ne 0) { throw "Locked test environment setup failed." }
 
       - name: Run unit tests and formatting checks
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          uv run --locked pytest .
+          uv run --locked --extra desktop pytest .
           if ($LASTEXITCODE -ne 0) { throw "Python unit tests failed; release stopped." }
           uv run --locked black --check .
           if ($LASTEXITCODE -ne 0) { throw "Python formatting checks failed; release stopped." }
@@ -168,6 +168,9 @@ jobs:
               throw "BabelDOC offline asset generation failed with exit code $LASTEXITCODE."
           }
 
+          & $runtimePython script/stage_desktop_engines.py --release-root $releaseRoot --downloads $dependencyRoot
+          if ($LASTEXITCODE -ne 0) { throw "Staging the isolated Next engine and OCR languages failed." }
+
           Write-Host "Downloading verified official Codex CLI $env:CODEX_VERSION"
           $codexArchive = Join-Path $dependencyRoot "codex-package.tar.gz"
           $codexUrl = "https://github.com/openai/codex/releases/download/rust-v$env:CODEX_VERSION/codex-package-x86_64-pc-windows-msvc.tar.gz"
@@ -256,6 +259,8 @@ jobs:
               "runtime",
               "site-packages",
               "codex-cli",
+              "engines",
+              "tessdata",
               "node",
               "Login-Codex.cmd",
               "README-Windows.txt",
@@ -271,6 +276,9 @@ jobs:
               }
           }
 
+          foreach ($file in @("engines/precise/runtime/python.exe", "engines/precise/site-packages/pdf2zh_next/main.py", "tessdata/eng.traineddata", "tessdata/chi_sim.traineddata", "tessdata/chi_tra.traineddata")) {
+              if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot $file) -PathType Leaf)) { throw "Missing engine resource: $file" }
+          }
           $topLevelItems = @(Get-ChildItem $releaseRoot -Force)
           foreach ($item in $topLevelItems) {
               if ($item.Name -in $requiredTopLevel) { continue }

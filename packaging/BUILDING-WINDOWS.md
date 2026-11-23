@@ -7,7 +7,7 @@ The final release contains `PDFMathTranslate-Codex-Setup-win64.exe` and `SHA256S
 For a prepared, clean staging directory on Windows:
 
 ```powershell
-.\script\build-windows-installer.ps1 -ReleaseRoot C:\staging\PDFMathTranslate-Codex -ReleaseTag v1.9.11-codex.7.5 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+.\script\build-windows-installer.ps1 -ReleaseRoot C:\staging\PDFMathTranslate-Codex -ReleaseTag v1.9.11-codex.7.6 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 ```
 
 Do not build a release from a user's working application folder. Copy only clean dependency packages, tracked project files, offline assets and required license files. Never bundle `.codex`, `auth.json`, environment files, translation caches, or PDFs.
@@ -20,3 +20,5 @@ The desktop launcher keeps generated files under the existing user configuration
 
 Inno Setup behavior: https://jrsoftware.org/ishelp/topic_setup_privilegesrequired.htm
 Installer command-line options: https://jrsoftware.org/ishelp/topic_setupcmdline.htm
+
+Stage both engine runtimes before compiling the installer. The desktop extra installs the native text extractor and OCR downloader. Run `python script/stage_desktop_engines.py --release-root <staging> --downloads <download-cache>` to verify and add the official Next runtime, offline assets and Tesseract language data. The Precise interpreter lives under `engines/precise/runtime`, isolated from the Fast environment.

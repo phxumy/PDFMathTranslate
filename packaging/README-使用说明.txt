@@ -65,3 +65,10 @@ PDFMathTranslate Codex 增强桌面版（非官方）
 反馈：https://github.com/phxumy/PDFMathTranslate/issues
 
 OpenAI API：输入 Base URL 和密钥后，选择“刷新 API 模型列表”或手动填写模型。点击“测试连接”可验证所选模型；测试最多请求 16 个输出 token。桌面端密钥以圆点显示，可在本机保存、命名和切换，Windows 使用当前用户的 DPAPI 加密。
+
+排版引擎与扫描件
+Fast 是默认标准引擎。纯图片页会自动识别后翻译，已有文字继续使用原文字层。Windows 版内置英、简中、繁中 OCR 数据。其他语言可联网下载或通过 TESSDATA_PREFIX 指定本机数据。
+Precise 使用独立的 Next 2.10.2 / BabelDOC 0.7.1，并复用所选服务。Precise 完成后提供单语和双语文件。旧 Use BabelDOC 是独立的 0.2.33 实验入口。
+命令行示例：pdf2zh.exe --mode precise -s codex paper.pdf
+简单原生文本 PDF 示例：pdf2zh.exe --ultrafast -s openai paper.pdf
+ChatGPT 聊天已废弃，暂停开发。旧配置和原服务入口仍可使用。

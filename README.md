@@ -58,6 +58,10 @@ Quick start:
 3. Upload a PDF, choose languages and pages, then click **Translate**.
 4. Under **关于与更新**, use **检查更新** and **下载并安装更新** for future releases. Your account, settings and translation cache are retained.
 
+### New in v1.9.11-codex.7.6
+
+Fast mode adds automatic local OCR on selected image-only pages and mixed CJK/Latin spacing. For native-text PDFs, the CLI also supports `--ultrafast`. Choose Precise in the desktop engine selector or use `--mode precise` to run the isolated Next 2.10.2 / BabelDOC 0.7.1 engine with the selected translation provider. The Windows installer includes both runtimes and English, Simplified Chinese and Traditional Chinese OCR data. Source installations can use `pip install '.[ocr,ultrafast]'`. Precise provisions a separate environment on first use, or accepts a Python interpreter with the matching Next and BabelDOC versions through `PDF2ZH_PRECISE_PYTHON`. ChatGPT browser chat is deprecated and development is paused. [Release notes](packaging/RELEASE_NOTES.md)
+
 ### New in v1.9.11-codex.7.5
 
 The OpenAI provider reads model IDs from the configured API, tests the selected model with a short Chat Completions request, and supports named local keys protected by Windows DPAPI. GPT-6.2 uses model-default sampling. Permanent request errors stop the job and transient retries are bounded.

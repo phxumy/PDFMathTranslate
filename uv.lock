@@ -2533,6 +2533,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pdf-inspector"
+version = "1.27.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/a3/3f6a5397c9d26e7bd298821fd0e69a7408db95ba96f0c9c7c69c4268e5c9/pdf_inspector-1.27.0.tar.gz", hash = "sha256:9cc65366465ea160403927d76a6abf1b980d733ecb64531e7679a92d2e74eab0", size = 2143006, upload-time = "2026-11-20T17:03:33.074Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/17/89a0f9d8e3695a241c5eea839b41e2c374e641708e93fdccef8817ae058d/pdf_inspector-1.27.0-cp38-abi3-macosx_10_12_x86_64.whl", hash = "sha256:495163450a9ad73ef253cd25d703005ce72741b1437ec91211a4b87836c4ef92", size = 6381452, upload-time = "2026-11-20T17:03:22.639Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/3c/f6dd2bce7badb20139e307faee81370f9ebb1d24cbcad1bf963c56305e78/pdf_inspector-1.27.0-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:5c027edf46351627f2151dfc33472bd7ce8a153ae980a389a4c52119f99d620a", size = 6087652, upload-time = "2026-11-20T17:03:24.584Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/44/cc6dc701cd777004e94027fc66b50f455f454b32b9cd3dfcb948c3330969/pdf_inspector-1.27.0-cp38-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:a8922fca09b11971126b8b920bf6969e1a72865ffab1e8e9bef607031df0209d", size = 6664280, upload-time = "2026-11-20T17:03:26.631Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/89/aebad0adcd16072b2c933aa6decde63706f82bca1a568fc459f06a05a6d3/pdf_inspector-1.27.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:124ce64ab3cb9e35abf2ea22216acfb4b06d35d263a9e3139852f7a860674747", size = 6920775, upload-time = "2026-11-20T17:03:28.841Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/36/bb283039ab4551a4d72f72e4aa488fa4b555a4ad8ebe41f10cdbe09500b1/pdf_inspector-1.27.0-cp38-abi3-win_amd64.whl", hash = "sha256:00c7fb71d2c10e3715d51267ecf091cb51fc341bf25591b57ffb35ca84b43fee", size = 6208768, upload-time = "2026-11-20T17:03:31.078Z" },
+]
+
+[[package]]
 name = "pdf2zh"
 version = "1.9.11"
 source = { editable = "." }
@@ -2540,6 +2553,7 @@ dependencies = [
     { name = "azure-ai-translation-text" },
     { name = "babeldoc" },
     { name = "deepl" },
+    { name = "filelock" },
     { name = "fonttools" },
     { name = "gradio" },
     { name = "gradio-pdf" },
@@ -2576,10 +2590,18 @@ backend = [
     { name = "redis" },
 ]
 desktop = [
+    { name = "pdf-inspector" },
+    { name = "pooch" },
     { name = "pywebview", marker = "sys_platform == 'win32'" },
 ]
 mcp = [
     { name = "mcp" },
+]
+ocr = [
+    { name = "pooch" },
+]
+ultrafast = [
+    { name = "pdf-inspector" },
 ]
 
 [package.dev-dependencies]
@@ -2599,6 +2621,7 @@ requires-dist = [
     { name = "babeldoc", specifier = ">=0.1.22,<0.3.0" },
     { name = "celery", marker = "extra == 'backend'" },
     { name = "deepl" },
+    { name = "filelock", specifier = ">=3" },
     { name = "flask", marker = "extra == 'backend'" },
     { name = "fonttools" },
     { name = "gradio", specifier = "<5.36" },
@@ -2613,9 +2636,13 @@ requires-dist = [
     { name = "onnxruntime", marker = "python_full_version >= '3.11'" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "opencv-python-headless" },
+    { name = "pdf-inspector", marker = "extra == 'desktop'", specifier = ">=1.25.2,<2" },
+    { name = "pdf-inspector", marker = "extra == 'ultrafast'", specifier = ">=1.25.2,<2" },
     { name = "pdfminer-six", specifier = "==20250416" },
     { name = "peewee", specifier = ">=3.17.8" },
     { name = "pikepdf" },
+    { name = "pooch", marker = "extra == 'desktop'", specifier = ">=1.8,<2" },
+    { name = "pooch", marker = "extra == 'ocr'", specifier = ">=1.8,<2" },
     { name = "pymupdf", specifier = "<1.25.3" },
     { name = "pywebview", marker = "sys_platform == 'win32' and extra == 'desktop'", specifier = ">=6.2,<7" },
     { name = "redis", marker = "extra == 'backend'" },
@@ -2626,7 +2653,7 @@ requires-dist = [
     { name = "tqdm" },
     { name = "xinference-client" },
 ]
-provides-extras = ["desktop", "backend", "argostranslate", "mcp"]
+provides-extras = ["ocr", "ultrafast", "desktop", "backend", "argostranslate", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2772,6 +2799,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "pooch"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "platformdirs" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/43/85ef45e8b36c6a48546af7b266592dc32d7f67837a6514d111bced6d7d75/pooch-1.9.0.tar.gz", hash = "sha256:de46729579b9857ffd3e741987a2f6d5e0e03219892c167c6578c0091fb511ed", size = 61788, upload-time = "2026-01-30T19:15:09.649Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/2d/d4bf65e47cea8ff2c794a600c4fd1273a7902f268757c531e0ee9f18aa58/pooch-1.9.0-py3-none-any.whl", hash = "sha256:f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b", size = 67175, upload-time = "2026-01-30T19:15:08.36Z" },
 ]
 
 [[package]]

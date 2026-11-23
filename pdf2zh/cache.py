@@ -30,6 +30,8 @@ class _TranslationCache(Model):
 
 
 class TranslationCache:
+    enabled = True
+
     @staticmethod
     def _sort_dict_recursively(obj):
         if isinstance(obj, dict):
@@ -72,6 +74,8 @@ class TranslationCache:
     # Since peewee and the underlying sqlite are thread-safe,
     # get and set operations don't need locks.
     def get(self, original_text: str) -> Optional[str]:
+        if not self.enabled:
+            return None
         try:
             result = _TranslationCache.get_or_none(
                 translate_engine=self.translate_engine,
@@ -85,6 +89,8 @@ class TranslationCache:
         return result.translation if result else None
 
     def set(self, original_text: str, translation: str):
+        if not self.enabled:
+            return
         try:
             _TranslationCache.create(
                 translate_engine=self.translate_engine,

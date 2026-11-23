@@ -22,3 +22,11 @@ https://github.com/ButTaiwan/gonoto-fonts
 For the exact BabelDOC package version and complete dependency resolution, see
 BUILD-INFO.txt and the uv.lock file in the corresponding source tag.
 
+
+Isolated Precise runtime: PDFMathTranslate-next 2.10.2 with BabelDOC 0.7.1.
+https://github.com/PDFMathTranslate-next/PDFMathTranslate-next/releases/tag/v2.10.2
+Corresponding source: https://github.com/PDFMathTranslate-next/PDFMathTranslate-next/tree/v2.10.2
+Rust PDF engine source: https://github.com/funstory-ai/BabelDOC/tree/v0.7.1
+The verified official with-assets Windows archive supplies the embedded Python, installed distributions, license files and offline resources.
+Tesseract language files (eng, chi_sim, chi_tra): https://github.com/tesseract-ocr/tessdata_fast/tree/4.1.0
+License: Apache-2.0, included in tessdata/LICENSE. Archive and language file digests are pinned in script/stage_desktop_engines.py.

@@ -1,3 +1,13 @@
+## v1.9.11-codex.7.6 — 扫描件 OCR、混排空格及 Fast / Precise 引擎
+
+- 桌面和命令行默认使用 Fast 标准引擎。选中的纯图片页会先执行本地 OCR，再按版面区域翻译正文。已有文本层的页面沿用原流程，双语原文页保留原始扫描图。Windows 安装包内置英语、简体和繁体中文识别数据，其他语言首次使用时下载，也可设置 `TESSDATA_PREFIX`。
+- Fast 在译文排版前为相邻的中日韩字母与拉丁字母补空格，例如“采用 HFSS 分析”。已有空格、组合重音和公式占位符继续保留。
+- 命令行新增 `--ultrafast`。该模式按原生 PDF 文字坐标处理文档，跨页并行翻译段落，默认 16 个工作线程。适合有文本层的简单文档，跳过 ONNX、OCR 和字体子集化。
+- 桌面新增 Fast / Precise 排版选择，命令行可使用 `--mode precise`。Windows 安装包随附独立的 PDFMathTranslate-next 2.10.2 和 BabelDOC 0.7.1。Precise 复用所选翻译服务，凭据和 Codex 登录由主程序管理。旧版 `Use BabelDOC` 入口继续使用 0.2.33。
+- 服务列表将“ChatGPT 聊天”标记为已废弃、暂停开发，保留原服务 ID 和已有任务的使用方式。Codex 和 OpenAI 服务独立可用，内置 Codex CLI 为 0.171.0。
+
+[原版 1.x 功能来源](https://github.com/PDFMathTranslate/PDFMathTranslate/tree/8f826d66598e1da21ca4b6cd40a8b4d368f4f055) · [Precise 引擎源码](https://github.com/PDFMathTranslate-next/PDFMathTranslate-next/tree/v2.10.2) · [BabelDOC 0.7.1](https://github.com/funstory-ai/BabelDOC/tree/v0.7.1)
+
 ## v1.9.11-codex.7.5 — OpenAI 模型兼容、本地密钥管理与 Codex CLI 更新
 
 - OpenAI 会从当前 Base URL 的 `/models` 读取模型，也可手动输入 ID。“测试连接”使用当前密钥和选中的模型发送简短的 Chat Completions 请求，最多请求 16 个输出 token。
